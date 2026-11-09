@@ -29,6 +29,12 @@ cmake --install build/local
 The install currently contains the executable. A public library package and its
 consumer test will be added with the engine API.
 
+The future consumer must build against the installed prefix without source-tree
+or private headers and without HTTP/Python dependencies. Its acceptance scenario
+opens an existing store, resolves a collection, obtains its schema, constructs a
+public predicate, and inspects a fixed-snapshot, zero-limit scan. The reserved
+`tests/installed_consumer/` directory is not yet a buildable consumer project.
+
 ## Quality
 
 ```sh
@@ -53,3 +59,30 @@ See [the dependency guide](../../third_party/README.md). The separate
 The initial durability qualification targets Linux x86-64 on a dedicated local
 ext4 volume. A successful scaffold build, including on macOS, does not validate
 engine behavior or durability.
+
+## Validation scope
+
+| Check | What it establishes |
+| --- | --- |
+| Scaffold build and `glamdb.smoke` | The current entry point compiles, starts, and exits successfully. |
+| Formatting, tidy, and negative controls | Configured C++ checks execute and reject deliberate violations. |
+| Dependency build | The selected dependency recipes build/install; engine integration still needs its own probes. |
+| Future integration/fault suites | Engine behavior at the tested boundaries, with recorded inputs and results. |
+| Future environment qualification | Durability and supported limits for the specifically tested platform and storage configuration. |
+
+Only the first three categories have build infrastructure in this checkout.
+The [roadmap](../ROADMAP.md) defines the remaining evidence. Describe checks as
+designed, run with PASS/FAIL, or NOT RUN; a configured target alone is not a pass.
+Do not use proposed test labels or executable names as if they exist already.
+
+Use `local`, `release`, and `asan-ubsan` with the configure/build/test commands
+above when the corresponding suites exist. Lifetime changes require sanitizer
+coverage; reopen and recovery require a fresh process. The eventual qualification
+also needs calibrated fault modeling and dedicated-volume power cuts, which
+ordinary CTest or a macOS build cannot establish on its own.
+
+Record the toolchain and dependency pins, command, exit code, environment,
+fixture/seed, and measured results for reproducibility. Store raw generated
+output under ignored `artifacts/` and retain a reviewable summary or stable
+artifact reference with the change. Keep commands and this status description
+current as targets and suites are added.
