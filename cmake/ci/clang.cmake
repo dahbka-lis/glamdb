@@ -22,6 +22,10 @@ if(instrument AND NOT profile STREQUAL "normal")
         set(sanitizer undefined)
     elseif(profile STREQUAL "msan")
         set(sanitizer memory)
+        # A linked mimalloc runs its initializer before Arrow selects a memory pool.
+        # Use MSan's intercepted system allocator throughout this dependency build.
+        set(ARROW_MIMALLOC OFF CACHE BOOL "Disable custom allocators for MSan" FORCE)
+        set(ARROW_JEMALLOC OFF CACHE BOOL "Disable custom allocators for MSan" FORCE)
         string(APPEND flags " -fsanitize-memory-track-origins=2 -DZSTD_DISABLE_ASM")
     elseif(profile STREQUAL "tsan")
         set(sanitizer thread)

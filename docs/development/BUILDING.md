@@ -235,6 +235,10 @@ LLVM 18.1.8, pinned in the workflow. Instrumentation propagates to Arrow, Iceber
 SQLite, GoogleTest, and transitive source dependencies. Iceberg/Avro's zlib and
 zstd lookups use separately instrumented builds with Arrow's existing versions
 and checksums. Compiled FetchContent dependencies cannot substitute system packages.
+MSan also disables Arrow's mimalloc and jemalloc at build time. Selecting the
+system pool at runtime alone does not stop a linked allocator's pre-main
+initialization; the pinned mimalloc reports an uninitialized THP buffer there.
+Arrow itself remains instrumented, with no MSan suppressions.
 MSan tracks origins. These profiles dynamically link the instrumented C++ runtime;
 the others use the existing static C++ runtime workaround. Standard-library paths
 are explicit, and no sanitizer error is ignored or retried. Hosted MSan/TSan jobs

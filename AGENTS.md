@@ -172,6 +172,7 @@ Quality targets require LLVM major version 18 for both `clang-format` and
 Native CI runs normal, ASan, UBSan, MSan, TSan, and LSan independently via
 `scripts/ci-native.sh`. MSan/TSan rebuild the dependency prefix and pinned
 libc++/libc++abi with instrumentation; other profiles use ordinary dependencies.
+MSan disables Arrow's custom allocators at build time and uses the system allocator.
 CTest discovers GoogleTest cases, and CMake discovers test `.cpp` files within
 the unit, I/O, storage, and fault suites. Tooling tests use unittest discovery.
 Python tests use repository-wide pytest discovery (excluding native tooling,
