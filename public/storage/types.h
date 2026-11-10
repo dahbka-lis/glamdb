@@ -15,12 +15,7 @@ class RecordBatch;
 
 namespace glamdb {
 
-enum class RetryHint : uint8_t {
-    SameIdAfterReconcile,
-    NewOperationId,
-    FixInput,
-    OperatorAction
-};
+enum class RetryHint : uint8_t { SameIdAfterReconcile, NewOperationId, FixInput, OperatorAction };
 
 struct ErrorDetail {
     std::string code;
@@ -33,13 +28,7 @@ template <class T>
 using Result = std::expected<T, ErrorDetail>;
 using Status = Result<void>;
 
-enum class FieldType : uint8_t {
-    String = 1,
-    Bool,
-    Int64,
-    Float64,
-    TimestampUsUtc
-};
+enum class FieldType : uint8_t { String = 1, Bool, Int64, Float64, TimestampUsUtc };
 
 struct FieldSpec {
     std::string name;
@@ -59,8 +48,7 @@ struct TimestampUs {
     bool operator==(const TimestampUs &) const = default;
 };
 
-using Cell = std::variant<std::monostate, std::string, bool, int64_t, double,
-                          TimestampUs>;
+using Cell = std::variant<std::monostate, std::string, bool, int64_t, double, TimestampUs>;
 using Row = std::vector<Cell>;
 
 struct BaseIdentity {
@@ -74,11 +62,7 @@ struct BaseIdentity {
     bool operator==(const BaseIdentity &) const = default;
 };
 
-enum class CommitDisposition : uint8_t {
-    Committed,
-    DefinitelyNotCommitted,
-    CommitUnknown
-};
+enum class CommitDisposition : uint8_t { Committed, DefinitelyNotCommitted, CommitUnknown };
 enum class CommitPhase : uint8_t {
     Validation,
     Binding,

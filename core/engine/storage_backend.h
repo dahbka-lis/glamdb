@@ -39,23 +39,18 @@ class StorageBackend {
 public:
     virtual ~StorageBackend() = default;
     virtual Result<std::unique_ptr<StagedCreate>>
-    PrepareCreate(const StoreInfo &store,
-                  const CreateCollectionRequest &request,
-                  std::string_view attempt_id) = 0;
-    virtual Result<std::unique_ptr<StagedAppend>>
-    PrepareAppend(const StoreInfo &store, const BoundOperation &binding,
-                  const CollectionInfo &collection,
-                  const NormalizedInput &input,
-                  std::chrono::steady_clock::time_point deadline) = 0;
+    PrepareCreate(const StoreInfo &store, const CreateCollectionRequest &request, std::string_view attempt_id) = 0;
+    virtual Result<std::unique_ptr<StagedAppend>> PrepareAppend(const StoreInfo &store, const BoundOperation &binding,
+                                                                const CollectionInfo &collection,
+                                                                const NormalizedInput &input,
+                                                                std::chrono::steady_clock::time_point deadline) = 0;
     // Independent, bidirectional validation: each committed receipt matches
     // exactly one retained snapshot/tag, every tag has that committed receipt,
     // Bound/Failed have none; validate UUID/schema/ancestry and reachable
     // files. Absence is authoritative only after the old SQLite handle is
     // closed.
-    virtual Status
-    VerifyRetained(const StoreInfo &store,
-                   std::span<const CollectionView> collections,
-                   std::span<const OperationRecord> operations) = 0;
+    virtual Status VerifyRetained(const StoreInfo &store, std::span<const CollectionView> collections,
+                                  std::span<const OperationRecord> operations) = 0;
 };
 
 } // namespace glamdb::detail

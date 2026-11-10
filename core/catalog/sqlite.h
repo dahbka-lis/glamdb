@@ -19,13 +19,10 @@ public:
     ~Database();
     Database(const Database &) = delete;
     Database &operator=(const Database &) = delete;
-    void Open(const std::filesystem::path &path, int flags,
-              const std::string &vfs);
+    void Open(const std::filesystem::path &path, int flags, const std::string &vfs);
     void Close();
-    void Execute(std::string_view sql,
-                 std::initializer_list<SqlValue> values = {});
-    std::vector<SqlRow> Query(std::string_view sql,
-                              std::initializer_list<SqlValue> values = {});
+    void Execute(std::string_view sql, std::initializer_list<SqlValue> values = {});
+    std::vector<SqlRow> Query(std::string_view sql, std::initializer_list<SqlValue> values = {});
     int64_t Integer(std::string_view sql);
     std::string Text(std::string_view sql);
     int64_t Changes() const;
@@ -34,8 +31,7 @@ public:
 
 private:
     sqlite3 *connection_ = nullptr;
-    sqlite3_stmt *Prepare(std::string_view sql,
-                          std::initializer_list<SqlValue> values);
+    sqlite3_stmt *Prepare(std::string_view sql, std::initializer_list<SqlValue> values);
     [[noreturn]] void Throw(int code) const;
 };
 

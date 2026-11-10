@@ -15,26 +15,20 @@
 namespace glamdb::detail {
 namespace {
 
-void Check(bool success, std::string_view action,
-           std::string_view code = "IO_ERROR") {
+void Check(bool success, std::string_view action, std::string_view code = "IO_ERROR") {
     if (!success) {
-        throw Failure({std::string(code),
-                       std::string(action) + ": " + std::strerror(errno),
-                       RetryHint::OperatorAction});
+        throw Failure(
+            {std::string(code), std::string(action) + ": " + std::strerror(errno), RetryHint::OperatorAction});
     }
 }
 
 void ValidateRoot(const std::filesystem::path &root) {
-    Require(root.is_absolute() && root == root.lexically_normal() &&
-                root.has_filename() &&
+    Require(root.is_absolute() && root == root.lexically_normal() && root.has_filename() &&
                 root.string().find('\0') == std::string::npos,
-            "INVALID_ARGUMENT",
-            "store root must be a normalized absolute directory path");
+            "INVALID_ARGUMENT", "store root must be a normalized absolute directory path");
     std::error_code error;
-    const auto canonical =
-        std::filesystem::canonical(root.parent_path(), error);
-    Require(!error && canonical == root.parent_path(), "STORE_MISSING",
-            "parent is absent or uses a symlink alias");
+    const auto canonical = std::filesystem::canonical(root.parent_path(), error);
+    Require(!error && canonical == root.parent_path(), "STORE_MISSING", "parent is absent or uses a symlink alias");
 }
 
 std::string Identity(const StoreInfo &info) {
@@ -53,27 +47,20 @@ StoreLease::~StoreLease() {
 }
 
 void StoreLease::Lock() {
-    descriptor_ =
-        open(root_.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    descriptor_ = open(root_.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     Check(descriptor_ >= 0, "open store directory", "STORE_MISSING");
-    Check(flock(descriptor_, LOCK_EX | LOCK_NB) == 0, "store is already owned",
-          "STATE_IN_USE");
+    Check(flock(descriptor_, LOCK_EX | LOCK_NB) == 0, "store is already owned", "STATE_IN_USE");
 }
 
-std::shared_ptr<StoreLease>
-StoreLease::Create(const std::filesystem::path &root, const StoreInfo &info) {
+std::shared_ptr<StoreLease> StoreLease::Create(const std::filesystem::path &root, const StoreInfo &info) {
     ValidateRoot(root);
     const int created = mkdir(root.c_str(), 0700);
-    Check(created == 0, "create new store directory",
-          errno == EEXIST ? "ALREADY_EXISTS" : "IO_ERROR");
+    Check(created == 0, "create new store directory", errno == EEXIST ? "ALREADY_EXISTS" : "IO_ERROR");
     auto lease = std::shared_ptr<StoreLease>(new StoreLease(root));
     lease->Lock();
     lease->WriteMarker("store.identity", Identity(info));
-    Check(mkdirat(lease->descriptor_, "warehouse", 0700) == 0,
-          "create warehouse");
-    const int warehouse =
-        openat(lease->descriptor_, "warehouse",
-               O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    Check(mkdirat(lease->descriptor_, "warehouse", 0700) == 0, "create warehouse");
+    const int warehouse = openat(lease->descriptor_, "warehouse", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     Check(warehouse >= 0, "open warehouse");
     const auto synced = fsync(warehouse);
     const int saved = errno;
@@ -87,36 +74,29 @@ StoreLease::Create(const std::filesystem::path &root, const StoreInfo &info) {
     return lease;
 }
 
-std::shared_ptr<StoreLease> StoreLease::Open(const std::filesystem::path &root,
-                                             const StoreInfo &info) {
+std::shared_ptr<StoreLease> StoreLease::Open(const std::filesystem::path &root, const StoreInfo &info) {
     ValidateRoot(root);
-    Require(
-        std::filesystem::is_directory(std::filesystem::symlink_status(root)),
-        "STORE_MISSING", "store root is missing or a symlink");
+    Require(std::filesystem::is_directory(std::filesystem::symlink_status(root)), "STORE_MISSING",
+            "store root is missing or a symlink");
     auto lease = std::shared_ptr<StoreLease>(new StoreLease(root));
     lease->Lock();
     const auto identity = lease->ReadMarker("store.identity");
-    Require(identity.starts_with("GLAMDB\n1\n"), "UNSUPPORTED_STORE_VERSION",
-            "unknown store identity format");
+    Require(identity.starts_with("GLAMDB\n1\n"), "UNSUPPORTED_STORE_VERSION", "unknown store identity format");
     Require(identity == Identity(info), "STORE_IDENTITY_MISMATCH",
             "store identity or durability profile does not match");
-    Require(lease->ReadMarker("store.ready") == Identity(info),
-            "STORE_INCOMPLETE", "store initialization is incomplete");
-    Require(std::filesystem::is_directory(
-                std::filesystem::symlink_status(root / "warehouse")),
-            "STORE_INCOMPLETE", "warehouse is missing or a symlink");
+    Require(lease->ReadMarker("store.ready") == Identity(info), "STORE_INCOMPLETE",
+            "store initialization is incomplete");
+    Require(std::filesystem::is_directory(std::filesystem::symlink_status(root / "warehouse")), "STORE_INCOMPLETE",
+            "warehouse is missing or a symlink");
     return lease;
 }
 
 void StoreLease::WriteMarker(const char *name, std::string_view contents) {
-    const int file =
-        openat(descriptor_, name,
-               O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    const int file = openat(descriptor_, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     Check(file >= 0, "create immutable store marker");
     size_t offset = 0;
     while (offset < contents.size()) {
-        const auto written =
-            write(file, contents.data() + offset, contents.size() - offset);
+        const auto written = write(file, contents.data() + offset, contents.size() - offset);
         if (written < 0 && errno == EINTR) {
             continue;
         }
@@ -140,28 +120,24 @@ void StoreLease::WriteMarker(const char *name, std::string_view contents) {
 }
 
 std::string StoreLease::ReadMarker(const char *name) {
-    const int file =
-        openat(descriptor_, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    const int file = openat(descriptor_, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     Check(file >= 0, "required store marker is missing", "STORE_INCOMPLETE");
     struct stat stat_buffer {};
-    if (fstat(file, &stat_buffer) != 0 || !S_ISREG(stat_buffer.st_mode) ||
-        stat_buffer.st_size < 0 || stat_buffer.st_size > 512) {
+    if (fstat(file, &stat_buffer) != 0 || !S_ISREG(stat_buffer.st_mode) || stat_buffer.st_size < 0 ||
+        stat_buffer.st_size > 512) {
         close(file);
-        throw Failure(
-            {"CORRUPTION", "invalid store marker", RetryHint::OperatorAction});
+        throw Failure({"CORRUPTION", "invalid store marker", RetryHint::OperatorAction});
     }
     std::string contents(static_cast<size_t>(stat_buffer.st_size), '\0');
     size_t offset = 0;
     while (offset < contents.size()) {
-        const auto read_bytes =
-            read(file, contents.data() + offset, contents.size() - offset);
+        const auto read_bytes = read(file, contents.data() + offset, contents.size() - offset);
         if (read_bytes < 0 && errno == EINTR) {
             continue;
         }
         if (read_bytes <= 0) {
             close(file);
-            throw Failure({"CORRUPTION", "truncated store marker",
-                           RetryHint::OperatorAction});
+            throw Failure({"CORRUPTION", "truncated store marker", RetryHint::OperatorAction});
         }
         offset += static_cast<size_t>(read_bytes);
     }
@@ -172,8 +148,7 @@ std::string StoreLease::ReadMarker(const char *name) {
 void StoreLease::SyncDirectories() {
     auto directory = root_;
     while (!directory.empty()) {
-        const int file = open(directory.c_str(),
-                              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        const int file = open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         Check(file >= 0, "open durable ancestor directory");
         const int synced = fsync(file);
         const int saved = errno;
@@ -198,8 +173,7 @@ std::string NewUuid() {
     std::array<unsigned char, 16> bytes{};
     size_t offset = 0;
     while (offset < bytes.size()) {
-        const auto count =
-            getrandom(bytes.data() + offset, bytes.size() - offset, 0);
+        const auto count = getrandom(bytes.data() + offset, bytes.size() - offset, 0);
         if (count < 0 && errno == EINTR) {
             continue;
         }

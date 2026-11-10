@@ -27,12 +27,10 @@ public:
     Result<CollectionInfo> GetCollection(std::string_view collection_id) const;
     Result<CollectionInfo> ResolveCollection(std::string_view exact_name) const;
     Result<std::vector<CollectionInfo>> ListCollections() const;
-    Result<std::shared_ptr<const arrow::Schema>>
-    Schema(std::string_view collection_id) const;
+    Result<std::shared_ptr<const arrow::Schema>> Schema(std::string_view collection_id) const;
     AppendOutcome AppendDurable(const AppendRequest &request);
-    Result<std::optional<AppendOutcome>>
-    FindAppendOutcome(std::string_view collection_id,
-                      std::string_view operation_id) const;
+    Result<std::optional<AppendOutcome>> FindAppendOutcome(std::string_view collection_id,
+                                                           std::string_view operation_id) const;
     Status Reconcile();
     Status Shutdown(std::chrono::milliseconds timeout);
 

@@ -8,10 +8,8 @@ namespace glamdb::detail {
 
 class StoreLease {
 public:
-    static std::shared_ptr<StoreLease> Create(const std::filesystem::path &root,
-                                              const StoreInfo &info);
-    static std::shared_ptr<StoreLease> Open(const std::filesystem::path &root,
-                                            const StoreInfo &info);
+    static std::shared_ptr<StoreLease> Create(const std::filesystem::path &root, const StoreInfo &info);
+    static std::shared_ptr<StoreLease> Open(const std::filesystem::path &root, const StoreInfo &info);
     ~StoreLease();
     StoreLease(const StoreLease &) = delete;
     StoreLease &operator=(const StoreLease &) = delete;

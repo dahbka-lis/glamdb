@@ -13,18 +13,12 @@ public:
     explicit FakeStorage(std::filesystem::path root) : root(std::move(root)) {
     }
     Result<std::unique_ptr<detail::StagedCreate>>
-    PrepareCreate(const StoreInfo &store,
-                  const CreateCollectionRequest &request,
-                  std::string_view attempt) override;
+    PrepareCreate(const StoreInfo &store, const CreateCollectionRequest &request, std::string_view attempt) override;
     Result<std::unique_ptr<detail::StagedAppend>>
-    PrepareAppend(const StoreInfo &store, const detail::BoundOperation &binding,
-                  const CollectionInfo &collection,
-                  const detail::NormalizedInput &input,
-                  std::chrono::steady_clock::time_point deadline) override;
-    Status VerifyRetained(
-        const StoreInfo &store,
-        std::span<const detail::CollectionView> collections,
-        std::span<const detail::OperationRecord> operations) override;
+    PrepareAppend(const StoreInfo &store, const detail::BoundOperation &binding, const CollectionInfo &collection,
+                  const detail::NormalizedInput &input, std::chrono::steady_clock::time_point deadline) override;
+    Status VerifyRetained(const StoreInfo &store, std::span<const detail::CollectionView> collections,
+                          std::span<const detail::OperationRecord> operations) override;
 
     std::filesystem::path Physical(std::string_view uri) const;
     std::filesystem::path root;

@@ -5,10 +5,9 @@
 
 namespace {
 void Usage() {
-    std::cout
-        << "GlamDB catalog MVP\n"
-           "  glamdb create-store --root ABSOLUTE_PATH --store-id UUID\n"
-           "  glamdb inspect-store --root ABSOLUTE_PATH --store-id UUID\n";
+    std::cout << "GlamDB catalog MVP\n"
+                 "  glamdb create-store --root ABSOLUTE_PATH --store-id UUID\n"
+                 "  glamdb inspect-store --root ABSOLUTE_PATH --store-id UUID\n";
 }
 } // namespace
 
@@ -18,8 +17,7 @@ int main(int argc, char **argv) try {
         return 0;
     }
     const std::string_view command = argv[1];
-    if (argc != 6 ||
-        (command != "create-store" && command != "inspect-store")) {
+    if (argc != 6 || (command != "create-store" && command != "inspect-store")) {
         Usage();
         return 2;
     }
@@ -36,25 +34,19 @@ int main(int argc, char **argv) try {
             return 2;
         }
     }
-    const auto opened = command == "create-store"
-                            ? glamdb::CreateStore({id, root})
-                            : glamdb::OpenExisting({root, id});
+    const auto opened = command == "create-store" ? glamdb::CreateStore({id, root}) : glamdb::OpenExisting({root, id});
     if (!opened) {
-        std::cerr << opened.error().code << ": " << opened.error().message
-                  << '\n';
+        std::cerr << opened.error().code << ": " << opened.error().message << '\n';
         return 1;
     }
     const auto &info = (*opened)->GetStoreInfo();
     // StoreInfo contains validated UUID/profile tokens, never arbitrary
     // strings.
-    std::cout << "{\"store_id\":\"" << info.store_id << "\",\"profile_id\":\""
-              << info.profile_id
-              << "\",\"format_version\":" << info.format_version
-              << ",\"durability_validation\":\"designed\"}\n";
+    std::cout << "{\"store_id\":\"" << info.store_id << "\",\"profile_id\":\"" << info.profile_id
+              << "\",\"format_version\":" << info.format_version << ",\"durability_validation\":\"designed\"}\n";
     const auto closed = (*opened)->Shutdown(std::chrono::milliseconds(5000));
     if (!closed) {
-        std::cerr << closed.error().code << ": " << closed.error().message
-                  << '\n';
+        std::cerr << closed.error().code << ": " << closed.error().message << '\n';
         return 1;
     }
     return 0;

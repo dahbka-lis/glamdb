@@ -10,8 +10,7 @@ int main(int argc, char **argv) try {
     const std::string id = "00000000-0000-0000-0000-000000000001";
     {
         const auto created = glamdb::CreateStore({id, root.string()});
-        if (!created || (*created)->GetStoreInfo().store_id != id ||
-            !(*created)->ListCollections()->empty()) {
+        if (!created || (*created)->GetStoreInfo().store_id != id || !(*created)->ListCollections()->empty()) {
             return 2;
         }
         if (!(*created)->Shutdown(std::chrono::milliseconds(1000))) {
@@ -19,9 +18,7 @@ int main(int argc, char **argv) try {
         }
     }
     const auto opened = glamdb::OpenExisting({root.string(), id});
-    if (!opened || (*opened)
-                       ->GetCollection("00112233-4455-6677-8899-aabbccddeeff")
-                       .has_value()) {
+    if (!opened || (*opened)->GetCollection("00112233-4455-6677-8899-aabbccddeeff").has_value()) {
         return 4;
     }
     return (*opened)->Shutdown(std::chrono::milliseconds(1000)) ? 0 : 5;

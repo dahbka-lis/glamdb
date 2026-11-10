@@ -13,8 +13,7 @@ std::atomic<int> next_id{0};
 } // namespace
 
 JournalFaultVfs::JournalFaultVfs()
-    : parent_(sqlite3_vfs_find(nullptr)),
-      name_("glamdb-journal-fault-" + std::to_string(++next_id)) {
+    : parent_(sqlite3_vfs_find(nullptr)), name_("glamdb-journal-fault-" + std::to_string(++next_id)) {
     detail::Require(parent_ != nullptr, "INTERNAL", "default VFS is missing");
     // Retain the original pAppData: the parent's other callbacks use it.
     vfs_ = *parent_;
@@ -25,8 +24,7 @@ JournalFaultVfs::JournalFaultVfs()
         std::lock_guard lock(registry_mutex);
         registry[&vfs_] = this;
     }
-    detail::Require(sqlite3_vfs_register(&vfs_, 0) == SQLITE_OK, "INTERNAL",
-                    "cannot register fault VFS");
+    detail::Require(sqlite3_vfs_register(&vfs_, 0) == SQLITE_OK, "INTERNAL", "cannot register fault VFS");
 }
 
 JournalFaultVfs::~JournalFaultVfs() {
@@ -43,8 +41,7 @@ void JournalFaultVfs::Disarm() {
     remaining_ = 0;
 }
 
-int JournalFaultVfs::Delete(sqlite3_vfs *vfs, const char *path,
-                            int sync_directory) {
+int JournalFaultVfs::Delete(sqlite3_vfs *vfs, const char *path, int sync_directory) {
     JournalFaultVfs *owner = nullptr;
     {
         std::lock_guard lock(registry_mutex);
@@ -54,15 +51,12 @@ int JournalFaultVfs::Delete(sqlite3_vfs *vfs, const char *path,
         }
         owner = found->second;
     }
-    const bool journal =
-        path != nullptr && std::string_view(path).ends_with("-journal");
-    const bool fail = journal && owner->remaining_.load() > 0 &&
-                      owner->remaining_.fetch_sub(1) == 1;
+    const bool journal = path != nullptr && std::string_view(path).ends_with("-journal");
+    const bool fail = journal && owner->remaining_.load() > 0 && owner->remaining_.fetch_sub(1) == 1;
     if (fail && !owner->after_unlink_) {
         return SQLITE_IOERR_DELETE;
     }
-    const auto result =
-        owner->parent_->xDelete(owner->parent_, path, sync_directory);
+    const auto result = owner->parent_->xDelete(owner->parent_, path, sync_directory);
     return fail && result == SQLITE_OK ? SQLITE_IOERR_DIR_FSYNC : result;
 }
 

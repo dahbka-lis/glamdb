@@ -19,14 +19,11 @@ std::string Sha256(std::string_view input);
 Result<std::string> EncodeSchema(const SchemaSpec &schema);
 Result<SchemaSpec> DecodeSchema(std::string_view bytes);
 Result<std::string> SchemaFingerprint(const SchemaSpec &schema);
-Result<NormalizedInput> NormalizeRows(const SchemaSpec &schema,
-                                      std::string_view collection_id,
+Result<NormalizedInput> NormalizeRows(const SchemaSpec &schema, std::string_view collection_id,
                                       const std::vector<Row> &rows);
-Result<NormalizedInput> NormalizeBatches(
-    const SchemaSpec &schema, std::string_view collection_id,
-    const std::vector<std::shared_ptr<arrow::RecordBatch>> &batches);
-Result<size_t> InputReservation(
-    const SchemaSpec &schema,
-    const std::vector<std::shared_ptr<arrow::RecordBatch>> &batches);
+Result<NormalizedInput> NormalizeBatches(const SchemaSpec &schema, std::string_view collection_id,
+                                         const std::vector<std::shared_ptr<arrow::RecordBatch>> &batches);
+Result<size_t> InputReservation(const SchemaSpec &schema,
+                                const std::vector<std::shared_ptr<arrow::RecordBatch>> &batches);
 
 } // namespace glamdb::detail

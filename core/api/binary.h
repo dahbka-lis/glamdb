@@ -15,16 +15,13 @@ struct Failure : std::runtime_error {
     int native_code = 0;
     std::optional<CommitPhase> phase;
     explicit Failure(ErrorDetail error, bool unknown = false)
-        : std::runtime_error(error.message), detail(std::move(error)),
-          uncertain(unknown) {
+        : std::runtime_error(error.message), detail(std::move(error)), uncertain(unknown) {
     }
 };
 
-inline void Require(bool condition, std::string_view code,
-                    std::string_view message) {
+inline void Require(bool condition, std::string_view code, std::string_view message) {
     if (!condition) {
-        throw Failure({std::string(code), std::string(message),
-                       RetryHint::OperatorAction});
+        throw Failure({std::string(code), std::string(message), RetryHint::OperatorAction});
     }
 }
 
@@ -40,8 +37,7 @@ struct Encoder {
         }
     }
     void Text(std::string_view text) {
-        Require(text.size() <= 16ULL * 1024 * 1024, "RESOURCE_EXHAUSTED",
-                "encoded string too large");
+        Require(text.size() <= 16ULL * 1024 * 1024, "RESOURCE_EXHAUSTED", "encoded string too large");
         Number(static_cast<uint32_t>(text.size()));
         bytes.append(text);
     }
@@ -58,15 +54,12 @@ struct Decoder {
     size_t position = 0;
     template <class T>
     T Number() {
-        Require(position <= bytes.size() &&
-                    sizeof(T) <= bytes.size() - position,
-                "CORRUPTION", "truncated catalog record");
+        Require(position <= bytes.size() && sizeof(T) <= bytes.size() - position, "CORRUPTION",
+                "truncated catalog record");
         using U = std::make_unsigned_t<T>;
         U value = 0;
         for (size_t i = 0; i < sizeof(T); ++i) {
-            value |=
-                static_cast<U>(static_cast<unsigned char>(bytes[position++]))
-                << (i * 8);
+            value |= static_cast<U>(static_cast<unsigned char>(bytes[position++])) << (i * 8);
         }
         return std::bit_cast<T>(value);
     }
@@ -77,8 +70,7 @@ struct Decoder {
     }
     std::string Text() {
         const auto size = Number<uint32_t>();
-        Require(size <= bytes.size() - position, "CORRUPTION",
-                "truncated catalog string");
+        Require(size <= bytes.size() - position, "CORRUPTION", "truncated catalog string");
         auto text = std::string(bytes.substr(position, size));
         position += size;
         return text;
@@ -90,8 +82,7 @@ struct Decoder {
         return Number<int64_t>();
     }
     void End() const {
-        Require(position == bytes.size(), "CORRUPTION",
-                "unexpected catalog record suffix");
+        Require(position == bytes.size(), "CORRUPTION", "unexpected catalog record suffix");
     }
 };
 

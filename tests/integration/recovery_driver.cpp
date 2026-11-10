@@ -17,14 +17,10 @@ int main(int argc, char **argv) try {
     const std::string mode = argv[1];
     const std::filesystem::path root = argv[2];
     auto backend = std::make_shared<test::FakeStorage>(root);
-    auto opened = mode == "create"
-                      ? detail::EngineFactory::Create(
-                            {test::store_id, root.string()}, backend)
-                      : detail::EngineFactory::Open(
-                            {root.string(), test::store_id}, backend);
+    auto opened = mode == "create" ? detail::EngineFactory::Create({test::store_id, root.string()}, backend)
+                                   : detail::EngineFactory::Open({root.string(), test::store_id}, backend);
     if (!opened) {
-        std::cerr << opened.error().code << ": " << opened.error().message
-                  << '\n';
+        std::cerr << opened.error().code << ": " << opened.error().message << '\n';
         return 1;
     }
     auto engine = *opened;
@@ -38,16 +34,14 @@ int main(int argc, char **argv) try {
             return 3;
         }
         sqlite3 *database = nullptr;
-        if (sqlite3_open_v2((root / "catalog.sqlite").c_str(), &database,
-                            SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK) {
+        if (sqlite3_open_v2((root / "catalog.sqlite").c_str(), &database, SQLITE_OPEN_READWRITE, nullptr) !=
+            SQLITE_OK) {
             return 4;
         }
         const auto sql = [&](const char *text) {
-            return sqlite3_exec(database, text, nullptr, nullptr, nullptr) ==
-                   SQLITE_OK;
+            return sqlite3_exec(database, text, nullptr, nullptr, nullptr) == SQLITE_OK;
         };
-        if (!sql("PRAGMA synchronous=EXTRA") || !sql("PRAGMA cache_size=1") ||
-            !sql("BEGIN IMMEDIATE") ||
+        if (!sql("PRAGMA synchronous=EXTRA") || !sql("PRAGMA cache_size=1") || !sql("BEGIN IMMEDIATE") ||
             !sql("CREATE TABLE interrupted_spill(value BLOB)")) {
             return 5;
         }
@@ -59,9 +53,8 @@ int main(int argc, char **argv) try {
         _exit(79);
     }
     if (mode == "create") {
-        const auto collection = engine->CreateCollection(
-            {test::collection_id, "events",
-             SchemaSpec{{{"n", FieldType::Int64, true}}}});
+        const auto collection =
+            engine->CreateCollection({test::collection_id, "events", SchemaSpec{{{"n", FieldType::Int64, true}}}});
         if (collection.disposition != CommitDisposition::Committed) {
             return 7;
         }
@@ -81,21 +74,18 @@ int main(int argc, char **argv) try {
     }
     AppendOutcome outcome;
     if (mode.starts_with("lookup-")) {
-        const auto found =
-            engine->FindAppendOutcome(test::collection_id, operation);
+        const auto found = engine->FindAppendOutcome(test::collection_id, operation);
         if (!found || !found->has_value()) {
             return 8;
         }
         outcome = test::Present(found.value());
     } else {
-        outcome =
-            engine->AppendDurable({test::collection_id,
-                                   operation,
-                                   {mode == "read" || mode == "create"
-                                        ? SnapshotPreconditionKind::NoSnapshot
-                                        : SnapshotPreconditionKind::Any,
-                                    0},
-                                   {test::Batch()}});
+        outcome = engine->AppendDurable(
+            {test::collection_id,
+             operation,
+             {mode == "read" || mode == "create" ? SnapshotPreconditionKind::NoSnapshot : SnapshotPreconditionKind::Any,
+              0},
+             {test::Batch()}});
     }
     const auto json = json_adapter::ToJson(outcome);
     if (!json) {

@@ -23,50 +23,27 @@ protected:
     std::shared_ptr<DurableSqliteCatalogStore> catalog;
 
     void SetUp() override {
-        catalog = DurableSqliteCatalogStore::Create(
-            temporary.path / "catalog.sqlite", info, {});
+        catalog = DurableSqliteCatalogStore::Create(temporary.path / "catalog.sqlite", info, {});
     }
     CollectionInfo CreateCollection() {
-        CollectionInfo collection{collection_id,
-                                  "events",
-                                  test::table_uuid,
-                                  SchemaSpec{{{"n", FieldType::Int64, true}}},
-                                  0,
-                                  std::nullopt};
+        CollectionInfo collection{
+            collection_id, "events", test::table_uuid, SchemaSpec{{{"n", FieldType::Int64, true}}}, 0, std::nullopt};
         return catalog->PublishCreate(
             collection, [](std::string_view) -> Status { return {}; },
-            [&] {
-                return catalog->InsertTable("columnar", "events",
-                                            Location("initial"));
-            });
+            [&] { return catalog->InsertTable("columnar", "events", Location("initial")); });
     }
     static std::string Location(std::string_view name) {
-        return "store://" + std::string(store_id) + "/warehouse/" +
-               std::string(name) + ".json";
+        return "store://" + std::string(store_id) + "/warehouse/" + std::string(name) + ".json";
     }
     BoundOperation Bind() {
-        BoundOperation bound{collection_id,
-                             operation_id,
-                             std::string(64, 'a'),
-                             1,
-                             catalog->Base(collection_id),
+        BoundOperation bound{collection_id,   operation_id, std::string(64, 'a'), 1, catalog->Base(collection_id),
                              test::attempt_id};
         catalog->BindOperation(bound);
         return bound;
     }
     AppendResult Receipt() {
-        return {collection_id,
-                operation_id,
-                std::string(64, 'a'),
-                1,
-                9007199254740993LL,
-                std::nullopt,
-                3,
-                1,
-                123,
-                1700000000000000LL,
-                info.profile_id,
-                1};
+        return {collection_id, operation_id,       std::string(64, 'a'), 1, 9007199254740993LL, std::nullopt, 3, 1,
+                123,           1700000000000000LL, info.profile_id,      1};
     }
 };
 
@@ -82,8 +59,7 @@ TEST_F(CatalogTest, WorkingConnectionSettingsAndMissingOpen) {
     const auto missing = temporary.path / "missing.sqlite";
     EXPECT_THROW(DurableSqliteCatalogStore::Open(missing, info, {}), Failure);
     EXPECT_FALSE(std::filesystem::exists(missing));
-    EXPECT_THROW(DurableSqliteCatalogStore::Open(":memory:", info, {}),
-                 Failure);
+    EXPECT_THROW(DurableSqliteCatalogStore::Open(":memory:", info, {}), Failure);
 }
 
 TEST_F(CatalogTest, GuardAndOuterCommitOwnPointerAndReceipt) {
@@ -99,13 +75,9 @@ TEST_F(CatalogTest, GuardAndOuterCommitOwnPointerAndReceipt) {
             return {};
         },
         [&]() -> iceberg::Status {
-            EXPECT_EQ(test::Present(
-                          catalog->FindOperation(collection_id, operation_id))
-                          .state,
-                      OperationState::Bound);
+            EXPECT_EQ(test::Present(catalog->FindOperation(collection_id, operation_id)).state, OperationState::Bound);
             const auto updated = catalog->UpdateTableMetadataLocation(
-                "columnar", "events", Location("next"),
-                bound.base.metadata_location, bound.base.metadata_location);
+                "columnar", "events", Location("next"), bound.base.metadata_location, bound.base.metadata_location);
             if (!updated) {
                 return std::unexpected(updated.error());
             }
@@ -113,48 +85,38 @@ TEST_F(CatalogTest, GuardAndOuterCommitOwnPointerAndReceipt) {
             return {};
         });
     EXPECT_TRUE(guard_ran);
-    EXPECT_EQ(catalog->Base(collection_id).current_snapshot_id,
-              Receipt().snapshot_id);
+    EXPECT_EQ(catalog->Base(collection_id).current_snapshot_id, Receipt().snapshot_id);
     const auto before = catalog->FindOperation(collection_id, operation_id);
     ASSERT_EQ(test::Present(before).state, OperationState::Committed);
     EXPECT_EQ(test::Present(test::Present(before).outcome).result, Receipt());
     catalog.reset();
-    catalog = DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite",
-                                              info, {});
-    EXPECT_EQ(test::Present(catalog->FindOperation(collection_id, operation_id))
-                  .outcome_bytes,
+    catalog = DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite", info, {});
+    EXPECT_EQ(test::Present(catalog->FindOperation(collection_id, operation_id)).outcome_bytes,
               test::Present(before).outcome_bytes);
     EXPECT_EQ(catalog->Profile().synchronous, 3);
-    EXPECT_FALSE(catalog->UpdateTableMetadataLocation(
-        "columnar", "events", Location("bad"), Location("next"),
-        Location("next")));
+    EXPECT_FALSE(catalog->UpdateTableMetadataLocation("columnar", "events", Location("bad"), Location("next"),
+                                                      Location("next")));
 }
 
 TEST_F(CatalogTest, NestedFailurePoisonsOuterEvenIfCallerIgnoresIt) {
     CreateCollection();
     const auto bound = Bind();
-    EXPECT_THROW(
-        catalog->PublishAppend(
-            bound, Receipt(), [](std::string_view) -> Status { return {}; },
-            [&] {
-                const auto ignored =
-                    catalog->RunInTransaction([&]() -> iceberg::Status {
-                        const auto changed =
-                            catalog->UpdateTableMetadataLocation(
-                                "columnar", "events", Location("next"),
-                                bound.base.metadata_location,
-                                bound.base.metadata_location);
-                        EXPECT_TRUE(changed);
-                        return iceberg::IOError("abort nested scope");
-                    });
-                EXPECT_FALSE(ignored);
-                return iceberg::Status{};
-            }),
-        Failure);
+    EXPECT_THROW(catalog->PublishAppend(
+                     bound, Receipt(), [](std::string_view) -> Status { return {}; },
+                     [&] {
+                         const auto ignored = catalog->RunInTransaction([&]() -> iceberg::Status {
+                             const auto changed = catalog->UpdateTableMetadataLocation(
+                                 "columnar", "events", Location("next"), bound.base.metadata_location,
+                                 bound.base.metadata_location);
+                             EXPECT_TRUE(changed);
+                             return iceberg::IOError("abort nested scope");
+                         });
+                         EXPECT_FALSE(ignored);
+                         return iceberg::Status{};
+                     }),
+                 Failure);
     EXPECT_EQ(catalog->Base(collection_id), bound.base);
-    EXPECT_EQ(test::Present(catalog->FindOperation(collection_id, operation_id))
-                  .state,
-              OperationState::Bound);
+    EXPECT_EQ(test::Present(catalog->FindOperation(collection_id, operation_id)).state, OperationState::Bound);
 }
 
 TEST_F(CatalogTest, ExactBaseRejectsMetadataOnlyChangeAndRequiresGuard) {
@@ -163,8 +125,7 @@ TEST_F(CatalogTest, ExactBaseRejectsMetadataOnlyChangeAndRequiresGuard) {
     bound.base.metadata_location = Location("different-same-null-snapshot");
     bool body_ran = false;
     EXPECT_THROW(catalog->PublishAppend(
-                     bound, Receipt(),
-                     [](std::string_view) -> Status { return {}; },
+                     bound, Receipt(), [](std::string_view) -> Status { return {}; },
                      [&] {
                          body_ran = true;
                          return iceberg::Status{};
@@ -172,26 +133,21 @@ TEST_F(CatalogTest, ExactBaseRejectsMetadataOnlyChangeAndRequiresGuard) {
                  Failure);
     EXPECT_FALSE(body_ran);
     bound.base = catalog->Base(collection_id);
-    EXPECT_THROW(catalog->PublishAppend(bound, Receipt(), {},
-                                        [] { return iceberg::Status{}; }),
-                 Failure);
+    EXPECT_THROW(catalog->PublishAppend(bound, Receipt(), {}, [] { return iceberg::Status{}; }), Failure);
 }
 
 TEST_F(CatalogTest, PermanentBindingConflictFailureCapacityAndFence) {
     CreateCollection();
     const auto bound = Bind();
     EXPECT_THROW(catalog->BindOperation(bound), Failure);
-    const AppendOutcome failure{
-        operation_id,
-        CommitDisposition::DefinitelyNotCommitted,
-        CommitPhase::Data,
-        std::nullopt,
-        ErrorDetail{"IO_ERROR", "disk full", RetryHint::NewOperationId},
-        std::nullopt};
+    const AppendOutcome failure{operation_id,
+                                CommitDisposition::DefinitelyNotCommitted,
+                                CommitPhase::Data,
+                                std::nullopt,
+                                ErrorDetail{"IO_ERROR", "disk full", RetryHint::NewOperationId},
+                                std::nullopt};
     catalog->RecordFailure(bound, failure);
-    EXPECT_EQ(test::Present(catalog->FindOperation(collection_id, operation_id))
-                  .outcome,
-              failure);
+    EXPECT_EQ(test::Present(catalog->FindOperation(collection_id, operation_id)).outcome, failure);
     EXPECT_THROW(catalog->RecordFailure(bound, failure), Failure);
     const auto initial = catalog->FenceValue();
     catalog->DurabilityFence();
@@ -199,29 +155,20 @@ TEST_F(CatalogTest, PermanentBindingConflictFailureCapacityAndFence) {
     catalog.reset();
     Limits limits;
     limits.max_operations = 1;
-    catalog = DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite",
-                                              info, limits);
+    catalog = DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite", info, limits);
     auto second = bound;
     second.operation_id = "00000000-0000-0000-0000-000000000005";
     EXPECT_THROW(catalog->BindOperation(second), Failure);
-    EXPECT_EQ(test::Present(catalog->FindOperation(collection_id, operation_id))
-                  .outcome,
-              failure);
+    EXPECT_EQ(test::Present(catalog->FindOperation(collection_id, operation_id)).outcome, failure);
 }
 
 TEST_F(CatalogTest, IncompatibleVersionOrMissingSchemaNeverReinitializes) {
     catalog.reset();
     sqlite3 *connection = nullptr;
-    ASSERT_EQ(
-        sqlite3_open((temporary.path / "catalog.sqlite").c_str(), &connection),
-        SQLITE_OK);
-    ASSERT_EQ(sqlite3_exec(connection, "PRAGMA user_version=2", nullptr,
-                           nullptr, nullptr),
-              SQLITE_OK);
+    ASSERT_EQ(sqlite3_open((temporary.path / "catalog.sqlite").c_str(), &connection), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(connection, "PRAGMA user_version=2", nullptr, nullptr, nullptr), SQLITE_OK);
     ASSERT_EQ(sqlite3_close(connection), SQLITE_OK);
-    EXPECT_THROW(DurableSqliteCatalogStore::Open(
-                     temporary.path / "catalog.sqlite", info, {}),
-                 Failure);
+    EXPECT_THROW(DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite", info, {}), Failure);
 }
 
 TEST_F(CatalogTest, WideSchemaAndHashVersionsDoNotAliasSupportedInt32Values) {
@@ -229,33 +176,18 @@ TEST_F(CatalogTest, WideSchemaAndHashVersionsDoNotAliasSupportedInt32Values) {
     Bind();
     catalog.reset();
     sqlite3 *connection = nullptr;
-    ASSERT_EQ(
-        sqlite3_open((temporary.path / "catalog.sqlite").c_str(), &connection),
-        SQLITE_OK);
-    ASSERT_EQ(sqlite3_exec(connection,
-                           "UPDATE operations SET hash_version=4294967297",
-                           nullptr, nullptr, nullptr),
+    ASSERT_EQ(sqlite3_open((temporary.path / "catalog.sqlite").c_str(), &connection), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(connection, "UPDATE operations SET hash_version=4294967297", nullptr, nullptr, nullptr),
               SQLITE_OK);
     ASSERT_EQ(sqlite3_close(connection), SQLITE_OK);
-    EXPECT_THROW(DurableSqliteCatalogStore::Open(
-                     temporary.path / "catalog.sqlite", info, {}),
-                 Failure);
-    ASSERT_EQ(
-        sqlite3_open((temporary.path / "catalog.sqlite").c_str(), &connection),
-        SQLITE_OK);
-    ASSERT_EQ(sqlite3_exec(connection, "UPDATE operations SET hash_version=1",
-                           nullptr, nullptr, nullptr),
+    EXPECT_THROW(DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite", info, {}), Failure);
+    ASSERT_EQ(sqlite3_open((temporary.path / "catalog.sqlite").c_str(), &connection), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(connection, "UPDATE operations SET hash_version=1", nullptr, nullptr, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(connection, "UPDATE collections SET schema_id=4294967296,spec_id=4294967296", nullptr,
+                           nullptr, nullptr),
               SQLITE_OK);
-    ASSERT_EQ(
-        sqlite3_exec(
-            connection,
-            "UPDATE collections SET schema_id=4294967296,spec_id=4294967296",
-            nullptr, nullptr, nullptr),
-        SQLITE_OK);
     ASSERT_EQ(sqlite3_close(connection), SQLITE_OK);
-    EXPECT_THROW(DurableSqliteCatalogStore::Open(
-                     temporary.path / "catalog.sqlite", info, {}),
-                 Failure);
+    EXPECT_THROW(DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite", info, {}), Failure);
 }
 
 } // namespace

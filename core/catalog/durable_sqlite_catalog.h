@@ -45,12 +45,10 @@ class DurableSqliteCatalogStore final : public iceberg::sql::CatalogStore {
 public:
     using Guard = std::function<Status(std::string_view)>;
     using Body = std::function<iceberg::Status()>;
-    static std::shared_ptr<DurableSqliteCatalogStore>
-    Create(const std::filesystem::path &path, StoreInfo info, Limits limits,
-           std::string vfs = {});
-    static std::shared_ptr<DurableSqliteCatalogStore>
-    Open(const std::filesystem::path &path, StoreInfo info, Limits limits,
-         std::string vfs = {});
+    static std::shared_ptr<DurableSqliteCatalogStore> Create(const std::filesystem::path &path, StoreInfo info,
+                                                             Limits limits, std::string vfs = {});
+    static std::shared_ptr<DurableSqliteCatalogStore> Open(const std::filesystem::path &path, StoreInfo info,
+                                                           Limits limits, std::string vfs = {});
     void Reopen();
     void Close();
     CatalogProfile Profile();
@@ -59,53 +57,37 @@ public:
     CollectionInfo Resolve(std::string_view name);
     BaseIdentity Base(std::string_view id);
     std::vector<OperationRecord> Operations();
-    std::optional<OperationRecord> FindOperation(std::string_view collection_id,
-                                                 std::string_view operation_id);
+    std::optional<OperationRecord> FindOperation(std::string_view collection_id, std::string_view operation_id);
     void BindOperation(const BoundOperation &binding);
-    void RecordFailure(const BoundOperation &binding,
-                       const AppendOutcome &outcome);
-    CollectionInfo PublishCreate(CollectionInfo collection, const Guard &guard,
-                                 const Body &body);
-    void PublishAppend(const BoundOperation &binding,
-                       const AppendResult &result, const Guard &guard,
-                       const Body &body);
+    void RecordFailure(const BoundOperation &binding, const AppendOutcome &outcome);
+    CollectionInfo PublishCreate(CollectionInfo collection, const Guard &guard, const Body &body);
+    void PublishAppend(const BoundOperation &binding, const AppendResult &result, const Guard &guard, const Body &body);
     void DurabilityFence();
     int64_t FenceValue();
     void ValidateInventory();
 
     iceberg::Status Initialize() override;
     iceberg::Result<std::vector<std::string>> ListNamespaceNames() override;
-    iceberg::Result<std::vector<iceberg::sql::NamespaceProperty>>
-    GetNamespaceProperties(std::string_view ns) override;
-    iceberg::Status
-    InsertNamespaceProperty(std::string_view ns, std::string_view key,
-                            std::optional<std::string_view> value) override;
-    iceberg::Status DeleteNamespaceProperty(std::string_view ns,
-                                            std::string_view key) override;
+    iceberg::Result<std::vector<iceberg::sql::NamespaceProperty>> GetNamespaceProperties(std::string_view ns) override;
+    iceberg::Status InsertNamespaceProperty(std::string_view ns, std::string_view key,
+                                            std::optional<std::string_view> value) override;
+    iceberg::Status DeleteNamespaceProperty(std::string_view ns, std::string_view key) override;
     iceberg::Result<int64_t> DeleteNamespace(std::string_view ns) override;
-    iceberg::Result<std::vector<std::string>>
-    ListTableNames(std::string_view ns) override;
-    iceberg::Result<bool> TableExists(std::string_view ns,
-                                      std::string_view name) override;
-    iceberg::Result<std::optional<std::string>>
-    GetTableMetadataLocation(std::string_view ns,
-                             std::string_view name) override;
-    iceberg::Status InsertTable(std::string_view ns, std::string_view name,
-                                std::string_view location) override;
-    iceberg::Result<int64_t> UpdateTableMetadataLocation(
-        std::string_view ns, std::string_view name, std::string_view location,
-        std::string_view previous, std::string_view expected) override;
-    iceberg::Result<int64_t> DeleteTable(std::string_view ns,
-                                         std::string_view name) override;
-    iceberg::Result<int64_t> RenameTable(std::string_view from_ns,
-                                         std::string_view from_name,
-                                         std::string_view to_ns,
+    iceberg::Result<std::vector<std::string>> ListTableNames(std::string_view ns) override;
+    iceberg::Result<bool> TableExists(std::string_view ns, std::string_view name) override;
+    iceberg::Result<std::optional<std::string>> GetTableMetadataLocation(std::string_view ns,
+                                                                         std::string_view name) override;
+    iceberg::Status InsertTable(std::string_view ns, std::string_view name, std::string_view location) override;
+    iceberg::Result<int64_t> UpdateTableMetadataLocation(std::string_view ns, std::string_view name,
+                                                         std::string_view location, std::string_view previous,
+                                                         std::string_view expected) override;
+    iceberg::Result<int64_t> DeleteTable(std::string_view ns, std::string_view name) override;
+    iceberg::Result<int64_t> RenameTable(std::string_view from_ns, std::string_view from_name, std::string_view to_ns,
                                          std::string_view to_name) override;
     iceberg::Status RunInTransaction(const Body &body) override;
 
 private:
-    DurableSqliteCatalogStore(std::filesystem::path path, StoreInfo info,
-                              Limits limits, std::string vfs);
+    DurableSqliteCatalogStore(std::filesystem::path path, StoreInfo info, Limits limits, std::string vfs);
     struct Publication {
         bool creating = false;
         std::string name;

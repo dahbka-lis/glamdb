@@ -16,18 +16,13 @@ protected:
     test::JournalFaultVfs vfs;
     test::TempDir temporary;
     std::filesystem::path root = temporary.path / "store";
-    std::shared_ptr<test::FakeStorage> backend =
-        std::make_shared<test::FakeStorage>(root);
+    std::shared_ptr<test::FakeStorage> backend = std::make_shared<test::FakeStorage>(root);
     std::shared_ptr<Engine> engine;
     void SetUp() override {
-        const auto created = detail::EngineFactory::Create(
-            {test::store_id, root.string()}, backend, vfs.Name());
+        const auto created = detail::EngineFactory::Create({test::store_id, root.string()}, backend, vfs.Name());
         ASSERT_TRUE(created);
         engine = *created;
-        ASSERT_EQ(engine
-                      ->CreateCollection(
-                          {test::collection_id, "events",
-                           SchemaSpec{{{"n", FieldType::Int64, true}}}})
+        ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", SchemaSpec{{{"n", FieldType::Int64, true}}}})
                       .disposition,
                   CommitDisposition::Committed);
     }
@@ -36,8 +31,7 @@ protected:
     }
 };
 
-TEST_F(CoordinatorFaultTest,
-       LostOuterCommitResultBlocksWritersAndFenceFailureKeepsBarrier) {
+TEST_F(CoordinatorFaultTest, LostOuterCommitResultBlocksWritersAndFenceFailureKeepsBarrier) {
     vfs.Arm(2, true); // binding succeeds; final publication unlinks journal,
                       // then reports I/O failure.
     const auto unknown = engine->AppendDurable(Request());
@@ -45,48 +39,31 @@ TEST_F(CoordinatorFaultTest,
     EXPECT_EQ(unknown.phase, CommitPhase::CatalogCommit);
     ASSERT_TRUE(unknown.recovery);
     EXPECT_TRUE(test::Present(unknown.recovery).publication_started);
-    EXPECT_EQ(
-        test::Present(
-            engine->FindAppendOutcome(test::collection_id, test::operation_id)
-                .value())
-            .disposition,
-        CommitDisposition::CommitUnknown);
-    EXPECT_EQ(engine->AppendDurable(Request()).disposition,
+    EXPECT_EQ(test::Present(engine->FindAppendOutcome(test::collection_id, test::operation_id).value()).disposition,
               CommitDisposition::CommitUnknown);
+    EXPECT_EQ(engine->AppendDurable(Request()).disposition, CommitDisposition::CommitUnknown);
     auto different = Request();
     different.batches = {test::Batch({5})};
-    EXPECT_EQ(test::Present(engine->AppendDurable(different).error).code,
-              "OPERATION_CONFLICT");
-    EXPECT_EQ(test::Present(engine
-                                ->AppendDurable(Request(
-                                    "00000000-0000-0000-0000-000000000006"))
-                                .error)
-                  .code,
+    EXPECT_EQ(test::Present(engine->AppendDurable(different).error).code, "OPERATION_CONFLICT");
+    EXPECT_EQ(test::Present(engine->AppendDurable(Request("00000000-0000-0000-0000-000000000006")).error).code,
               "RECOVERY_REQUIRED");
     EXPECT_EQ(backend->prepares, 1);
     vfs.Arm(1, true); // Even an apparently committed fence with a lost result
                       // cannot open readiness.
     EXPECT_FALSE(engine->Reconcile());
-    EXPECT_EQ(test::Present(engine
-                                ->AppendDurable(Request(
-                                    "00000000-0000-0000-0000-000000000006"))
-                                .error)
-                  .code,
+    EXPECT_EQ(test::Present(engine->AppendDurable(Request("00000000-0000-0000-0000-000000000006")).error).code,
               "RECOVERY_REQUIRED");
     vfs.Disarm();
     ASSERT_TRUE(engine->Reconcile());
-    const auto outcome =
-        engine->FindAppendOutcome(test::collection_id, test::operation_id);
+    const auto outcome = engine->FindAppendOutcome(test::collection_id, test::operation_id);
     ASSERT_TRUE(outcome);
     ASSERT_TRUE(outcome->has_value());
-    EXPECT_EQ(test::Present(outcome.value()).disposition,
-              CommitDisposition::Committed);
+    EXPECT_EQ(test::Present(outcome.value()).disposition, CommitDisposition::Committed);
     EXPECT_EQ(engine->AppendDurable(Request()), test::Present(outcome.value()));
     EXPECT_EQ(backend->prepares, 1);
 }
 
-TEST_F(CoordinatorFaultTest,
-       UnknownBindingHasNoDataPublicationAndResolvesWithoutReplay) {
+TEST_F(CoordinatorFaultTest, UnknownBindingHasNoDataPublicationAndResolvesWithoutReplay) {
     vfs.Arm(1, true);
     const auto unknown = engine->AppendDurable(Request());
     ASSERT_EQ(unknown.disposition, CommitDisposition::CommitUnknown);
@@ -95,32 +72,25 @@ TEST_F(CoordinatorFaultTest,
     EXPECT_FALSE(test::Present(unknown.recovery).publication_started);
     EXPECT_EQ(backend->prepares, 0);
     ASSERT_TRUE(engine->Reconcile());
-    const auto failed =
-        engine->FindAppendOutcome(test::collection_id, test::operation_id);
+    const auto failed = engine->FindAppendOutcome(test::collection_id, test::operation_id);
     ASSERT_TRUE(failed);
     ASSERT_TRUE(failed->has_value());
-    EXPECT_EQ(test::Present(failed.value()).disposition,
-              CommitDisposition::DefinitelyNotCommitted);
+    EXPECT_EQ(test::Present(failed.value()).disposition, CommitDisposition::DefinitelyNotCommitted);
     EXPECT_EQ(engine->AppendDurable(Request()), test::Present(failed.value()));
     EXPECT_EQ(backend->prepares, 0);
 }
 
-TEST_F(CoordinatorFaultTest,
-       BindingRolledBackBeforeJournalDeleteLeavesIdReusable) {
+TEST_F(CoordinatorFaultTest, BindingRolledBackBeforeJournalDeleteLeavesIdReusable) {
     vfs.Arm(1, false);
     const auto unknown = engine->AppendDurable(Request());
     ASSERT_EQ(unknown.disposition, CommitDisposition::CommitUnknown);
     ASSERT_TRUE(engine->Reconcile());
-    ASSERT_FALSE(
-        engine->FindAppendOutcome(test::collection_id, test::operation_id)
-            ->has_value());
-    EXPECT_EQ(engine->AppendDurable(Request()).disposition,
-              CommitDisposition::Committed);
+    ASSERT_FALSE(engine->FindAppendOutcome(test::collection_id, test::operation_id)->has_value());
+    EXPECT_EQ(engine->AppendDurable(Request()).disposition, CommitDisposition::Committed);
     EXPECT_EQ(backend->prepares, 1);
 }
 
-TEST_F(CoordinatorFaultTest,
-       LostFailureRecordingResultRetainsOriginalProducerFailure) {
+TEST_F(CoordinatorFaultTest, LostFailureRecordingResultRetainsOriginalProducerFailure) {
     backend->fail_prepare = true;
     vfs.Arm(2, true);
     const auto unknown = engine->AppendDurable(Request());
@@ -128,8 +98,7 @@ TEST_F(CoordinatorFaultTest,
     EXPECT_EQ(unknown.phase, CommitPhase::RecordingFailure);
     ASSERT_TRUE(unknown.recovery);
     EXPECT_FALSE(test::Present(unknown.recovery).publication_started);
-    EXPECT_EQ(test::Present(unknown.recovery).first_error.message,
-              "first producer error");
+    EXPECT_EQ(test::Present(unknown.recovery).first_error.message, "first producer error");
     ASSERT_TRUE(engine->Reconcile());
     backend->fail_prepare = false;
     const auto failed = engine->AppendDurable(Request());
@@ -139,13 +108,11 @@ TEST_F(CoordinatorFaultTest,
     EXPECT_EQ(backend->prepares, 1);
 }
 
-TEST_F(CoordinatorFaultTest,
-       RecoveryBarrierCannotReportAnOldCommittedIdAsUncommitted) {
+TEST_F(CoordinatorFaultTest, RecoveryBarrierCannotReportAnOldCommittedIdAsUncommitted) {
     const auto first = engine->AppendDurable(Request());
     ASSERT_EQ(first.disposition, CommitDisposition::Committed);
     vfs.Arm(2, true);
-    const auto second =
-        engine->AppendDurable(Request("00000000-0000-0000-0000-000000000006"));
+    const auto second = engine->AppendDurable(Request("00000000-0000-0000-0000-000000000006"));
     ASSERT_EQ(second.disposition, CommitDisposition::CommitUnknown);
     const auto retry = engine->AppendDurable(Request());
     EXPECT_EQ(retry.disposition, CommitDisposition::CommitUnknown);
@@ -168,14 +135,10 @@ TEST_F(CoordinatorFaultTest, WaitingRetryObservesBarrierClosedByAnotherWriter) {
     };
     vfs.Arm(2, true);
     const auto second_id = "00000000-0000-0000-0000-000000000006";
-    auto write = std::async(std::launch::async, [&] {
-        return engine->AppendDurable(Request(second_id));
-    });
+    auto write = std::async(std::launch::async, [&] { return engine->AppendDurable(Request(second_id)); });
     entered.get_future().wait();
-    auto retry = std::async(std::launch::async,
-                            [&] { return engine->AppendDurable(Request()); });
-    EXPECT_EQ(retry.wait_for(std::chrono::milliseconds(200)),
-              std::future_status::timeout);
+    auto retry = std::async(std::launch::async, [&] { return engine->AppendDurable(Request()); });
+    EXPECT_EQ(retry.wait_for(std::chrono::milliseconds(200)), std::future_status::timeout);
     release.set_value();
     const auto second = write.get();
     const auto blocked = retry.get();
@@ -184,11 +147,7 @@ TEST_F(CoordinatorFaultTest, WaitingRetryObservesBarrierClosedByAnotherWriter) {
     ASSERT_TRUE(blocked.recovery);
     EXPECT_TRUE(test::Present(blocked.recovery).lookup_blocked);
     EXPECT_EQ(blocked.operation_id, test::operation_id);
-    EXPECT_EQ(test::Present(
-                  test::Present(
-                      engine->FindAppendOutcome(test::collection_id, second_id)
-                          .value())
-                      .recovery)
+    EXPECT_EQ(test::Present(test::Present(engine->FindAppendOutcome(test::collection_id, second_id).value()).recovery)
                   .operation_id,
               second_id);
     ASSERT_TRUE(engine->Reconcile());
