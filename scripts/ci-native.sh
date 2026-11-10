@@ -47,6 +47,7 @@ case "$stage" in
       "-DCMAKE_INSTALL_PREFIX=$GLAMDB_CI_RUNTIME_PREFIX" -DCMAKE_INSTALL_LIBDIR=lib \
       '-DLLVM_ENABLE_RUNTIMES=libcxx;libcxxabi' "-DLLVM_USE_SANITIZER=$llvm_sanitizer" \
       -DLLVM_INCLUDE_TESTS=OFF -DLIBCXX_INCLUDE_TESTS=OFF -DLIBCXXABI_INCLUDE_TESTS=OFF \
+      -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
       -DLIBCXXABI_USE_LLVM_UNWINDER=OFF
     cmake --build "$build-runtime" --parallel 2
     cmake --install "$build-runtime"
