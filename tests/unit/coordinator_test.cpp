@@ -1,5 +1,6 @@
 #include "storage/engine.h"
 
+#include "core/api/codec.h"
 #include "core/engine/engine_factory.h"
 #include "tests/support/arrow_batch.h"
 #include "tests/support/checked.h"
@@ -37,6 +38,66 @@ protected:
     }
 };
 
+class RetryAdmissionTest : public CoordinatorTest, public testing::WithParamInterface<std::tuple<bool, int>> {};
+
+TEST_P(RetryAdmissionTest, ResourcePressureCannotChangeAnExistingOperationOutcome) {
+    const auto [already_committed, pressure] = GetParam();
+    auto active_request = Request(already_committed ? "00000000-0000-0000-0000-000000000006" : test::operation_id);
+    active_request.batches = {test::Batch(std::vector<std::optional<int64_t>>(256, 5))};
+    Limits limits;
+    limits.writer_wait = std::chrono::milliseconds(1);
+    if (pressure == 1) {
+        limits.max_pending_calls = 1;
+    } else if (pressure == 2) {
+        limits.max_owned_input_bytes = static_cast<int64_t>(
+            detail::InputReservation(SchemaSpec{{{"n", FieldType::Int64, true}}}, active_request.batches).value());
+    }
+    engine.reset();
+    auto opened =
+        detail::EngineFactory::Open({root.string(), test::store_id, "local-delete-extra-v1", limits}, backend);
+    ASSERT_TRUE(opened);
+    engine = *opened;
+    std::optional<AppendOutcome> original;
+    if (already_committed) {
+        original = engine->AppendDurable(Request());
+        ASSERT_EQ(test::Present(original).disposition, CommitDisposition::Committed);
+    }
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    backend->on_prepare = [&] {
+        entered.set_value();
+        released.wait();
+    };
+    auto write = std::async(std::launch::async, [&] { return engine->AppendDurable(active_request); });
+    entered.get_future().wait();
+    const auto retry_request = already_committed ? Request() : active_request;
+    const auto retry = engine->AppendDurable(retry_request);
+    const auto lookup = engine->FindAppendOutcome(test::collection_id, test::operation_id);
+    const bool still_ready = engine->GetCollection(test::collection_id).has_value();
+    release.set_value();
+    const auto completed = write.get();
+    backend->on_prepare = {};
+    ASSERT_EQ(completed.disposition, CommitDisposition::Committed);
+    EXPECT_TRUE(still_ready);
+    if (already_committed) {
+        EXPECT_EQ(retry, test::Present(original));
+        ASSERT_TRUE(lookup);
+        EXPECT_EQ(test::Present(lookup.value()), test::Present(original));
+    } else {
+        EXPECT_EQ(retry.disposition, CommitDisposition::CommitUnknown);
+        EXPECT_EQ(test::Present(retry.error).retry_hint, RetryHint::SameIdAfterReconcile);
+        EXPECT_TRUE(detail::ValidateOutcome(retry));
+        ASSERT_FALSE(lookup);
+        EXPECT_EQ(lookup.error().code, "OPERATION_IN_PROGRESS");
+    }
+    EXPECT_EQ(engine->AppendDurable(retry_request), already_committed ? test::Present(original) : completed);
+    EXPECT_EQ(backend->prepares, already_committed ? 2 : 1);
+}
+
+INSTANTIATE_TEST_SUITE_P(WriterTimeoutPendingAndInputBudgets, RetryAdmissionTest,
+                         testing::Combine(testing::Bool(), testing::Values(0, 1, 2)));
+
 TEST_F(CoordinatorTest, AppendThenNewerAppendThenRetryReturnsExactOldReceipt) {
     const auto a = engine->AppendDurable(Request());
     ASSERT_EQ(a.disposition, CommitDisposition::Committed);
@@ -53,6 +114,89 @@ TEST_F(CoordinatorTest, AppendThenNewerAppendThenRetryReturnsExactOldReceipt) {
     EXPECT_EQ(engine->AppendDurable(retry), a);
     EXPECT_EQ(test::Present(engine->FindAppendOutcome(test::collection_id, test::operation_id).value()), a);
     EXPECT_EQ(backend->prepares, 2);
+}
+
+TEST_F(CoordinatorTest, TerminalRetryDoesNotNeedPayloadCapacity) {
+    const auto original = engine->AppendDurable(Request());
+    ASSERT_EQ(original.disposition, CommitDisposition::Committed);
+    engine.reset();
+    Limits limits;
+    limits.max_operations = 1;
+    limits.max_owned_input_bytes = 1;
+    const auto opened =
+        detail::EngineFactory::Open({root.string(), test::store_id, "local-delete-extra-v1", limits}, backend);
+    ASSERT_TRUE(opened);
+    engine = *opened;
+    EXPECT_EQ(engine->AppendDurable(Request()), original);
+    const auto next_id = "00000000-0000-0000-0000-000000000006";
+    const auto rejected = engine->AppendDurable(Request(next_id));
+    EXPECT_EQ(rejected.disposition, CommitDisposition::DefinitelyNotCommitted);
+    EXPECT_EQ(test::Present(rejected.error).code, "RESOURCE_EXHAUSTED");
+    EXPECT_FALSE(engine->FindAppendOutcome(test::collection_id, next_id)->has_value());
+    EXPECT_EQ(backend->prepares, 1);
+}
+
+TEST_F(CoordinatorTest, BusyTentativeCatalogCannotLeakAnOutcomeOrExtendTheWriterWait) {
+    const auto original = engine->AppendDurable(Request());
+    ASSERT_EQ(original.disposition, CommitDisposition::Committed);
+    engine.reset();
+    Limits limits;
+    limits.writer_wait = std::chrono::milliseconds(1);
+    const auto opened =
+        detail::EngineFactory::Open({root.string(), test::store_id, "local-delete-extra-v1", limits}, backend);
+    ASSERT_TRUE(opened);
+    engine = *opened;
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    backend->on_pointer = [&] {
+        entered.set_value();
+        released.wait();
+    };
+    auto write = std::async(std::launch::async,
+                            [&] { return engine->AppendDurable(Request("00000000-0000-0000-0000-000000000006")); });
+    entered.get_future().wait();
+    auto retry = std::async(std::launch::async, [&] { return engine->AppendDurable(Request()); });
+    const auto status = retry.wait_for(std::chrono::milliseconds(200));
+    release.set_value();
+    const auto blocked = retry.get();
+    const auto completed = write.get();
+    backend->on_pointer = {};
+    EXPECT_EQ(status, std::future_status::ready);
+    EXPECT_EQ(blocked.disposition, CommitDisposition::CommitUnknown);
+    EXPECT_TRUE(detail::ValidateOutcome(blocked));
+    EXPECT_TRUE(test::Present(blocked.recovery).lookup_blocked);
+    EXPECT_EQ(completed.disposition, CommitDisposition::Committed);
+    EXPECT_EQ(engine->AppendDurable(Request()), original);
+}
+
+TEST_F(CoordinatorTest, BusyCreateRetryCannotTurnAnExistingCollectionIntoDefiniteFailure) {
+    engine.reset();
+    Limits limits;
+    limits.writer_wait = std::chrono::milliseconds(1);
+    const auto opened =
+        detail::EngineFactory::Open({root.string(), test::store_id, "local-delete-extra-v1", limits}, backend);
+    ASSERT_TRUE(opened);
+    engine = *opened;
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    backend->on_prepare = [&] {
+        entered.set_value();
+        released.wait();
+    };
+    auto write = std::async(std::launch::async, [&] { return engine->AppendDurable(Request()); });
+    entered.get_future().wait();
+    const CreateCollectionRequest request{test::collection_id, "events", SchemaSpec{{{"n", FieldType::Int64, true}}}};
+    const auto blocked = engine->CreateCollection(request);
+    release.set_value();
+    const auto completed = write.get();
+    backend->on_prepare = {};
+    EXPECT_EQ(blocked.disposition, CommitDisposition::CommitUnknown);
+    EXPECT_EQ(test::Present(blocked.error).retry_hint, RetryHint::SameIdAfterReconcile);
+    EXPECT_EQ(test::Present(blocked.recovery).collection_id, test::collection_id);
+    EXPECT_EQ(completed.disposition, CommitDisposition::Committed);
+    EXPECT_EQ(engine->CreateCollection(request).disposition, CommitDisposition::Committed);
 }
 
 TEST_F(CoordinatorTest, RegisteredFailureIsPermanentAndDifferentPayloadConflicts) {
@@ -110,6 +254,20 @@ TEST_F(CoordinatorTest, CreateRetryRequiresExactNameIdAndSchema) {
     other = request;
     other.collection_id = "00000000-0000-0000-0000-000000000006";
     EXPECT_EQ(test::Present(engine->CreateCollection(other).error).code, "ALREADY_EXISTS");
+}
+
+TEST_F(CoordinatorTest, CreateVerifierExceptionUsesRecoverableHintAndRetainsContext) {
+    const CreateCollectionRequest request{test::collection_id, "events", SchemaSpec{{{"n", FieldType::Int64, true}}}};
+    backend->throw_verifier = true;
+    const auto first = engine->CreateCollection(request);
+    ASSERT_EQ(first.disposition, CommitDisposition::CommitUnknown);
+    EXPECT_EQ(test::Present(first.error).retry_hint, RetryHint::SameIdAfterReconcile);
+    const auto repeated = engine->CreateCollection(request);
+    EXPECT_EQ(repeated.disposition, CommitDisposition::CommitUnknown);
+    EXPECT_EQ(test::Present(repeated.recovery).attempt_id, test::Present(first.recovery).attempt_id);
+    backend->throw_verifier = false;
+    ASSERT_TRUE(engine->Reconcile());
+    EXPECT_EQ(engine->CreateCollection(request).disposition, CommitDisposition::Committed);
 }
 
 TEST_F(CoordinatorTest, SameProcessSecondOpenIsLockedAndMissingOpenNeverCreates) {

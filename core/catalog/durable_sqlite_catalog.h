@@ -58,6 +58,7 @@ public:
     BaseIdentity Base(std::string_view id);
     std::vector<OperationRecord> Operations();
     std::optional<OperationRecord> FindOperation(std::string_view collection_id, std::string_view operation_id);
+    std::optional<OperationRecord> TryFindOperation(std::string_view collection_id, std::string_view operation_id);
     void BindOperation(const BoundOperation &binding);
     void RecordFailure(const BoundOperation &binding, const AppendOutcome &outcome);
     CollectionInfo PublishCreate(CollectionInfo collection, const Guard &guard, const Body &body);

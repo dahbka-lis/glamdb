@@ -175,7 +175,8 @@ cmake --build --preset deps-local --parallel 2
 
 - Use C++23 with the checked-in `.clang-format`, `.clang-tidy`, and
   `.editorconfig` as the formatting and diagnostic authorities. Project compiler
-  warnings and configured tidy diagnostics are errors.
+  warnings and configured tidy diagnostics are errors. The C++ line limit is
+  120 columns.
 - Keep each component's private `.h` and `.cpp` together in `core/`. Installed
   public headers belong in `public/storage/` and must be usable without private
   headers, source-tree paths, or transport dependencies.

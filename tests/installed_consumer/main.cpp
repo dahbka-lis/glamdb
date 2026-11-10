@@ -21,6 +21,11 @@ int main(int argc, char **argv) try {
     if (!opened || (*opened)->GetCollection("00112233-4455-6677-8899-aabbccddeeff").has_value()) {
         return 4;
     }
+    const auto outcome =
+        (*opened)->FindAppendOutcome("00112233-4455-6677-8899-aabbccddeeff", "00000000-0000-0000-0000-000000000003");
+    if (outcome || outcome.error().code != "COLLECTION_NOT_FOUND") {
+        return 6;
+    }
     return (*opened)->Shutdown(std::chrono::milliseconds(1000)) ? 0 : 5;
 } catch (...) {
     return 100;

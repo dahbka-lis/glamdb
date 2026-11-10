@@ -96,6 +96,7 @@ struct Engine::Impl {
     std::optional<BoundOperation> active;
     std::optional<RecoveryContext> recovery;
     std::optional<AppendOutcome> pending_failure;
+    std::optional<CreateOutcome> unresolved_create;
 
     ~Impl() {
         closing = true;
@@ -137,6 +138,100 @@ struct Engine::Impl {
             Context({request.collection_id, request.operation_id, {}, 1, view->base, NewUuid()}, error, false);
         context.lookup_blocked = true;
         return context;
+    }
+
+    // The caller holds state_mutex. A rejected retry cannot erase the first
+    // uncertain create, including its exact identity, candidates and attempt.
+    std::optional<CreateOutcome> BlockedCreate(const CreateRecoveryContext &context) const {
+        auto pending = unresolved_create;
+        if (pending) {
+            const auto recovery = pending->recovery;
+            if (!recovery) {
+                throw Failure({"INTERNAL", "uncertain create lost its context", RetryHint::OperatorAction});
+            }
+            if (recovery->collection_id == context.collection_id || recovery->exact_name == context.exact_name) {
+                Require(recovery->collection_id == context.collection_id && recovery->exact_name == context.exact_name,
+                        "ALREADY_EXISTS", "collection identity belongs to an unresolved creation");
+                Require(recovery->schema_hash == context.schema_hash, "SCHEMA_MISMATCH",
+                        "schema differs from unresolved creation");
+                return pending;
+            }
+        }
+        if (!ready && !closed && !closing.load()) {
+            return CreateOutcome{CommitDisposition::CommitUnknown, CommitPhase::Reconciling, std::nullopt,
+                                 ErrorDetail{"RECOVERY_REQUIRED", "collection lookup is blocked by recovery",
+                                             RetryHint::SameIdAfterReconcile},
+                                 context};
+        }
+        CheckReady();
+        return std::nullopt;
+    }
+
+    // The caller holds state_mutex. This context describes a lookup, never a
+    // new publication of the requested operation.
+    RecoveryContext AppendLookupContext(const AppendRequest &request, std::string_view payload_hash,
+                                        const ErrorDetail &error) const {
+        const auto view = std::ranges::find_if(
+            confirmed_views, [&](const auto &item) { return item.info.collection_id == request.collection_id; });
+        Require(view != confirmed_views.end(), "CORRUPTION", "confirmed collection view is missing");
+        auto context =
+            Context({request.collection_id, request.operation_id, std::string(payload_hash), 1, view->base, NewUuid()},
+                    error, false);
+        context.lookup_blocked = true;
+        return context;
+    }
+
+    AppendOutcome ResolveUnadmitted(const AppendRequest &request, std::string_view payload_hash,
+                                    const ErrorDetail &reason) {
+        RecoveryContext context;
+        {
+            std::lock_guard lock(state_mutex);
+            const auto blocked = BlockedAppend(request);
+            if (blocked) {
+                return UnresolvedAppend(*blocked, payload_hash);
+            }
+            context = AppendLookupContext(request, payload_hash, reason);
+        }
+        std::optional<OperationRecord> previous;
+        try {
+            previous = catalog->TryFindOperation(request.collection_id, request.operation_id);
+        } catch (const Failure &error) {
+            CloseOnCorruption(error.detail);
+            if (error.detail.code != "OPERATION_IN_PROGRESS") {
+                context.first_error = error.detail;
+            }
+            return UnresolvedAppend(context, payload_hash);
+        } catch (const std::exception &error) {
+            context.first_error = ExceptionError(error);
+            return UnresolvedAppend(context, payload_hash);
+        }
+        {
+            std::lock_guard lock(state_mutex);
+            const auto blocked = BlockedAppend(request);
+            if (blocked) {
+                return UnresolvedAppend(*blocked, payload_hash);
+            }
+        }
+        if (previous) {
+            Require(previous->binding.payload_hash == payload_hash, "OPERATION_CONFLICT",
+                    "operation ID is permanently bound to different content");
+            if (previous->outcome) {
+                return *previous->outcome;
+            }
+        }
+        // No writer ownership: absence here cannot rule out another admitted
+        // call binding the same ID. Keep readiness and the real recovery target.
+        return UnresolvedAppend(context, payload_hash);
+    }
+
+    CreateOutcome UnknownCreate(CreateRecoveryContext context, CommitPhase phase, ErrorDetail error) {
+        error.retry_hint = RetryHint::SameIdAfterReconcile;
+        CreateOutcome outcome{CommitDisposition::CommitUnknown, phase, std::nullopt, std::move(error),
+                              std::move(context)};
+        std::lock_guard lock(state_mutex);
+        ready = false;
+        unresolved_create = outcome;
+        return outcome;
     }
 
     CollectionInfo CachedCollection(std::string_view id) const {
@@ -222,6 +317,7 @@ struct Engine::Impl {
         active.reset();
         recovery.reset();
         pending_failure.reset();
+        unresolved_create.reset();
         ready = true;
     }
 
@@ -395,10 +491,32 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest &request) {
                     ValidUtf8(request.exact_name) && request.exact_name.find('\0') == std::string::npos,
                 "INVALID_ARGUMENT", "invalid collection ID or exact name");
         const auto schema_hash = Take(SchemaFingerprint(request.schema));
-        Require(writer_lock.try_lock_for(impl->limits.writer_wait), "RESOURCE_EXHAUSTED", "writer wait limit exceeded");
+        context = CreateRecoveryContext{impl->info.store_id, request.collection_id, request.exact_name, schema_hash,
+                                        NewUuid(),           std::nullopt,          std::nullopt,       false};
         {
             std::lock_guard state_lock(impl->state_mutex);
-            impl->CheckReady();
+            const auto blocked = impl->BlockedCreate(*context);
+            if (blocked) {
+                return *blocked;
+            }
+        }
+        if (!writer_lock.try_lock_for(impl->limits.writer_wait)) {
+            std::lock_guard state_lock(impl->state_mutex);
+            const auto blocked = impl->BlockedCreate(*context);
+            if (blocked) {
+                return *blocked;
+            }
+            return {CommitDisposition::CommitUnknown, CommitPhase::Reconciling, std::nullopt,
+                    ErrorDetail{"RESOURCE_EXHAUSTED", "writer busy; original creation outcome was not resolved",
+                                RetryHint::SameIdAfterReconcile},
+                    context};
+        }
+        {
+            std::lock_guard state_lock(impl->state_mutex);
+            const auto blocked = impl->BlockedCreate(*context);
+            if (blocked) {
+                return *blocked;
+            }
         }
         for (const auto &collection : impl->catalog->Collections()) {
             if (collection.collection_id == request.collection_id || collection.name == request.exact_name) {
@@ -447,24 +565,17 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest &request) {
         return {CommitDisposition::Committed, CommitPhase::Complete, created, std::nullopt, std::nullopt};
     } catch (const Failure &error) {
         impl->CloseOnCorruption(error.detail);
-        if (error.uncertain || committed) {
-            std::lock_guard state_lock(impl->state_mutex);
-            impl->ready = false;
-            auto detail = error.detail;
-            detail.retry_hint = RetryHint::SameIdAfterReconcile;
-            return {CommitDisposition::CommitUnknown,
-                    committed ? CommitPhase::Reconciling : error.phase.value_or(CommitPhase::CatalogTransaction),
-                    std::nullopt, detail, context};
+        if ((error.uncertain || committed) && context) {
+            return impl->UnknownCreate(
+                *context, committed ? CommitPhase::Reconciling : error.phase.value_or(CommitPhase::CatalogTransaction),
+                error.detail);
         }
         return {CommitDisposition::DefinitelyNotCommitted,
                 publication_started ? CommitPhase::CatalogTransaction : CommitPhase::Validation, std::nullopt,
                 error.detail, std::nullopt};
     } catch (const std::exception &error) {
-        if (publication_started || committed) {
-            std::lock_guard state_lock(impl->state_mutex);
-            impl->ready = false;
-            return {CommitDisposition::CommitUnknown, CommitPhase::Reconciling, std::nullopt, ExceptionError(error),
-                    context};
+        if ((publication_started || committed) && context) {
+            return impl->UnknownCreate(*context, CommitPhase::Reconciling, ExceptionError(error));
         }
         return {CommitDisposition::DefinitelyNotCommitted, CommitPhase::Validation, std::nullopt, ExceptionError(error),
                 std::nullopt};
@@ -503,46 +614,50 @@ AppendOutcome Engine::AppendDurable(const AppendRequest &request) {
             unresolved = impl->BlockedAppend(request);
             collection = impl->CachedCollection(request.collection_id);
         }
-        const auto reservation = Take(InputReservation(collection.schema, request.batches));
-        {
-            std::lock_guard lock(impl->state_mutex);
-            if (!unresolved) {
-                unresolved = impl->BlockedAppend(request);
-            }
-            Require(impl->pending_calls < impl->limits.max_pending_calls &&
-                        reservation <=
-                            static_cast<size_t>(impl->limits.max_owned_input_bytes) - impl->owned_input_bytes,
-                    "RESOURCE_EXHAUSTED", "shared pending/input budget is full");
-            ++impl->pending_calls;
-            impl->owned_input_bytes += reservation;
-            admission.owner = impl;
-            admission.bytes = reservation;
-        }
-        const auto input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches));
+        const auto payload_hash = Take(FingerprintBatches(collection.schema, request.collection_id, request.batches));
         if (unresolved) {
-            return UnresolvedAppend(*unresolved, input.payload_hash);
+            return UnresolvedAppend(*unresolved, payload_hash);
         }
-        Require(
-            writer_lock.try_lock_until(std::min(deadline, std::chrono::steady_clock::now() + impl->limits.writer_wait)),
-            "RESOURCE_EXHAUSTED", "bounded writer wait expired");
+        if (!writer_lock.try_lock()) {
+            bool full = false;
+            {
+                std::lock_guard lock(impl->state_mutex);
+                unresolved = impl->BlockedAppend(request);
+                full = impl->pending_calls >= impl->limits.max_pending_calls;
+                if (!unresolved && !full) {
+                    ++impl->pending_calls;
+                    admission.owner = impl;
+                }
+            }
+            if (unresolved) {
+                return UnresolvedAppend(*unresolved, payload_hash);
+            }
+            if (full) {
+                return impl->ResolveUnadmitted(request, payload_hash,
+                                               {"RESOURCE_EXHAUSTED",
+                                                "pending budget is full; original operation outcome was not resolved",
+                                                RetryHint::SameIdAfterReconcile});
+            }
+            if (!writer_lock.try_lock_until(
+                    std::min(deadline, std::chrono::steady_clock::now() + impl->limits.writer_wait))) {
+                return impl->ResolveUnadmitted(request, payload_hash,
+                                               {"RESOURCE_EXHAUSTED",
+                                                "writer wait expired; original operation outcome was not resolved",
+                                                RetryHint::SameIdAfterReconcile});
+            }
+        }
         {
             std::lock_guard state_lock(impl->state_mutex);
             unresolved = impl->BlockedAppend(request);
             collection = impl->CachedCollection(request.collection_id);
+            if (!unresolved) {
+                context = impl->AppendLookupContext(
+                    request, payload_hash,
+                    {"RECOVERY_REQUIRED", "outcome lookup is unresolved", RetryHint::SameIdAfterReconcile});
+            }
         }
         if (unresolved) {
-            return UnresolvedAppend(*unresolved, input.payload_hash);
-        }
-        {
-            std::lock_guard state_lock(impl->state_mutex);
-            const auto view = std::ranges::find_if(impl->confirmed_views, [&](const auto &item) {
-                return item.info.collection_id == request.collection_id;
-            });
-            Require(view != impl->confirmed_views.end(), "CORRUPTION", "confirmed collection view is missing");
-            context =
-                Context({request.collection_id, request.operation_id, input.payload_hash, 1, view->base, NewUuid()},
-                        {"RECOVERY_REQUIRED", "outcome lookup is unresolved", RetryHint::SameIdAfterReconcile}, false);
-            context.lookup_blocked = true;
+            return UnresolvedAppend(*unresolved, payload_hash);
         }
         std::optional<OperationRecord> previous;
         try {
@@ -555,7 +670,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest &request) {
             return impl->Unknown(context, CommitPhase::Reconciling, context.first_error);
         }
         if (previous) {
-            Require(previous->binding.payload_hash == input.payload_hash, "OPERATION_CONFLICT",
+            Require(previous->binding.payload_hash == payload_hash, "OPERATION_CONFLICT",
                     "operation ID is permanently bound to different content");
             if (previous->outcome) {
                 try {
@@ -573,6 +688,24 @@ AppendOutcome Engine::AppendDurable(const AppendRequest &request) {
                                     RetryHint::SameIdAfterReconcile};
             return impl->Unknown(Context(previous->binding, error, false), CommitPhase::Reconciling, error);
         }
+        // Only a new operation needs owned payload memory. A retry has already
+        // returned its original terminal receipt, even under a lower input cap.
+        const auto reservation = Take(InputReservation(collection.schema, request.batches));
+        {
+            std::lock_guard lock(impl->state_mutex);
+            if (!admission.owner) {
+                Require(impl->pending_calls < impl->limits.max_pending_calls, "RESOURCE_EXHAUSTED",
+                        "pending budget is full");
+                ++impl->pending_calls;
+                admission.owner = impl;
+            }
+            Require(reservation <= static_cast<size_t>(impl->limits.max_owned_input_bytes) - impl->owned_input_bytes,
+                    "RESOURCE_EXHAUSTED", "owned input budget is full");
+            impl->owned_input_bytes += reservation;
+            admission.bytes = reservation;
+        }
+        const auto input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches));
+        Require(input.payload_hash == payload_hash, "INVALID_ARGUMENT", "Arrow input changed during append");
         binding = BoundOperation{request.collection_id,
                                  request.operation_id,
                                  input.payload_hash,

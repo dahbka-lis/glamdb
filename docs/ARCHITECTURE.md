@@ -107,9 +107,13 @@ versioned and tested with byte fixtures. A committed receipt is stored with the
 catalog pointer and cross-checked against operation information in the snapshot
 summary. Retrying A after a later B returns A's receipt without modifying B.
 
-An unknown outcome holds the writer barrier. Resolve outstanding SQLite
-transactions, reopen the authoritative catalog, validate identities and retained
-history, and check reachable files before releasing it. Recovery includes a
+An uncertain write closes readiness and holds the writer barrier. A retry whose
+outcome lookup is blocked by writer contention or admission limits may return
+`CommitUnknown` without closing readiness or replacing the unresolved write.
+Resource refusal alone never proves that an earlier operation did not commit.
+Resolve outstanding SQLite transactions, reopen the authoritative catalog,
+validate identities and retained history, and check reachable files before
+releasing it. Recovery includes a
 **durability fence**: a real increment of the store's fence counter committed
 through SQLite's configured durability mode. A SELECT or no-op update cannot
 substitute for that transaction. The fence creates no Iceberg snapshot and does

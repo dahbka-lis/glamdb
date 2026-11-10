@@ -2,6 +2,7 @@
 
 #include <arrow/api.h>
 #include <gtest/gtest.h>
+#include <limits>
 
 namespace glamdb::detail {
 namespace {
@@ -30,6 +31,11 @@ TEST(ArrowInput, ChunkBoundariesDoNotChangeCanonicalIdentity) {
     EXPECT_EQ(single->payload_hash, "e9cbe7131f25c3f2932c48f755529fd10370a936c5182e2bca621d5f9e3c0fd7");
     EXPECT_EQ(chunked->payload_hash, single->payload_hash);
     EXPECT_EQ(chunked->rows, single->rows);
+    const auto fingerprint =
+        FingerprintBatches(schema, "00112233-4455-6677-8899-aabbccddeeff",
+                           {Integers({9007199254740993LL}), Integers({std::nullopt}), Integers({9007199254740993LL})});
+    ASSERT_TRUE(fingerprint);
+    EXPECT_EQ(*fingerprint, single->payload_hash);
 }
 
 TEST(ArrowInput, MissingNullableFieldsBecomeNullButUnknownAndNullBatchReject) {
@@ -40,6 +46,95 @@ TEST(ArrowInput, MissingNullableFieldsBecomeNullButUnknownAndNullBatchReject) {
     EXPECT_FALSE(NormalizeBatches(SchemaSpec{{{"other", FieldType::Int64, true}}},
                                   "00112233-4455-6677-8899-aabbccddeeff", {Integers({1})}));
     EXPECT_FALSE(NormalizeBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", {nullptr}));
+}
+
+TEST(ArrowInput, InputValidationErrorsSuggestFixingTheInput) {
+    const std::vector<std::pair<SchemaSpec, std::shared_ptr<arrow::RecordBatch>>> cases{
+        {SchemaSpec{{{"n", FieldType::Bool, true}}}, Integers({1})},
+        {SchemaSpec{{{"n", FieldType::Int64, false}}}, Integers({std::nullopt})},
+        {SchemaSpec{{{"other", FieldType::Int64, true}}}, Integers({1})},
+        {SchemaSpec{{{"n", FieldType::Int64, true}}}, nullptr}};
+    for (const auto &[schema, batch] : cases) {
+        const auto reservation = InputReservation(schema, {batch});
+        ASSERT_FALSE(reservation);
+        EXPECT_EQ(reservation.error().retry_hint, RetryHint::FixInput);
+        const auto normalized = NormalizeBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", {batch});
+        ASSERT_FALSE(normalized);
+        EXPECT_EQ(normalized.error().retry_hint, RetryHint::FixInput);
+        const auto fingerprint = FingerprintBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", {batch});
+        ASSERT_FALSE(fingerprint);
+        EXPECT_EQ(fingerprint.error().retry_hint, RetryHint::FixInput);
+    }
+}
+
+TEST(ArrowInput, StreamingFingerprintMatchesIndependentAllTypesGolden) {
+    const SchemaSpec schema{{{"s", FieldType::String, false},
+                             {"b", FieldType::Bool, true},
+                             {"i", FieldType::Int64, true},
+                             {"f", FieldType::Float64, true},
+                             {"t", FieldType::TimestampUsUtc, true}}};
+    arrow::StringBuilder strings;
+    arrow::BooleanBuilder booleans;
+    arrow::Int64Builder integers;
+    arrow::DoubleBuilder floats;
+    arrow::TimestampBuilder times(arrow::timestamp(arrow::TimeUnit::MICRO, "UTC"), arrow::default_memory_pool());
+    ASSERT_TRUE(strings.Append("é").ok());
+    ASSERT_TRUE(strings.Append("dup").ok());
+    ASSERT_TRUE(strings.Append("dup").ok());
+    ASSERT_TRUE(booleans.Append(true).ok());
+    ASSERT_TRUE(booleans.Append(false).ok());
+    ASSERT_TRUE(booleans.AppendNull().ok());
+    ASSERT_TRUE(integers.Append(std::numeric_limits<int64_t>::min()).ok());
+    ASSERT_TRUE(integers.Append(std::numeric_limits<int64_t>::max()).ok());
+    ASSERT_TRUE(integers.AppendNull().ok());
+    ASSERT_TRUE(floats.Append(-0.0).ok());
+    ASSERT_TRUE(floats.Append(1.5).ok());
+    ASSERT_TRUE(floats.AppendNull().ok());
+    ASSERT_TRUE(times.Append(-62135596800000000LL).ok());
+    ASSERT_TRUE(times.Append(253402300799999999LL).ok());
+    ASSERT_TRUE(times.AppendNull().ok());
+    const auto finish = [](auto &builder) {
+        const auto array = builder.Finish();
+        if (!array.ok()) {
+            throw std::runtime_error(array.status().ToString());
+        }
+        return *array;
+    };
+    const auto batch = arrow::RecordBatch::Make(
+        arrow::schema({arrow::field("s", arrow::utf8(), false), arrow::field("b", arrow::boolean()),
+                       arrow::field("i", arrow::int64()), arrow::field("f", arrow::float64()),
+                       arrow::field("t", arrow::timestamp(arrow::TimeUnit::MICRO, "UTC"))}),
+        3, {finish(strings), finish(booleans), finish(integers), finish(floats), finish(times)});
+    const auto fingerprint =
+        FingerprintBatches(schema, "00112233-4455-6677-8899-aabbccddeeff", {batch->Slice(0, 1), batch->Slice(1, 2)});
+    ASSERT_TRUE(fingerprint);
+    EXPECT_EQ(*fingerprint, "72b0d7fbd4d8097a8a848de273fbf13cffa462d20be481e87d8c788f64feef1b");
+}
+
+TEST(ArrowInput, FingerprintRejectsNonfiniteFloatsAndOutOfRangeTimestamps) {
+    const auto check = [](FieldType type, const std::shared_ptr<arrow::DataType> &arrow_type,
+                          const std::shared_ptr<arrow::Array> &array) {
+        const auto batch = arrow::RecordBatch::Make(arrow::schema({arrow::field("n", arrow_type)}), 1, {array});
+        const auto result =
+            FingerprintBatches(SchemaSpec{{{"n", type, false}}}, "00112233-4455-6677-8899-aabbccddeeff", {batch});
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().retry_hint, RetryHint::FixInput);
+    };
+    for (const double value : {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        arrow::DoubleBuilder builder;
+        ASSERT_TRUE(builder.Append(value).ok());
+        const auto array = builder.Finish();
+        ASSERT_TRUE(array.ok());
+        check(FieldType::Float64, arrow::float64(), *array);
+    }
+    const auto type = arrow::timestamp(arrow::TimeUnit::MICRO, "UTC");
+    for (const int64_t value : {-62135596800000001LL, 253402300800000000LL}) {
+        arrow::TimestampBuilder builder(type, arrow::default_memory_pool());
+        ASSERT_TRUE(builder.Append(value).ok());
+        const auto array = builder.Finish();
+        ASSERT_TRUE(array.ok());
+        check(FieldType::TimestampUsUtc, type, *array);
+    }
 }
 
 } // namespace

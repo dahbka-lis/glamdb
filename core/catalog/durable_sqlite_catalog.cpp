@@ -436,6 +436,15 @@ std::optional<OperationRecord> DurableSqliteCatalogStore::FindOperation(std::str
     return ReadOperation(rows.front());
 }
 
+std::optional<OperationRecord> DurableSqliteCatalogStore::TryFindOperation(std::string_view collection_id,
+                                                                           std::string_view operation_id) {
+    std::unique_lock lock(mutex_, std::try_to_lock);
+    Require(lock.owns_lock(), "OPERATION_IN_PROGRESS", "catalog publication is executing");
+    // Also reject reentrant reads from a callback on the publication thread.
+    Require(!transaction_ && publication_ == nullptr, "OPERATION_IN_PROGRESS", "catalog view is tentative");
+    return FindOperation(collection_id, operation_id);
+}
+
 void DurableSqliteCatalogStore::CheckCapacity(bool operation) {
     Require(database_.Integer(operation ? "SELECT COUNT(*) FROM operations" : "SELECT COUNT(*) FROM collections") <
                 (operation ? limits_.max_operations : limits_.max_collections),

@@ -41,8 +41,9 @@ The install contains the executable, `storage/*.h`, `glamdb::core` static librar
 and `GlamDBConfig.cmake`. Consumers use `find_package(GlamDB CONFIG REQUIRED)`
 with both the GlamDB and dependency prefixes in `CMAKE_PREFIX_PATH`.
 `glamdb.installed_consumer` installs to a disposable build prefix and compiles
-and runs a separate public-header consumer. It exercises create/open/outcome
-lookup without source-tree headers or HTTP/Python dependencies. Scan/predicate
+and runs a separate public-header consumer. It exercises create/open and the
+missing-collection error from `GetCollection` and `FindAppendOutcome`, without
+source-tree headers or HTTP/Python dependencies. Scan/predicate
 acceptance awaits the scanner. The installed-consumer test is omitted from
 sanitizer builds; instrumented static libraries require matching consumer flags.
 
@@ -58,7 +59,8 @@ Tools must report LLVM major version 18. Versioned binaries such as
 with `GLAMDB_CLANG_FORMAT` and `GLAMDB_CLANG_TIDY`.
 
 Checks cover project sources and headers, excluding generated and third-party
-files. `tidy-check` uses `compile_commands.json` and rejects missing translation
+files. C++ formatting uses a 120-column limit. `tidy-check` uses
+`compile_commands.json` and rejects missing translation
 units. `quality-negative-check` verifies that a formatting violation and a null
 dereference in a project header both fail their respective checks.
 

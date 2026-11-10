@@ -6,6 +6,10 @@ operation lookup, reconciliation and bounded shutdown. `glamdb::core` installs
 as a CMake package. The CLI provides `create-store` and `inspect-store` with an
 absolute root and caller-retained store UUID.
 
+Read/configuration APIs use `Result<T> = std::expected<T, ErrorDetail>` and
+`Status = Result<void>`. `ListCollections()` returns the full vector within the
+eight-collection limit; this MVP has no collection pagination.
+
 The production durable file backend and scanner are pending. Public factories
 can create/open an empty catalog; collection creation reports
 `DEPENDENCY_UNAVAILABLE` without a backend. Opening a populated store also
@@ -21,7 +25,10 @@ journal, background job queue, backup or automatic file deletion in this MVP.
   one serialized SQLite connection. It checks the locked SQLite source ID and
   actual `DELETE`/`EXTRA` profile. Open validates schema/version, integrity,
   foreign keys, collection registry and operation records.
-- The coordinator validates and copies Arrow input into owned normalized rows.
+- The coordinator validates and fingerprints Arrow input without copying the
+  payload. It copies into owned normalized rows only for a new operation, after
+  acquiring the writer and resolving any previous outcome. Caller-owned Arrow
+  buffers must remain immutable throughout the synchronous call.
   Field IDs follow fixed schema order from 1; omitted nullable values become
   NULL, duplicate rows remain, float negative zero normalizes, nonfinite floats
   fail, and timestamps are UTC microseconds in years 0001 through 9999. SHA-256
@@ -29,8 +36,9 @@ journal, background job queue, backup or automatic file deletion in this MVP.
 - A permanent collection-scoped operation binding commits before file work.
   Its exact base includes store/collection/table identities, metadata location,
   optional snapshot, schema and partition-spec IDs. Retrying identical content
-  returns the original terminal result before evaluating a new precondition or
-  admitting another operation. Different content conflicts.
+  returns the original terminal result before evaluating a new precondition,
+  reserving owned input or admitting another operation. Different content
+  conflicts. Arrow input errors use `FixInput`.
 - Publication owns `BEGIN IMMEDIATE` through final COMMIT. Inner Iceberg
   transactions join that scope. A guard runs before the single INSERT/CAS;
   registry/pointer, snapshot identity and terminal receipt commit atomically.
@@ -41,12 +49,21 @@ journal, background job queue, backup or automatic file deletion in this MVP.
   validates retained storage in both directions, and commits a real fence
   increment before resolving unfinished bindings. It never replays payloads.
   Missing/corrupt committed state fails closed.
-- If a global barrier prevents consulting another operation, append returns
-  `commit_unknown` with `recovery.lookup_blocked=true`. Its base is the last
+- Writer timeout or pending-call exhaustion first attempts a nonblocking lookup
+  of an authoritative terminal outcome. It never reads through a tentative
+  catalog transaction. If the lookup cannot resolve the original operation,
+  append returns `commit_unknown`, not a new definite failure. Absence without
+  writer ownership cannot exclude a concurrent call with the same ID.
+- An unresolved lookup uses `recovery.lookup_blocked=true`. Its base is the last
   confirmed collection view and its attempt UUID identifies the lookup call;
-  that call binds/publishes nothing. The original unresolved operation remains
-  the store's recovery target. This also applies when readiness changes while
-  a retry waits for the writer.
+  that call binds/publishes nothing and does not replace the original recovery
+  target. Resource pressure alone does not close readiness. A global recovery
+  barrier, including one raised while a retry waits, also uses this response.
+- An uncertain collection creation retains its complete outcome and context
+  until reconciliation succeeds. An identical name/UUID/schema retry returns
+  that outcome; conflicting identity/schema fails without erasing it. Unknown
+  creation outcomes, including verifier exceptions and writer timeouts, use
+  `SameIdAfterReconcile`.
 
 Candidate bounds are eight collections, 4096 permanent operations, 256 MiB of
 catalog pages, 16 pending calls and 128 MiB aggregate owned input. Per append:
@@ -107,15 +124,16 @@ Iceberg 0.4.0 (`64dc66f159bd62c9817a96d74cbce767268934d0`) and locked SQLite
 
 | Executed check | Result |
 | --- | --- |
-| Normal build + `ctest --test-dir build/coordinator --output-on-failure` | 41/41 PASS |
-| Release build + `ctest --test-dir build/coordinator-release --output-on-failure` | 41/41 PASS |
-| Debug ASan/UBSan/LeakSanitizer + CTest | 40/40 PASS; installed consumer tested separately above |
+| Normal build + `ctest --test-dir build/coordinator --output-on-failure` | 56/56 PASS |
+| Release build + `ctest --test-dir build/coordinator-release --output-on-failure` | 56/56 PASS |
+| Debug ASan/UBSan/LeakSanitizer + CTest | 55/55 PASS; installed consumer tested separately above |
 | Unmodified SDK parsing native outcome JSON through mock transport | 6/6 PASS |
 | LLVM 18 formatting / analyzer | 36 files / 20 translation units PASS |
 | Formatting and analyzer negative controls | Both deliberate violations rejected |
 
-The final analyzer pass ran translation units in parallel with the repository's
+The analyzer checked translation units in parallel with the repository's
 unchanged checks, header filter, compile database and warnings-as-errors flags.
+Corrected units were rechecked with the same flags.
 
 The sanitizer run enabled leak detection, allocation/deallocation mismatch
 checks and halt-on-error, with no diagnostic suppression. It used static
@@ -127,8 +145,11 @@ Use [BUILDING.md](BUILDING.md) for build, CTest and quality commands. Tests cove
 literal canonical hash vectors; A/B/retry-A with exact recovered receipts;
 permanent failures; exact metadata-only bases; nested transaction rollback;
 lost COMMIT and fence results through a real SQLite VFS; global-barrier races;
-fresh-process operation recovery, hot rollback journals and store leases; and
-the installed public package.
+writer/pending/input pressure without changing old outcomes; tentative-catalog
+lookup isolation; retained uncertain-create contexts; incremental SHA-256
+padding boundaries and all-type Arrow fingerprint goldens; fresh-process
+operation recovery, hot rollback journals and store leases; and the installed
+public package.
 
 `glamdb.real_sqlcatalog` additionally uses real Iceberg `StageCreateTable`,
 `Transaction::Commit` and `UpdateProperties` with completed JSON roots. It

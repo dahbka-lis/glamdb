@@ -142,56 +142,76 @@ bool ValidUtf8(std::string_view value) {
     return true;
 }
 
-std::string Sha256(std::string_view input) {
-    std::array<uint32_t, 8> hash{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-                                 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
-    const size_t blocks = (input.size() + 9 + 63) / 64;
-    for (size_t block = 0; block < blocks; ++block) {
-        std::array<uint32_t, 64> words{};
-        for (size_t i = 0; i < 64; ++i) {
-            const auto offset = block * 64 + i;
-            uint8_t byte = 0;
-            if (offset < input.size()) {
-                byte = static_cast<uint8_t>(input[offset]);
-            } else if (offset == input.size()) {
-                byte = 0x80;
-            } else if (offset >= blocks * 64 - 8) {
-                byte =
-                    static_cast<uint8_t>((static_cast<uint64_t>(input.size()) * 8) >> ((blocks * 64 - 1 - offset) * 8));
-            }
-            words[i / 4] |= static_cast<uint32_t>(byte) << ((3 - i % 4) * 8);
+void Sha256State::Transform() {
+    std::array<uint32_t, 64> words{};
+    for (size_t i = 0; i < block_.size(); ++i) {
+        words[i / 4] |= static_cast<uint32_t>(static_cast<uint8_t>(block_[i])) << ((3 - i % 4) * 8);
+    }
+    for (size_t i = 16; i < 64; ++i) {
+        const auto a = words[i - 15];
+        const auto b = words[i - 2];
+        words[i] = words[i - 16] + (std::rotr(a, 7) ^ std::rotr(a, 18) ^ (a >> 3)) + words[i - 7] +
+                   (std::rotr(b, 17) ^ std::rotr(b, 19) ^ (b >> 10));
+    }
+    auto work = hash_;
+    for (size_t i = 0; i < 64; ++i) {
+        const auto sum1 = std::rotr(work[4], 6) ^ std::rotr(work[4], 11) ^ std::rotr(work[4], 25);
+        const auto choose = (work[4] & work[5]) ^ (~work[4] & work[6]);
+        const auto temp = work[7] + sum1 + choose + round_constants[i] + words[i];
+        const auto sum0 = std::rotr(work[0], 2) ^ std::rotr(work[0], 13) ^ std::rotr(work[0], 22);
+        const auto majority = (work[0] & work[1]) ^ (work[0] & work[2]) ^ (work[1] & work[2]);
+        for (size_t j = 7; j > 0; --j) {
+            work[j] = work[j - 1];
         }
-        for (size_t i = 16; i < 64; ++i) {
-            const auto a = words[i - 15];
-            const auto b = words[i - 2];
-            words[i] = words[i - 16] + (std::rotr(a, 7) ^ std::rotr(a, 18) ^ (a >> 3)) + words[i - 7] +
-                       (std::rotr(b, 17) ^ std::rotr(b, 19) ^ (b >> 10));
-        }
-        auto work = hash;
-        for (size_t i = 0; i < 64; ++i) {
-            const auto sum1 = std::rotr(work[4], 6) ^ std::rotr(work[4], 11) ^ std::rotr(work[4], 25);
-            const auto choose = (work[4] & work[5]) ^ (~work[4] & work[6]);
-            const auto temp = work[7] + sum1 + choose + round_constants[i] + words[i];
-            const auto sum0 = std::rotr(work[0], 2) ^ std::rotr(work[0], 13) ^ std::rotr(work[0], 22);
-            const auto majority = (work[0] & work[1]) ^ (work[0] & work[2]) ^ (work[1] & work[2]);
-            for (size_t j = 7; j > 0; --j) {
-                work[j] = work[j - 1];
-            }
-            work[4] += temp;
-            work[0] = temp + sum0 + majority;
-        }
-        for (size_t i = 0; i < hash.size(); ++i) {
-            hash[i] += work[i];
+        work[4] += temp;
+        work[0] = temp + sum0 + majority;
+    }
+    for (size_t i = 0; i < hash_.size(); ++i) {
+        hash_[i] += work[i];
+    }
+}
+
+void Sha256State::Update(std::string_view input) {
+    bytes_ += input.size();
+    while (!input.empty()) {
+        const auto count = std::min(block_.size() - used_, input.size());
+        std::copy_n(input.data(), count, block_.data() + used_);
+        used_ += count;
+        input.remove_prefix(count);
+        if (used_ == block_.size()) {
+            Transform();
+            used_ = 0;
         }
     }
+}
+
+std::string Sha256State::Digest() const {
+    auto final = *this;
+    const uint64_t bits = bytes_ * 8;
+    final.Update(std::string_view("\x80", 1));
+    while (final.used_ != 56) {
+        final.Update(std::string_view("\0", 1));
+    }
+    std::array<char, 8> length{};
+    for (size_t i = 0; i < length.size(); ++i) {
+        length[i] = static_cast<char>((bits >> (56 - i * 8)) & 255U);
+    }
+    final.Update(std::string_view(length.data(), length.size()));
     constexpr std::string_view digits = "0123456789abcdef";
     std::string result;
-    for (auto word : hash) {
+    result.reserve(64);
+    for (auto word : final.hash_) {
         for (int shift = 28; shift >= 0; shift -= 4) {
             result.push_back(digits[(word >> shift) & 15]);
         }
     }
     return result;
+}
+
+std::string Sha256(std::string_view input) {
+    Sha256State hash;
+    hash.Update(input);
+    return hash.Digest();
 }
 
 Result<std::string> EncodeSchema(const SchemaSpec &schema) {
@@ -250,12 +270,11 @@ Result<std::string> SchemaFingerprint(const SchemaSpec &schema) {
     return Sha256(*encoded);
 }
 
-Result<NormalizedInput> NormalizeRows(const SchemaSpec &schema, std::string_view collection_id,
-                                      const std::vector<Row> &rows) {
+Result<std::string> EncodeAppendHeader(const SchemaSpec &schema, std::string_view collection_id, size_t rows) {
     try {
         ValidateSchema(schema);
         Require(ValidUuid(collection_id), "INVALID_ARGUMENT", "collection ID must be a canonical UUID");
-        Require(!rows.empty() && rows.size() <= 10000, "INVALID_ARGUMENT", "append requires 1..10000 rows");
+        Require(rows != 0 && rows <= 10000, "INVALID_ARGUMENT", "append requires 1..10000 rows");
         Encoder out;
         out.bytes.assign("COLUMNAR-APPEND\0", 16);
         out.Number<uint16_t>(1);
@@ -267,7 +286,24 @@ Result<NormalizedInput> NormalizeRows(const SchemaSpec &schema, std::string_view
         }
         out.bytes += Unhex(uuid);
         out.bytes += Unhex(*SchemaFingerprint(schema));
-        out.Number(static_cast<uint64_t>(rows.size()));
+        out.Number(static_cast<uint64_t>(rows));
+        return out.bytes;
+    } catch (const Failure &error) {
+        auto detail = error.detail;
+        detail.retry_hint = RetryHint::FixInput;
+        return std::unexpected(std::move(detail));
+    }
+}
+
+Result<NormalizedInput> NormalizeRows(const SchemaSpec &schema, std::string_view collection_id,
+                                      const std::vector<Row> &rows) {
+    try {
+        const auto header = EncodeAppendHeader(schema, collection_id, rows.size());
+        if (!header) {
+            throw Failure(header.error());
+        }
+        Encoder out;
+        out.bytes = *header;
         const auto header_size = out.bytes.size();
         NormalizedInput result;
         result.rows.reserve(rows.size());

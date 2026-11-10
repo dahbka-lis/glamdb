@@ -156,5 +156,49 @@ TEST_F(CoordinatorFaultTest, WaitingRetryObservesBarrierClosedByAnotherWriter) {
     EXPECT_EQ(backend->prepares, 2);
 }
 
+TEST_F(CoordinatorFaultTest, UncertainCreateRetainsItsIdentityAndOutcomeUntilReconcile) {
+    for (const bool committed : {false, true}) {
+        const CreateCollectionRequest request{
+            committed ? "00000000-0000-0000-0000-000000000007" : "00000000-0000-0000-0000-000000000006",
+            committed ? "after-unlink" : "before-unlink", SchemaSpec{{{"n", FieldType::Int64, true}}}};
+        vfs.Arm(1, committed);
+        const auto first = engine->CreateCollection(request);
+        ASSERT_EQ(first.disposition, CommitDisposition::CommitUnknown);
+        const auto repeated = engine->CreateCollection(request);
+        EXPECT_EQ(repeated.disposition, CommitDisposition::CommitUnknown);
+        EXPECT_EQ(repeated.phase, first.phase);
+        EXPECT_EQ(repeated.error, first.error);
+        EXPECT_EQ(test::Present(repeated.error).retry_hint, RetryHint::SameIdAfterReconcile);
+        const auto &initial = test::Present(first.recovery);
+        const auto &retry = test::Present(repeated.recovery);
+        EXPECT_EQ(retry.store_id, initial.store_id);
+        EXPECT_EQ(retry.collection_id, initial.collection_id);
+        EXPECT_EQ(retry.exact_name, initial.exact_name);
+        EXPECT_EQ(retry.schema_hash, initial.schema_hash);
+        EXPECT_EQ(retry.attempt_id, initial.attempt_id);
+        EXPECT_EQ(retry.candidate_table_uuid, initial.candidate_table_uuid);
+        EXPECT_EQ(retry.candidate_metadata_location, initial.candidate_metadata_location);
+        EXPECT_EQ(retry.publication_started, initial.publication_started);
+        auto different = request;
+        different.schema.fields[0].nullable = false;
+        EXPECT_EQ(test::Present(engine->CreateCollection(different).error).code, "SCHEMA_MISMATCH");
+        EXPECT_EQ(test::Present(engine->CreateCollection(request).recovery).attempt_id, initial.attempt_id);
+        const CreateCollectionRequest unrelated{"00000000-0000-0000-0000-000000000009", "unrelated", request.schema};
+        const auto blocked_other = engine->CreateCollection(unrelated);
+        EXPECT_EQ(blocked_other.disposition, CommitDisposition::CommitUnknown);
+        EXPECT_EQ(test::Present(blocked_other.recovery).collection_id, unrelated.collection_id);
+        EXPECT_EQ(test::Present(engine->CreateCollection(request).recovery).attempt_id, initial.attempt_id);
+        vfs.Disarm();
+        ASSERT_TRUE(engine->Reconcile());
+        if (!committed) {
+            EXPECT_FALSE(engine->GetCollection(request.collection_id));
+        }
+        const auto resolved = engine->CreateCollection(request);
+        EXPECT_EQ(resolved.disposition, CommitDisposition::Committed);
+        EXPECT_EQ(test::Present(resolved.info).collection_id, request.collection_id);
+        EXPECT_EQ(test::Present(resolved.info).schema, request.schema);
+    }
+}
+
 } // namespace
 } // namespace glamdb
