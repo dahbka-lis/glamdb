@@ -15,7 +15,7 @@ class RecordBatch;
 
 namespace glamdb {
 
-enum class RetryHint {
+enum class RetryHint : uint8_t {
     SameIdAfterReconcile,
     NewOperationId,
     FixInput,
@@ -44,7 +44,7 @@ enum class FieldType : uint8_t {
 struct FieldSpec {
     std::string name;
     FieldType type = FieldType::String;
-    bool nullable = true;
+    bool nullable = false;
     bool operator==(const FieldSpec &) const = default;
 };
 
@@ -74,12 +74,12 @@ struct BaseIdentity {
     bool operator==(const BaseIdentity &) const = default;
 };
 
-enum class CommitDisposition {
+enum class CommitDisposition : uint8_t {
     Committed,
     DefinitelyNotCommitted,
     CommitUnknown
 };
-enum class CommitPhase {
+enum class CommitPhase : uint8_t {
     Validation,
     Binding,
     Data,
@@ -119,6 +119,10 @@ struct RecoveryContext {
     std::optional<std::string> candidate_metadata_location;
     ErrorDetail first_error;
     bool publication_started = false;
+    // Before an authoritative operation lookup, base is the last confirmed
+    // collection view and attempt_id identifies this resolution call. No new
+    // operation has been bound or published in that call.
+    bool lookup_blocked = false;
     bool operator==(const RecoveryContext &) const = default;
 };
 
@@ -167,7 +171,7 @@ struct CreateOutcome {
     std::optional<CreateRecoveryContext> recovery;
 };
 
-enum class SnapshotPreconditionKind { Any, NoSnapshot, Equals };
+enum class SnapshotPreconditionKind : uint8_t { Any, NoSnapshot, Equals };
 struct SnapshotPrecondition {
     SnapshotPreconditionKind kind = SnapshotPreconditionKind::Any;
     int64_t snapshot_id = 0;
@@ -200,14 +204,14 @@ struct CreateStoreRequest {
     std::string store_id;
     std::string absolute_root;
     std::string profile_id = "local-delete-extra-v1";
-    Limits limits;
+    Limits limits{};
 };
 
 struct OpenStoreRequest {
     std::string absolute_root;
     std::string expected_store_id;
     std::string profile_id = "local-delete-extra-v1";
-    Limits limits;
+    Limits limits{};
 };
 
 } // namespace glamdb

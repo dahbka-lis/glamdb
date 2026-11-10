@@ -25,5 +25,8 @@ Result<NormalizedInput> NormalizeRows(const SchemaSpec &schema,
 Result<NormalizedInput> NormalizeBatches(
     const SchemaSpec &schema, std::string_view collection_id,
     const std::vector<std::shared_ptr<arrow::RecordBatch>> &batches);
+Result<size_t> InputReservation(
+    const SchemaSpec &schema,
+    const std::vector<std::shared_ptr<arrow::RecordBatch>> &batches);
 
 } // namespace glamdb::detail

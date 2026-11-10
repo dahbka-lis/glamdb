@@ -12,6 +12,8 @@ namespace glamdb::detail {
 struct Failure : std::runtime_error {
     ErrorDetail detail;
     bool uncertain = false;
+    int native_code = 0;
+    std::optional<CommitPhase> phase;
     explicit Failure(ErrorDetail error, bool unknown = false)
         : std::runtime_error(error.message), detail(std::move(error)),
           uncertain(unknown) {
@@ -38,7 +40,7 @@ struct Encoder {
         }
     }
     void Text(std::string_view text) {
-        Require(text.size() <= 16 * 1024 * 1024, "RESOURCE_EXHAUSTED",
+        Require(text.size() <= 16ULL * 1024 * 1024, "RESOURCE_EXHAUSTED",
                 "encoded string too large");
         Number(static_cast<uint32_t>(text.size()));
         bytes.append(text);

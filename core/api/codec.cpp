@@ -45,7 +45,16 @@ Status ValidateOutcome(const AppendOutcome &outcome) {
         return std::unexpected(ErrorDetail{
             "CORRUPTION", "invalid append outcome", RetryHint::OperatorAction});
     };
-    if (!ValidUuid(outcome.operation_id)) {
+    const auto valid_error = [](const ErrorDetail &error) {
+        return !error.code.empty() && error.code.size() <= 128 &&
+               error.message.size() <= 2048 && ValidUtf8(error.code) &&
+               ValidUtf8(error.message) &&
+               error.retry_hint >= RetryHint::SameIdAfterReconcile &&
+               error.retry_hint <= RetryHint::OperatorAction;
+    };
+    if (!ValidUuid(outcome.operation_id) ||
+        outcome.phase < CommitPhase::Validation ||
+        outcome.phase > CommitPhase::Complete) {
         return invalid();
     }
     if (outcome.disposition == CommitDisposition::Committed) {
@@ -78,7 +87,7 @@ Status ValidateOutcome(const AppendOutcome &outcome) {
             outcome.error->message.size() > 2048 ||
             !ValidUtf8(outcome.error->code) ||
             !ValidUtf8(outcome.error->message) ||
-            outcome.error->retry_hint > RetryHint::OperatorAction) {
+            !valid_error(*outcome.error)) {
             return invalid();
         }
         if (outcome.disposition == CommitDisposition::DefinitelyNotCommitted) {
@@ -89,6 +98,32 @@ Status ValidateOutcome(const AppendOutcome &outcome) {
             if (!outcome.recovery || outcome.phase == CommitPhase::Validation ||
                 outcome.phase == CommitPhase::Data ||
                 outcome.phase == CommitPhase::Metadata) {
+                return invalid();
+            }
+            const auto &context = *outcome.recovery;
+            const auto &base = context.base;
+            const auto prefix = "store://" + context.store_id + "/warehouse/";
+            if (!ValidUuid(context.store_id) ||
+                !ValidUuid(context.collection_id) ||
+                context.operation_id != outcome.operation_id ||
+                !ValidDigest(context.payload_hash) ||
+                context.hash_version != 1 || !ValidUuid(context.attempt_id) ||
+                base.store_id != context.store_id ||
+                base.collection_id != context.collection_id ||
+                !ValidUuid(base.table_uuid) ||
+                !base.metadata_location.starts_with(prefix) ||
+                base.metadata_location.size() <= prefix.size() ||
+                base.metadata_location.size() > 2048 ||
+                !ValidUtf8(base.metadata_location) || base.schema_id < 0 ||
+                base.spec_id < 0 || !valid_error(context.first_error) ||
+                (context.candidate_metadata_location &&
+                 (!context.candidate_metadata_location->starts_with(prefix) ||
+                  context.candidate_metadata_location->size() > 2048 ||
+                  !ValidUtf8(*context.candidate_metadata_location))) ||
+                (context.lookup_blocked &&
+                 (context.publication_started ||
+                  context.candidate_snapshot_id ||
+                  context.candidate_metadata_location))) {
                 return invalid();
             }
         } else {

@@ -312,7 +312,7 @@ Result<NormalizedInput> NormalizeRows(const SchemaSpec &schema,
             // Validate sizes before making an owned copy of caller memory.
             for (const auto &cell : row) {
                 if (const auto *text = std::get_if<std::string>(&cell)) {
-                    Require(text->size() <= 1024U * 1024, "INVALID_ARGUMENT",
+                    Require(text->size() <= 1024ULL * 1024, "INVALID_ARGUMENT",
                             "oversized string");
                 }
             }
@@ -320,10 +320,10 @@ Result<NormalizedInput> NormalizeRows(const SchemaSpec &schema,
             const auto before = out.bytes.size();
             for (size_t i = 0; i < row.size(); ++i) {
                 EncodeCell(out, schema.fields[i], normalized[i]);
-                Require(out.bytes.size() - before <= 2U * 1024 * 1024 &&
-                            out.bytes.size() - header_size <= 16U * 1024 * 1024,
-                        "RESOURCE_EXHAUSTED",
-                        "append exceeds decoded input limit");
+                Require(
+                    out.bytes.size() - before <= 2ULL * 1024 * 1024 &&
+                        out.bytes.size() - header_size <= 16ULL * 1024 * 1024,
+                    "RESOURCE_EXHAUSTED", "append exceeds decoded input limit");
             }
             result.rows.push_back(std::move(normalized));
         }
