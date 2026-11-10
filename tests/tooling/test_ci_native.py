@@ -53,8 +53,12 @@ class CiNativeRunnerTest(unittest.TestCase):
             'enable_testing()\n'
             f'add_test(NAME intentional-failure COMMAND "{sys.executable}" "{source}/fail.py")\n'
         )
-        subprocess.run(["cmake", "-S", str(source), "-B", str(self.root / "build/ci-normal")],
+        generator = os.environ.get("GLAMDB_TEST_GENERATOR", "Ninja")
+        build = self.root / "build/ci-normal"
+        subprocess.run(["cmake", "-S", str(source), "-B", str(build), "-G", generator],
                        check=True, capture_output=True)
+        self.assertIn(f"CMAKE_GENERATOR:INTERNAL={generator}\n",
+                      (build / "CMakeCache.txt").read_text())
         result = self.run_script("normal", "test")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("intentional test failure details", result.stdout)
