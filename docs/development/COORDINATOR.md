@@ -77,7 +77,7 @@ closure. Catalog checks alone cannot establish these storage properties.
 Outcome JSON in `apps/glamdb/outcome_json.*` keeps transport dependencies outside
 the public API. All int64 quantities are decimal strings; version numbers are
 integers. Append replies carry complete receipt/recovery fields. Unknown is
-HTTP 503 with `same_id_after_reconcile`. Create success is a direct collection
+HTTP 503 with `SameIdAfterReconcile`. Create success is a direct collection
 object, including `current_snapshot_id`, ordered `field_id` values and append
 mode, matching the SDK/UI contract in
 [PR #4](https://github.com/glamourdb/glamdb/pull/4).
