@@ -1,3 +1,5 @@
+#include "core/api/binary.h"
+#include "core/api/codec.h"
 #include "core/engine/engine_factory.h"
 #include "tests/support/arrow_batch.h"
 #include "tests/support/checked.h"
@@ -106,6 +108,31 @@ TEST_F(CoordinatorFaultTest, LostFailureRecordingResultRetainsOriginalProducerFa
     EXPECT_EQ(failed.phase, CommitPhase::Data);
     EXPECT_EQ(test::Present(failed.error).message, "first producer error");
     EXPECT_EQ(backend->prepares, 1);
+}
+
+TEST_F(CoordinatorFaultTest, LongUtf8FailureSurvivesLostRecordingResultAndLiveReconcile) {
+    const std::string prefix(2047, 'x');
+    for (const bool committed : {false, true}) {
+        const auto request = Request(committed ? "00000000-0000-0000-0000-000000000006" : test::operation_id);
+        backend->on_prepare = [&] { throw detail::Failure({"IO_ERROR", prefix + "я", RetryHint::OperatorAction}); };
+        vfs.Arm(2, committed);
+        const auto unknown = engine->AppendDurable(request);
+        backend->on_prepare = {};
+        vfs.Disarm();
+        EXPECT_EQ(unknown.disposition, CommitDisposition::CommitUnknown);
+        EXPECT_EQ(unknown.phase, CommitPhase::RecordingFailure);
+        EXPECT_TRUE(detail::ValidateOutcome(unknown));
+        EXPECT_EQ(test::Present(unknown.recovery).first_error.message, prefix);
+        ASSERT_TRUE(engine->Reconcile());
+        const auto failed = engine->AppendDurable(request);
+        EXPECT_EQ(failed.disposition, CommitDisposition::DefinitelyNotCommitted);
+        EXPECT_EQ(failed.phase, CommitPhase::Data);
+        EXPECT_EQ(test::Present(failed.error).code, "IO_ERROR");
+        EXPECT_EQ(test::Present(failed.error).message, prefix);
+        EXPECT_TRUE(detail::ValidateOutcome(failed));
+        EXPECT_EQ(engine->AppendDurable(request), failed);
+    }
+    EXPECT_EQ(backend->prepares, 2);
 }
 
 TEST_F(CoordinatorFaultTest, RecoveryBarrierCannotReportAnOldCommittedIdAsUncommitted) {

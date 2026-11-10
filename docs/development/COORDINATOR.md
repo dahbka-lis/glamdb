@@ -43,7 +43,9 @@ journal, background job queue, backup or automatic file deletion in this MVP.
   transactions join that scope. A guard runs before the single INSERT/CAS;
   registry/pointer, snapshot identity and terminal receipt commit atomically.
   Failed inner transactions poison the outer scope even if their error is
-  ignored. Ordinary failure records a permanent failed outcome.
+  ignored. Ordinary failure records a permanent failed outcome. Bounded error
+  diagnostics retain a valid UTF-8 prefix of at most 2048 bytes, so truncation
+  cannot make a failure outcome unencodable or block live reconciliation.
 - An uncertain binding/publication/failure-recording result closes readiness.
   Reconciliation closes the old handle, reopens authoritative SQLite state,
   validates retained storage in both directions, and commits a real fence
@@ -59,6 +61,11 @@ journal, background job queue, backup or automatic file deletion in this MVP.
   that call binds/publishes nothing and does not replace the original recovery
   target. Resource pressure alone does not close readiness. A global recovery
   barrier, including one raised while a retry waits, also uses this response.
+- Shutdown closes admission without declaring earlier operations uncommitted.
+  Queued retries and calls on a closing/closed engine return an unknown lookup
+  outcome and retain any matching original recovery context. Reopen the store
+  after releasing the closed engine to resolve the original ID; do not retry
+  under a new ID because admission closed.
 - An uncertain collection creation retains its complete outcome and context
   until reconciliation succeeds. An identical name/UUID/schema retry returns
   that outcome; conflicting identity/schema fails without erasing it. Unknown
@@ -124,9 +131,9 @@ Iceberg 0.4.0 (`64dc66f159bd62c9817a96d74cbce767268934d0`) and locked SQLite
 
 | Executed check | Result |
 | --- | --- |
-| Normal build + `ctest --test-dir build/coordinator --output-on-failure` | 56/56 PASS |
-| Release build + `ctest --test-dir build/coordinator-release --output-on-failure` | 56/56 PASS |
-| Debug ASan/UBSan/LeakSanitizer + CTest | 55/55 PASS; installed consumer tested separately above |
+| Normal build + `ctest --test-dir build/coordinator --output-on-failure` | 66/66 PASS |
+| Release build + `ctest --test-dir build/coordinator-release --output-on-failure` | 66/66 PASS |
+| Debug ASan/UBSan/LeakSanitizer + CTest | 65/65 PASS; installed consumer tested separately above |
 | Unmodified SDK parsing native outcome JSON through mock transport | 6/6 PASS |
 | LLVM 18 formatting / analyzer | 36 files / 20 translation units PASS |
 | Formatting and analyzer negative controls | Both deliberate violations rejected |
@@ -147,7 +154,9 @@ permanent failures; exact metadata-only bases; nested transaction rollback;
 lost COMMIT and fence results through a real SQLite VFS; global-barrier races;
 writer/pending/input pressure without changing old outcomes; tentative-catalog
 lookup isolation; retained uncertain-create contexts; incremental SHA-256
-padding boundaries and all-type Arrow fingerprint goldens; fresh-process
+padding boundaries and all-type Arrow fingerprint goldens; shutdown during
+publication with queued retries; bounded multibyte diagnostics and live recovery
+after losing failure-recording results; fresh-process
 operation recovery, hot rollback journals and store leases; and the installed
 public package.
 

@@ -30,6 +30,7 @@ private:
 
 bool ValidUuid(std::string_view value);
 bool ValidUtf8(std::string_view value);
+std::string BoundedDiagnostic(std::string_view message);
 bool ValidDigest(std::string_view value);
 std::string Sha256(std::string_view input);
 Result<std::string> EncodeAppendHeader(const SchemaSpec &schema, std::string_view collection_id, size_t rows);

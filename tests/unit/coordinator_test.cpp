@@ -1,5 +1,6 @@
 #include "storage/engine.h"
 
+#include "core/api/binary.h"
 #include "core/api/codec.h"
 #include "core/engine/engine_factory.h"
 #include "tests/support/arrow_batch.h"
@@ -218,6 +219,45 @@ TEST_F(CoordinatorTest, RegisteredFailureIsPermanentAndDifferentPayloadConflicts
     EXPECT_EQ(backend->prepares, 1);
 }
 
+class DiagnosticTest : public CoordinatorTest, public testing::WithParamInterface<std::string> {};
+
+TEST_P(DiagnosticTest, LongProducerFailureRemainsDurableAndRecoverable) {
+    const std::string prefix(2047, 'x');
+    backend->on_prepare = [&] { throw detail::Failure({"IO_ERROR", prefix + GetParam(), RetryHint::OperatorAction}); };
+    const auto failed = engine->AppendDurable(Request());
+    backend->on_prepare = {};
+    EXPECT_EQ(failed.disposition, CommitDisposition::DefinitelyNotCommitted);
+    EXPECT_EQ(test::Present(failed.error).code, "IO_ERROR");
+    EXPECT_EQ(test::Present(failed.error).message, prefix);
+    EXPECT_TRUE(detail::ValidateOutcome(failed));
+    ASSERT_TRUE(engine->Reconcile());
+    EXPECT_EQ(engine->AppendDurable(Request()), failed);
+    auto opened = Reopen();
+    ASSERT_TRUE(opened);
+    engine = *opened;
+    EXPECT_EQ(engine->AppendDurable(Request()), failed);
+    EXPECT_EQ(backend->prepares, 1);
+}
+
+TEST_P(DiagnosticTest, LongVerifierExceptionPreservesAValidUnknownOutcome) {
+    const auto original = engine->AppendDurable(Request());
+    ASSERT_EQ(original.disposition, CommitDisposition::Committed);
+    const std::string prefix(2047, 'x');
+    backend->on_verify = [&] { throw std::runtime_error(prefix + GetParam()); };
+    const auto unknown = engine->AppendDurable(Request());
+    backend->on_verify = {};
+    EXPECT_EQ(unknown.disposition, CommitDisposition::CommitUnknown);
+    EXPECT_EQ(test::Present(unknown.error).code, "INTERNAL");
+    EXPECT_EQ(test::Present(unknown.error).message, prefix);
+    EXPECT_EQ(test::Present(unknown.recovery).first_error.message, prefix);
+    EXPECT_TRUE(detail::ValidateOutcome(unknown));
+    ASSERT_TRUE(engine->Reconcile());
+    EXPECT_EQ(engine->AppendDurable(Request()), original);
+}
+
+INSTANTIATE_TEST_SUITE_P(Utf8Boundary, DiagnosticTest,
+                         testing::Values(std::string("я"), std::string("€"), std::string("😀")));
+
 TEST_F(CoordinatorTest, EmptyInputDoesNotBindAndPreconditionFailureDoes) {
     auto empty = Request();
     empty.batches.clear();
@@ -336,6 +376,58 @@ TEST_F(CoordinatorTest, ActiveLookupAndShutdownTimeoutDoNotInventFailure) {
     EXPECT_TRUE(engine->Shutdown(std::chrono::milliseconds(1000)));
 }
 
+TEST_F(CoordinatorTest, ShutdownCannotTurnAPublishingRetryIntoADefiniteFailure) {
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    backend->on_pointer = [&] {
+        entered.set_value();
+        released.wait();
+    };
+    auto write = std::async(std::launch::async, [&] { return engine->AppendDurable(Request()); });
+    entered.get_future().wait();
+    auto retry = std::async(std::launch::async, [&] { return engine->AppendDurable(Request()); });
+    const auto waiting = retry.wait_for(std::chrono::milliseconds(100));
+    const auto shutdown = engine->Shutdown(std::chrono::milliseconds(1));
+    const auto closing = engine->AppendDurable(Request());
+    release.set_value();
+    const auto original = write.get();
+    const auto waited = retry.get();
+    backend->on_pointer = {};
+    EXPECT_EQ(waiting, std::future_status::timeout);
+    ASSERT_FALSE(shutdown);
+    EXPECT_EQ(shutdown.error().code, "DEADLINE_EXCEEDED");
+    ASSERT_EQ(original.disposition, CommitDisposition::Committed);
+    for (const auto &outcome : {waited, closing}) {
+        EXPECT_EQ(outcome.disposition, CommitDisposition::CommitUnknown);
+        EXPECT_EQ(test::Present(outcome.error).retry_hint, RetryHint::SameIdAfterReconcile);
+        EXPECT_TRUE(detail::ValidateOutcome(outcome));
+        EXPECT_TRUE(test::Present(outcome.recovery).lookup_blocked);
+    }
+    ASSERT_TRUE(engine->Shutdown(std::chrono::milliseconds(1000)));
+    const auto closed = engine->AppendDurable(Request());
+    EXPECT_EQ(closed.disposition, CommitDisposition::CommitUnknown);
+    EXPECT_TRUE(detail::ValidateOutcome(closed));
+    auto opened = Reopen();
+    ASSERT_TRUE(opened);
+    engine = *opened;
+    EXPECT_EQ(engine->AppendDurable(Request()), original);
+    EXPECT_EQ(backend->prepares, 1);
+}
+
+TEST_F(CoordinatorTest, ShutdownCannotReclassifyAnExistingCollectionAsUncommitted) {
+    const CreateCollectionRequest request{test::collection_id, "events", SchemaSpec{{{"n", FieldType::Int64, true}}}};
+    ASSERT_TRUE(engine->Shutdown(std::chrono::milliseconds(1000)));
+    const auto unknown = engine->CreateCollection(request);
+    EXPECT_EQ(unknown.disposition, CommitDisposition::CommitUnknown);
+    EXPECT_EQ(test::Present(unknown.error).retry_hint, RetryHint::SameIdAfterReconcile);
+    EXPECT_EQ(test::Present(unknown.recovery).collection_id, test::collection_id);
+    auto opened = Reopen();
+    ASSERT_TRUE(opened);
+    engine = *opened;
+    EXPECT_EQ(engine->CreateCollection(request).disposition, CommitDisposition::Committed);
+}
+
 TEST_F(CoordinatorTest, ShutdownReportsRecoveryExceptionAndRetainsOwnership) {
     ASSERT_EQ(engine->AppendDurable(Request()).disposition, CommitDisposition::Committed);
     backend->throw_verifier = true;
@@ -344,6 +436,10 @@ TEST_F(CoordinatorTest, ShutdownReportsRecoveryExceptionAndRetainsOwnership) {
     EXPECT_NO_THROW(shutdown = engine->Shutdown(std::chrono::milliseconds(1000)));
     ASSERT_FALSE(shutdown);
     EXPECT_EQ(shutdown.error().code, "INTERNAL");
+    const auto retry = engine->AppendDurable(Request());
+    EXPECT_EQ(retry.disposition, CommitDisposition::CommitUnknown);
+    EXPECT_TRUE(detail::ValidateOutcome(retry));
+    EXPECT_FALSE(test::Present(retry.recovery).lookup_blocked);
     const auto other = detail::EngineFactory::Open({root.string(), test::store_id}, backend);
     ASSERT_FALSE(other);
     EXPECT_EQ(other.error().code, "STATE_IN_USE");

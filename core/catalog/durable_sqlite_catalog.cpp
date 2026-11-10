@@ -238,7 +238,7 @@ void DurableSqliteCatalogStore::Transaction(const std::function<void()> &body) {
             result.phase = commit_started ? CommitPhase::CatalogCommit : CommitPhase::CatalogTransaction;
             throw result;
         } catch (const std::exception &error) {
-            throw Failure({"IO_ERROR", std::string(error.what()).substr(0, 2048), RetryHint::OperatorAction}, unknown);
+            throw Failure({"IO_ERROR", BoundedDiagnostic(error.what()), RetryHint::OperatorAction}, unknown);
         } catch (...) {
             throw Failure({"INTERNAL", "storage callback raised an unknown exception", RetryHint::OperatorAction},
                           unknown);

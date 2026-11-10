@@ -136,6 +136,35 @@ TEST_F(CatalogTest, ExactBaseRejectsMetadataOnlyChangeAndRequiresGuard) {
     EXPECT_THROW(catalog->PublishAppend(bound, Receipt(), {}, [] { return iceberg::Status{}; }), Failure);
 }
 
+TEST_F(CatalogTest, TransactionExceptionKeepsACompleteUtf8Diagnostic) {
+    CreateCollection();
+    const auto bound = Bind();
+    const std::string prefix(2047, 'x');
+    std::optional<ErrorDetail> diagnostic;
+    try {
+        catalog->PublishAppend(
+            bound, Receipt(), [](std::string_view) -> Status { return {}; },
+            [&]() -> iceberg::Status { throw std::runtime_error(prefix + "я"); });
+        FAIL() << "publication should have thrown";
+    } catch (const Failure &error) {
+        diagnostic = error.detail;
+        EXPECT_FALSE(error.uncertain);
+    }
+    ASSERT_TRUE(diagnostic);
+    EXPECT_EQ(test::Present(diagnostic).code, "IO_ERROR");
+    EXPECT_EQ(test::Present(diagnostic).message, prefix);
+    const AppendOutcome failure{operation_id,
+                                CommitDisposition::DefinitelyNotCommitted,
+                                CommitPhase::CatalogTransaction,
+                                std::nullopt,
+                                diagnostic,
+                                std::nullopt};
+    ASSERT_TRUE(EncodeOutcome(failure));
+    catalog->RecordFailure(bound, failure);
+    catalog->Reopen();
+    EXPECT_EQ(test::Present(catalog->FindOperation(collection_id, operation_id)).outcome, failure);
+}
+
 TEST_F(CatalogTest, PermanentBindingConflictFailureCapacityAndFence) {
     CreateCollection();
     const auto bound = Bind();

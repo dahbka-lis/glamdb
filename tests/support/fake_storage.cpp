@@ -187,6 +187,9 @@ Result<std::unique_ptr<detail::StagedAppend>> FakeStorage::PrepareAppend(const S
 
 Status FakeStorage::VerifyRetained(const StoreInfo &, std::span<const detail::CollectionView> collections,
                                    std::span<const detail::OperationRecord> operations) {
+    if (on_verify) {
+        on_verify();
+    }
     if (throw_verifier) {
         throw std::runtime_error("verifier raised an exception");
     }

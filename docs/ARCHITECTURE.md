@@ -108,8 +108,9 @@ catalog pointer and cross-checked against operation information in the snapshot
 summary. Retrying A after a later B returns A's receipt without modifying B.
 
 An uncertain write closes readiness and holds the writer barrier. A retry whose
-outcome lookup is blocked by writer contention or admission limits may return
-`CommitUnknown` without closing readiness or replacing the unresolved write.
+outcome lookup is blocked by writer contention, admission limits or shutdown may
+return `CommitUnknown` without replacing the unresolved write. Resource pressure
+alone does not close readiness.
 Resource refusal alone never proves that an earlier operation did not commit.
 Resolve outstanding SQLite transactions, reopen the authoritative catalog,
 validate identities and retained history, and check reachable files before

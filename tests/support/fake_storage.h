@@ -30,6 +30,7 @@ public:
     bool throw_verifier = false;
     std::function<void()> on_prepare;
     std::function<void()> on_pointer;
+    std::function<void()> on_verify;
 };
 
 } // namespace glamdb::test

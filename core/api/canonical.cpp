@@ -142,6 +142,20 @@ bool ValidUtf8(std::string_view value) {
     return true;
 }
 
+std::string BoundedDiagnostic(std::string_view message) {
+    message = message.substr(0, 2048);
+    size_t bytes = 0;
+    while (bytes < message.size()) {
+        const auto first = static_cast<uint8_t>(message[bytes]);
+        const size_t width = first < 0x80 ? 1 : first < 0xe0 ? 2 : first < 0xf0 ? 3 : 4;
+        if (width > message.size() - bytes || !ValidUtf8(message.substr(bytes, width))) {
+            break;
+        }
+        bytes += width;
+    }
+    return std::string(message.substr(0, bytes));
+}
+
 void Sha256State::Transform() {
     std::array<uint32_t, 64> words{};
     for (size_t i = 0; i < block_.size(); ++i) {

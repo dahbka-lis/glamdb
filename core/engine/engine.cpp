@@ -26,7 +26,7 @@ T Take(Result<T> result) {
 }
 
 ErrorDetail ExceptionError(const std::exception &error) {
-    return {"INTERNAL", std::string(error.what()).substr(0, 2048), RetryHint::OperatorAction};
+    return {"INTERNAL", BoundedDiagnostic(error.what()), RetryHint::OperatorAction};
 }
 
 AppendOutcome Rejected(std::string operation_id, CommitPhase phase, ErrorDetail error) {
@@ -119,8 +119,8 @@ struct Engine::Impl {
     // The caller holds state_mutex. Recheck at every admission/writer boundary:
     // another writer may close readiness while this request is waiting.
     std::optional<RecoveryContext> BlockedAppend(const AppendRequest &request) const {
-        if (ready || closed || closing.load()) {
-            CheckReady();
+        const bool stopped = closed || closing.load();
+        if (ready && !stopped) {
             return std::nullopt;
         }
         if (recovery && recovery->collection_id == request.collection_id &&
@@ -130,10 +130,11 @@ struct Engine::Impl {
         const auto view = std::ranges::find_if(
             confirmed_views, [&](const auto &item) { return item.info.collection_id == request.collection_id; });
         Require(view != confirmed_views.end(), "RECOVERY_REQUIRED", "collection lookup is blocked by recovery");
-        const ErrorDetail error{"RECOVERY_REQUIRED",
-                                "resolve the store before consulting this operation; this call "
-                                "did not publish data",
-                                RetryHint::SameIdAfterReconcile};
+        const ErrorDetail error{
+            stopped ? "CANCELLED" : "RECOVERY_REQUIRED",
+            stopped ? "engine is closing or closed; reopen the store to resolve this operation"
+                    : "resolve the store before consulting this operation; this call did not publish data",
+            RetryHint::SameIdAfterReconcile};
         auto context =
             Context({request.collection_id, request.operation_id, {}, 1, view->base, NewUuid()}, error, false);
         context.lookup_blocked = true;
@@ -157,13 +158,16 @@ struct Engine::Impl {
                 return pending;
             }
         }
-        if (!ready && !closed && !closing.load()) {
-            return CreateOutcome{CommitDisposition::CommitUnknown, CommitPhase::Reconciling, std::nullopt,
-                                 ErrorDetail{"RECOVERY_REQUIRED", "collection lookup is blocked by recovery",
-                                             RetryHint::SameIdAfterReconcile},
-                                 context};
+        const bool stopped = closed || closing.load();
+        if (!ready || stopped) {
+            return CreateOutcome{
+                CommitDisposition::CommitUnknown, CommitPhase::Reconciling, std::nullopt,
+                ErrorDetail{stopped ? "CANCELLED" : "RECOVERY_REQUIRED",
+                            stopped ? "engine is closing or closed; reopen the store to resolve this creation"
+                                    : "collection lookup is blocked by recovery",
+                            RetryHint::SameIdAfterReconcile},
+                context};
         }
-        CheckReady();
         return std::nullopt;
     }
 
@@ -335,7 +339,7 @@ struct Engine::Impl {
 
     AppendOutcome FailBound(const BoundOperation &binding, CommitPhase phase, ErrorDetail error,
                             bool publication_started = false) {
-        error.message = error.message.substr(0, 2048);
+        error.message = BoundedDiagnostic(error.message);
         error.retry_hint = RetryHint::NewOperationId;
         auto failure = Rejected(binding.operation_id, phase, error);
         try {
