@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -42,6 +43,23 @@ class CiNativeRunnerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 17, result.stderr)
         self.assertIn("compiler failure details", result.stdout + result.stderr)
         self.assertIn("compiler failure details", (self.root / "artifacts/native-normal/build.log").read_text())
+
+    def test_real_ctest_failure_is_reported_and_fails_the_runner(self):
+        source = self.root / "fixture"
+        source.mkdir()
+        (source / "fail.py").write_text('print("intentional test failure details")\nraise SystemExit(42)\n')
+        (source / "CMakeLists.txt").write_text(
+            'cmake_minimum_required(VERSION 3.28)\nproject(Failure LANGUAGES NONE)\n'
+            'enable_testing()\n'
+            f'add_test(NAME intentional-failure COMMAND "{sys.executable}" "{source}/fail.py")\n'
+        )
+        subprocess.run(["cmake", "-S", str(source), "-B", str(self.root / "build/ci-normal")],
+                       check=True, capture_output=True)
+        result = self.run_script("normal", "test")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("intentional test failure details", result.stdout)
+        self.assertIn("intentional-failure", (self.root / "artifacts/native-normal/project-junit.xml").read_text())
+        self.assertIn("intentional test failure details", (self.root / "artifacts/native-normal/test.log").read_text())
 
 
 if __name__ == "__main__":
