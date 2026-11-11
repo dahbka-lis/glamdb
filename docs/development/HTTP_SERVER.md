@@ -26,7 +26,7 @@ uses unscoped collection routes and does not offer database management.
 `glamdb-cli` is a standalone network client with DNS and verified HTTPS; it does
 not link the engine or storage libraries. `create-store --name analytics` calls
 the managed database API. The optional `glamdb-admin` contains offline
-`create-store`/`inspect-store`, which acquire core ownership and fail with
+`create-store`/`inspect-store`, bounded snapshot `read`, and `quiesce-store`, which acquire core ownership and fail with
 `STATE_IN_USE` while the server owns the store. See the [client guide](../../apps/cli/README.md)
 for its independent build and TLS configuration. Online:
 
@@ -173,8 +173,11 @@ separate, broader development profile.
 | `POST /collections/{id}/scan/open` | `Scan` | Resolve a fixed view and return a cursor without consuming rows |
 | `POST /collections/{id}/scan` | `Scan` / `ScanCursor::Next` | First page or cursor continuation, JSON or Arrow IPC |
 | `POST /collections/{id}/scan/cancel` | `ScanCursor::Cancel` | Release a cursor and its retained resources |
-| `GET .../stats`, `.../snapshots`, `.../files`, `.../files/{file}` | Proposed public metadata methods | `501 UNSUPPORTED_OPERATION` |
-| `POST .../explain` | Proposed public explain method | `501 UNSUPPORTED_OPERATION` |
+| `GET .../stats` | `GetStatistics` / `ListSnapshots` | Selected-view counts with metric kinds and null unknowns |
+| `GET .../snapshots` | `ListSnapshots` | Receipt-backed history, bounded fixed-view pages |
+| `GET .../files` | `ListFiles` | Manifest membership and opaque file IDs, bounded pages |
+| `GET .../files/{file}` | `GetFileDetails` | Selected-view membership plus actual Parquet footer/row groups |
+| `POST .../explain` | `ExplainScan` | Fixed-view plan, unsupported pruning remains false |
 
 CLI mapping: `create-store` → `POST /databases`; `request` exposes every route
 in the tables above. Offline `glamdb-admin` uses `CreateStore` / `OpenExisting`.
@@ -304,6 +307,8 @@ Active production scans have no absolute lifetime limit. Admission reserves the
 16 MiB hard response bound for each session within a shared 1 GiB replay budget,
 before planning or consuming rows. This logical reservation covers retained
 serialized bodies, not pending Arrow buffers, outgoing copies or total memory.
+Shared process-memory refusal happens before page consumption and preserves an
+existing cursor and its last replay.
 Completed replay caches may be evicted to admit new scans. A failed page invalidates its session. Close, reconciliation
 and shutdown release sessions after admitted calls drain. Cancellation releases
 between page calls; it does not interrupt an active filesystem read.
@@ -385,10 +390,16 @@ of the full 64-field append schema (1,300,100 parser events). These transport
 bounds are not a qualified process-memory or storage budget.
 
 The [shared resource budget matrix](RESOURCE_BUDGETS.md) specifies which limits
-are per request, store or service, who reserves/releases them and which aggregate
-budgets remain required. HTTP body bytes, parsed JSON/Arrow allocations and core
-canonical bytes are different quantities; the per-store owned-input limit does
-not cover adapter allocations or all databases together.
+are per request, store or service and who reserves/releases them. A
+[process resource owner](SHARED_RESOURCES.md) now admits all managed databases,
+registry state, request bodies, parsing work, scan replay and outgoing responses.
+HTTP body bytes, parsed JSON/Arrow allocations and core canonical bytes have
+separate charges. Socket/header descriptors use protected completion capacity;
+lookup and lifecycle bodies up to 64 KiB also use it. Larger control bodies use
+ordinary data capacity within the existing 16 MiB wire limit. Ordinary data
+saturation preserves small outcome, readiness and reconciliation requests.
+The conservative working envelopes and [measured profile](SHARED_RESOURCES_VALIDATION.md)
+do not qualify a universal RSS bound.
 
 HTTP/1.1 uses Content-Length and closes each response connection. Duplicate
 headers, folded headers, Transfer-Encoding, compressed requests and pipelined bytes
@@ -411,6 +422,10 @@ Configure the proxy with the deployment certificate and key, forward
 request. `X-Forwarded-*` headers grant no access. The single bearer identity can
 administer every managed database; a scan cursor is additionally bound to its
 database, collection and representation. A cursor alone never authenticates.
+There are no per-user or per-database grants; use separate service processes and
+tokens for separate access. Authentication precedes body admission and
+`100 Continue`. Validation errors omit unknown JSON field names and predicate
+operators so pasted secrets are not echoed.
 
 Set proxy header/body/concurrency limits and timeouts as well as the native
 limits. If the proxy accepts chunked uploads, buffer them under its own finite
@@ -453,7 +468,7 @@ keeps operation identity and durable outcome lookup separate from the connection
 
 ```sh
 GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 \
-ctest --preset local -R 'glamdb\.(native_http|scan_http|database_limits|transport\.|routes\.|cli)'
+ctest --preset local -R 'glamdb\.(native_http|http_security|scan_http|database_limits|transport\.|routes\.|cli)'
 # With workbench Python dependencies, also exercise SDK JSON/Arrow decoding:
 .venv/bin/python tests/server/native_http_test.py build/local/apps/server/glamdb build/local/apps/cli/glamdb-cli ui
 GLAMDB_NATIVE_SERVER="$PWD/build/local/apps/server/glamdb" \
@@ -475,6 +490,11 @@ input, row and scan-session limits, and credential-free errors/logs. The
 protected control progress, encoded routes and reservation release over HTTP and
 verified HTTPS. Its SQLite VFS fault controls are test-only; these admission
 cases use the production listener and storage without injecting a fault.
+
+`glamdb.http_security` checks credential-free JSON/predicate diagnostics and
+rejects missing/invalid credentials and oversized/encoded bodies before
+`100 Continue`, over HTTP and verified HTTPS. It reads the first raw response
+head so an incorrect interim Continue cannot be hidden by the HTTP client.
 
 The deterministic `glamdb.http_lifecycle` test uses a test-only backend barrier
 to disconnect and deliver SIGTERM during publication, verifies that the server
@@ -536,3 +556,30 @@ The 64-client phase exceeds the eight-cursor database quota; neither phase had
 limit timing interpretation. This is concurrency evidence, not a capacity or
 before/after performance claim. Configurable cursor quotas and aggregate process
 memory admission remain separate work.
+
+## Metadata selectors and cursors
+
+Stats/history/files accept omitted `snapshot_id` for latest, `snapshot_id=initial`
+for the initial empty view, or a canonical decimal snapshot ID. Explain accepts
+the scan body (`snapshot_id: null` for initial). Root identity and resolved
+selected `snapshot_id` are distinct: an older view never claims the newest
+snapshot as its own. Metadata counts and IDs are decimal strings. Logical bytes,
+unknown bounds and unsupported physical IO remain null/unavailable.
+Explain retains the validated compound predicate tree, including NULL literals,
+and uses reader admission so a blocked publisher does not delay the selected-view
+plan.
+
+Only history/files support metadata pagination: `page_size` 1..1,000 and opaque
+`cursor`, repeated with the same kind/database/collection/selector/page size.
+The first bounded inventory is frozen; later appends cannot change it. Tokens
+expire after 60 seconds idle or 300 seconds total. There are at most 64 metadata
+sessions, eight per database, 16 MiB serialized JSON per inventory and 64 MiB
+retained serialized JSON overall. These are JSON accounting limits, not a full
+DOM/heap governor. Read admission is checked even for cached pages.
+After the last page is consumed, its inventory remains available for replay
+while capacity permits. New listings reclaim the oldest completed inventories
+before refusing admission; inventories with unread pages are never evicted for
+capacity. Reclaimed continuation tokens return `404` like expired tokens.
+Lifecycle close/reconcile clears tokens. No raw file paths can be requested;
+file IDs outside the selected snapshot fail even when the file exists elsewhere.
+See `glamdb.native_metadata` and [system acceptance](NATIVE_ACCEPTANCE.md).

@@ -71,6 +71,7 @@ glamdb/
 | `public/storage/` | Installed engine API/request/outcome/scan/metadata types, metric provenance and the independent storage schema DTO. |
 | `core/api/`, `core/catalog/`, `core/engine/` | `glamdb_core` / `glamdb::core`: canonical input, SQLite catalog, coordinator, and public facade. |
 | `core/backend/` | Storage backend bridging the coordinator seam to `glamdb_storage` (built with `GLAMDB_BUILD_STORAGE`). |
+| `core/resources/` | Shared memory/device owner, Arrow pools and conservative working envelopes. |
 | `core/scan/` | Predicate evaluation (always built), snapshot planning and Parquet scan cursor (storage builds). |
 | `core/io/` | Independent `glamdb_io`: local filesystem, store directories/URIs, attempts, receipts, SHA-256, durable files and copying. |
 | `core/storage/` | `glamdb_storage`: FileIO adapter, profiles, Parquet writer, Iceberg staging, publication, recovery and capacity. |
@@ -169,3 +170,8 @@ ignored output directories. See [BUILDING.md](development/BUILDING.md),
 Independent Python suites live in `tests/verification/`, `sdk/python/tests/`,
 `apps/mock_server/tests/` and `tests/integration/test_network_sdk.py`; browser
 tests live in `ui/tests/`. Their results do not qualify the full native storage integration.
+
+`tools/acceptance/` contains the installed persistent cross-client recipe, native
+quiesce/backup orchestrator, independent Parquet/Avro inspector and sanitized
+Chromium evidence capture. `tests/system/` covers its owned-path and trace
+boundaries; normal native CI invokes the documented real-service recipe.

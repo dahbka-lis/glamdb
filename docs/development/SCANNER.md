@@ -151,12 +151,12 @@ joins a writer attempt or holds a SQLite read transaction.
   Filter-only fields remain hidden. `ScanInfo` fixes the output schema and view
   before `Next()`, including empty views and zero limits. Without projected or
   filter fields, verified Parquet row-group counts supply batch cardinality.
-- Opening a scan reads the committed root and the selected manifest list; the
-  cursor reads each manifest's live entries only when it needs the next data
-  file, so `limit = 0` reads no manifest and a small limit reads only the
-  manifests it consumes. A malformed manifest therefore surfaces from
-  `Next()` (still `CORRUPTION`, closing readiness). Warehouse directories are
-  never listed. Delete manifests,
+- Native scans pin the confirmed generation's [verified membership index](SCAN_INDEX.md).
+  Opening and repeated planning read no root, manifest list or manifest.
+  `limit = 0` opens no data file. Recovery and publication derive the index
+  through the same strict closure verifier; observed corruption invalidates it.
+  Custom backends without an index retain the uncached planner and lazy manifest
+  reads. Warehouse directories are never listed for membership. Delete manifests,
   partitioned specs and non-Parquet files are `UNSUPPORTED_TABLE_FEATURE`.
 - `Predicate` supports `True`, comparisons (`Eq`, `Ne`, `Lt`, `Le`, `Gt`, `Ge`)
   of a field with a literal of the exact field type or an explicit `NULL`
@@ -187,39 +187,65 @@ joins a writer attempt or holds a SQLite read transaction.
 - The cursor and returned Arrow backing buffers retain the engine (including
   the store lock), read-only FileIO and owned Arrow allocator/accounting pool
   until the last batch, extracted array/buffer, slice or C Data export is
-  released. Decoding and filtered copies use the same per-scan proxy pool;
-  this accounts for Arrow allocations, not total process memory, and enforces
-  no byte quota. `Cancel()` or `Engine::Shutdown()` makes `Next()` return
-  `CANCELLED`; checks after I/O prevent further file reads, and checks before
+  released. Decoding and filtered copies use the same per-scan resource pool,
+  which charges the shared data budget and retains any supplied upstream pool.
+  This does not bound total process memory. `Cancel()` or `Engine::Shutdown()`
+  makes `Next()` return `CANCELLED`; checks after I/O prevent further file reads, and checks before
   delivery cover batches and EOS, including empty views and `limit = 0`.
   `Info()` remains valid. Detected corruption during `Next()`
   closes engine readiness. Read failures are errors, never EOS.
 
-Not implemented: file/row-group pruning, reuse of the backend's parsed root by
-scans, aggregate runtime memory reservations and quotas,
-page CRC verification, per-device physical/inode budgets and in-flight
-reservations, and measured attempt-volume/capacity qualification.
-The [shared resource budget contract](RESOURCE_BUDGETS.md) defines the required
-memory accounting lifetime for retained buffers and the process/store ownership
-of reader, writer, metadata and recovery reservations.
+Not implemented: file/row-group pruning, page CRC verification and qualification-scale attempt-volume/capacity measurements.
+The [process resource owner](SHARED_RESOURCES.md) now supplies scan working
+reservations, tracked Arrow allocation capacity and leases retained through
+slices and C Data exports. Compiled compound predicates retain metadata
+reservations sized before literal copying; explanation predicate subtrees keep
+their result lease when extracted. Reader, writer, metadata, recovery and device
+reservations share the same parent; their ownership is listed in the
+[budget contract](RESOURCE_BUDGETS.md). The
+[validation report](SHARED_RESOURCES_VALIDATION.md) records saturation, lifetime
+sanitizers and a small multi-database HTTP/reopen campaign.
 
 ## Validation status
 
+These checks were run locally after integration with official main `d61aeaa`.
+The [resource validation report](SHARED_RESOURCES_VALIDATION.md) records exact
+commands, counts and the remaining qualification limits.
+
 | Check | Status |
 | --- | --- |
-| `cmake --build --preset local`, `format-check`, `quality-negative-check`; dependency pin verification | PASS |
-| `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 ctest --preset local --parallel 6` | PASS: 649 passed, two child-process helper skips, one pre-existing disabled benchmark |
-| `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ctest --preset asan-ubsan --parallel 6` | PASS: 634 passed, the same skips and disabled benchmark; ordinary pinned dependencies |
-| `TScanLifetimeTest` (real files and production backend) | PASS in normal and ASan/UBSan builds: batch/array/buffer/slice/C Data retention, final-release reopen, deterministic cancel/shutdown barriers before batch/EOS, empty and zero-limit views |
-| `ScanMockTest` (in-memory FileIO, real Arrow/Parquet) | PASS in both builds: extracted-buffer FileIO/owner retention, decoded/filtered Arrow pool accounting and compound predicates |
-| Separate `GLAMDB_BUILD_STORAGE=OFF` build and CTest | PASS: 309 passed, one pre-existing disabled benchmark |
-| `.venv/bin/python -m pytest tests/verification/test_oracle.py -q` | PASS: 38 passed |
-| `GLAMDB_TIDY_JOBS=6 cmake --build --preset local --target tidy-check`, then `clang-tidy-18 <file> -p build/local --warnings-as-errors=*` for merged sources | PASS: all 122 units before integration, all 11 changed upstream units rechecked after integration; predicate warnings fixed and rechecked |
-| Empty projections (normal native and RAM suites) | PASS: 110 native storage and 16 RAM mock cases; zero-column cardinality, typed boundary fixtures, fixed views and row-group limits |
-| Python suite and native HTTP/SDK/Arrow/JSON Schema conformance | PASS: 658 Python tests; zero-column pagination/replay, empty/zero-limit views and wire schemas |
-| LLVM 18 checks after integration with metadata pages and scan leases | PASS: all 9 changed translation units |
-| TSan, fully instrumented dependencies, Node/Playwright workbench checks, power-loss qualification | NOT RUN in this change |
+| `cmake --build build/local` (Clang 18.1.3, `GLAMDB_BUILD_STORAGE=ON`) and `format-check`, `quality-negative-check` | PASS |
+| Full native CTest suite (unit, mock, vertical, fault, integration including `glamdb.scan_process`, installed consumer, tooling, smoke) | PASS: 674 passed, three standalone helper skips, one existing disabled benchmark |
+| `glamdb_vertical` (`engine_vertical_test.cpp`, `engine_integrity_test.cpp`) | PASS: commit-gate boundaries, layout violations, retry verification, crafted same-length Parquet corruption (including filter-only columns), compound 3VL predicates across multiple Parquet files, quotas, write latch |
+| `glamdb_mock` (label `mock`, in-memory FileIO) | PASS, including compound 3VL truth tables, De Morgan laws with `NULL`, multi-column filter-only validation, and read-only working/temporary directory |
+| Separate `GLAMDB_BUILD_STORAGE=OFF` build and CTest | PASS: 332 passed, one existing disabled benchmark |
+| Fixed-view pages and shared metadata admission | PASS in normal and ASan/UBSan/LSan builds: retained page copies after close, replay/continuation under pressure and expiry reclamation |
+| Shared resource tests under ASan/UBSan/LSan | PASS; see the [resource validation report](SHARED_RESOURCES_VALIDATION.md) |
+| `TScanLifetimeTest` (real files and production backend) | PASS in normal and ASan/UBSan/LSan builds: batch/array/buffer/slice/C Data retention, final-release reopen, deterministic cancel/shutdown barriers before batch/EOS, empty and zero-limit views |
+| `ScanMockTest` (in-memory FileIO, real Arrow/Parquet) | PASS in normal and ASan/UBSan/LSan builds: extracted-buffer FileIO/owner retention, decoded/filtered Arrow pool accounting and compound predicates |
+| Full-repo `tidy-check`, full sanitizer presets, TSan, power-loss qualification | NOT RUN in this change |
+
+
+Zero-column projection was revalidated after integration with official main
+`9b4d30a`: the local Debug build and full CTest suite passed (695 passed, three
+child-process helper skips and one existing disabled benchmark). The full Python
+suite passed 716 tests, and the workbench unit suite passed 131. Native HTTP
+checks include empty-output JSON/Arrow pagination and replay, plus `/explain`
+wire-schema validation for initial, historical and latest views with hidden
+predicate fields. The explain regression failed on the nonempty-schema constraint
+before the contract fix and passed afterward. Sanitizer profiles and browser E2E
+were not rerun for this integration.
 
 Value validation reads only decoded columns of the projection and predicate;
 latent corruption in unread columns or unread data pages is not detected by
 `VerifyReachable`, which checks footers rather than every page.
+
+## Selected-view metadata integration
+
+`Engine::ListFiles`/`GetFileDetails` reuse committed manifest planning and confirmed-root
+leases. Inventory never lists warehouse directories; details validate actual
+immutable Parquet bytes, field IDs, typed footer statistics and row groups.
+These observations do not enable file/page/Bloom pruning. HTTP metadata, SDK
+and workbench use the same facade. The [installed system recipe](NATIVE_ACCEPTANCE.md)
+checks latest=1,010, historical A=1,000, initial=0, JSON/Arrow/EOS and retained
+batches, then repeats them after restart and source-independent restore.
