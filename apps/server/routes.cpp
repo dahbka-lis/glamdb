@@ -11,6 +11,11 @@
 namespace glamdb::NServer {
 using namespace NTransport;
 namespace {
+bool IsApiPath(std::string_view path)
+{
+    return path == "/capabilities" || path == "/collections" || path == "/collections:resolve" ||
+        path.starts_with("/collections/");
+}
 TResponse JsonResponse(const TJson& value)
 {
     auto body = value.dump();
@@ -80,7 +85,7 @@ TRoutes::TRoutes(std::shared_ptr<Engine> engine, std::filesystem::path uiRoot, s
 bool TRoutes::IsAuthorized(const TRequest& request) const
 {
     const auto path = DecodeUrl(request.Target.substr(0, request.Target.find('?')));
-    if (!path.starts_with("/v0")) {
+    if (!IsApiPath(path)) {
         return true;
     }
     const auto found = request.Headers.find("authorization");
@@ -122,7 +127,7 @@ TResponse TRoutes::Route(const TRequest& request) const
     if (request.Method != "GET" && request.Method != "POST") {
         return ErrorResponse(405, "METHOD_NOT_ALLOWED", "use GET or POST");
     }
-    if (!path.starts_with("/v0/")) {
+    if (!IsApiPath(path)) {
         Require(request.Method == "GET", "static resources require GET");
         if (path == "/healthz") {
             return JsonResponse(
@@ -130,7 +135,7 @@ TResponse TRoutes::Route(const TRequest& request) const
         }
         return StaticFile(path);
     }
-    if (request.Method == "GET" && path == "/v0/capabilities") {
+    if (request.Method == "GET" && path == "/capabilities") {
         return JsonResponse({{"api_version", "v0"},
             {"backend", "local"},
             {"mock", false},
@@ -154,11 +159,11 @@ TResponse TRoutes::Route(const TRequest& request) const
                     {"scan_rows", 100000},
                     {"batch_rows", 1024}}}});
     }
-    if (request.Method == "GET" && path == "/v0/collections:resolve") {
+    if (request.Method == "GET" && path == "/collections:resolve") {
         Require(query.size() == 1 && query.contains("name"), "exact name is required");
         return JsonResponse(Collection(Unwrap(Engine_->ResolveCollection(query.at("name")))));
     }
-    if (request.Method == "GET" && path == "/v0/collections") {
+    if (request.Method == "GET" && path == "/collections") {
         for (const auto& [key, value] : query) {
             (void)value;
             Require(key == "page_size" || key == "cursor", "unknown query parameter");
@@ -191,7 +196,7 @@ TResponse TRoutes::Route(const TRequest& request) const
         body = ParseJson(request.Body);
         Require(body.is_object(), "request body must be an object");
     }
-    if (request.Method == "POST" && path == "/v0/collections") {
+    if (request.Method == "POST" && path == "/collections") {
         CheckKeys(body, {"collection_id", "name", "schema", "mode"});
         Require(body.value("mode", "append") == "append",
             "only append collections are supported",
@@ -202,31 +207,31 @@ TResponse TRoutes::Route(const TRequest& request) const
                 ParseSchema(body.at("schema"))})));
     }
     const auto parts = Split(path);
-    Require(parts.size() >= 3 && parts[0] == "v0" && parts[1] == "collections", "route not found", "NOT_FOUND");
-    const auto& id = parts[2];
-    if (request.Method == "GET" && parts.size() == 5 && parts[3] == "operations") {
+    Require(parts.size() >= 2 && parts[0] == "collections", "route not found", "NOT_FOUND");
+    const auto& id = parts[1];
+    if (request.Method == "GET" && parts.size() == 4 && parts[2] == "operations") {
         Require(query.empty(), "unknown query parameter");
-        auto outcome = Unwrap(Engine_->FindAppendOutcome(id, parts[4]));
+        auto outcome = Unwrap(Engine_->FindAppendOutcome(id, parts[3]));
         if (!outcome.has_value()) {
             throw TFailure({"NOT_FOUND", "operation not found"});
         }
         return OutcomeResponse(json_adapter::ToJson(*outcome));
     }
     const auto info = Unwrap(Engine_->GetCollection(id));
-    const std::string action = parts.size() >= 4 ? parts[3] : "";
+    const std::string action = parts.size() >= 3 ? parts[2] : "";
     if ((action == "stats" || action == "snapshots" || action == "files" || action == "explain")) {
         throw TFailure({"UNSUPPORTED_OPERATION", "native metadata/explain API is not available; inspect capabilities"});
     }
     Require(query.empty(), "unknown query parameter");
     if (request.Method == "GET") {
-        if (parts.size() == 3) {
+        if (parts.size() == 2) {
             return JsonResponse(Collection(info));
         }
-        if (parts.size() == 4 && action == "schema") {
+        if (parts.size() == 3 && action == "schema") {
             return JsonResponse(Collection(info).at("schema"));
         }
     }
-    if (request.Method == "POST" && parts.size() == 4) {
+    if (request.Method == "POST" && parts.size() == 3) {
         if (action == "append") {
             CheckKeys(body, {"operation_id", "rows", "expected_snapshot"});
             AppendRequest append;

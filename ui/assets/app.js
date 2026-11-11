@@ -40,7 +40,7 @@ let connectionController = null,
     themeStamp = '',
     configTimer = null;
 const labels = (name, fallback = name) => state.theme?.labels?.[name] ?? fallback;
-const collectionPath = () => `/v0/collections/${encodeURIComponent(state.collectionId)}`;
+const collectionPath = () => `/collections/${encodeURIComponent(state.collectionId)}`;
 const viewQuery = () =>
     state.snapshotId === null ? '' : `?snapshot_id=${encodeURIComponent(state.snapshotId)}`;
 const currentCollection = () =>
@@ -450,21 +450,21 @@ async function refreshSelection() {
         id = state.collectionId;
     const current = () =>
         !signal.aborted && api === state.api && epoch === state.epoch && id === state.collectionId;
-    const info = await api.json(`/v0/collections/${encodeURIComponent(id)}`, { signal });
+    const info = await api.json(`/collections/${encodeURIComponent(id)}`, { signal });
     if (!current()) return;
     const selected =
         state.snapshotId === null ? (info.current_snapshot_id ?? 'initial') : state.snapshotId;
     const suffix = `?snapshot_id=${encodeURIComponent(selected)}`;
     const [schema, stats, snapshots, filesResult] = await Promise.all([
-        api.json(`/v0/collections/${encodeURIComponent(id)}/schema`, { signal }),
+        api.json(`/collections/${encodeURIComponent(id)}/schema`, { signal }),
         supportsFeature(state.capabilities, 'stats')
-            ? api.json(`/v0/collections/${encodeURIComponent(id)}/stats${suffix}`, { signal })
+            ? api.json(`/collections/${encodeURIComponent(id)}/stats${suffix}`, { signal })
             : null,
         supportsFeature(state.capabilities, 'snapshots')
-            ? allPages(`/v0/collections/${encodeURIComponent(id)}/snapshots`, signal, api)
+            ? allPages(`/collections/${encodeURIComponent(id)}/snapshots`, signal, api)
             : [],
         supportsFeature(state.capabilities, 'files')
-            ? allPages(`/v0/collections/${encodeURIComponent(id)}/files${suffix}`, signal, api)
+            ? allPages(`/collections/${encodeURIComponent(id)}/files${suffix}`, signal, api)
             : [],
     ]);
     if (!current()) return;
@@ -511,7 +511,7 @@ async function refreshWorkspace() {
     const api = state.api,
         epoch = state.epoch,
         signal = connectionController?.signal;
-    const collections = await allPages('/v0/collections', signal, api);
+    const collections = await allPages('/collections', signal, api);
     if (api !== state.api || epoch !== state.epoch || signal?.aborted) return;
     state.collections = collections;
     const id = collections.some((c) => c.collection_id === state.collectionId)
@@ -662,7 +662,7 @@ async function createForm(form) {
         let created;
         try {
             created = verifyCreated(
-                await api.json('/v0/collections', { method: 'POST', body: draft.body }),
+                await api.json('/collections', { method: 'POST', body: draft.body }),
                 draft.body,
             );
         } catch (error) {
@@ -677,7 +677,7 @@ async function createForm(form) {
             try {
                 created = verifyCreated(
                     await api.json(
-                        `/v0/collections:resolve?name=${encodeURIComponent(draft.body.name)}`,
+                        `/collections:resolve?name=${encodeURIComponent(draft.body.name)}`,
                     ),
                     draft.body,
                 );
@@ -689,7 +689,7 @@ async function createForm(form) {
         }
         if (state.api !== api) return;
         if (state.creation === draft) state.creation = null;
-        const collections = await allPages('/v0/collections', connectionController?.signal, api);
+        const collections = await allPages('/collections', connectionController?.signal, api);
         if (state.api !== api) return;
         state.collections = collections;
         if (form.isConnected && epoch === state.epoch) {
@@ -802,14 +802,11 @@ async function appendForm(form) {
         state.mutation = operation;
         form.dataset.operationId = operation.operationId;
         saveOutcome(operation, { outcome: 'in_flight' });
-        const received = await api.json(
-            `/v0/collections/${encodeURIComponent(collectionId)}/append`,
-            {
-                method: 'POST',
-                body: { ...operation.body, operation_id: operation.operationId },
-                allowOutcome: true,
-            },
-        );
+        const received = await api.json(`/collections/${encodeURIComponent(collectionId)}/append`, {
+            method: 'POST',
+            body: { ...operation.body, operation_id: operation.operationId },
+            allowOutcome: true,
+        });
         if (state.api !== api) return;
         const payload = saveOutcome(operation, received);
         showAppendOutcome(operation, payload);
@@ -839,7 +836,7 @@ async function resolveOperation(id) {
     const api = state.api;
     try {
         const received = await api.json(
-            `/v0/collections/${encodeURIComponent(operation.collectionId)}/operations/${encodeURIComponent(id)}`,
+            `/collections/${encodeURIComponent(operation.collectionId)}/operations/${encodeURIComponent(id)}`,
             { allowOutcome: true, signal: connectionController?.signal },
         );
         if (state.api !== api) return;
@@ -881,7 +878,7 @@ async function inspectFile(id) {
         !controller?.signal.aborted;
     try {
         const data = await api.json(
-            `/v0/collections/${encodeURIComponent(collectionId)}/files/${encodeURIComponent(id)}?snapshot_id=${encodeURIComponent(selector)}`,
+            `/collections/${encodeURIComponent(collectionId)}/files/${encodeURIComponent(id)}?snapshot_id=${encodeURIComponent(selector)}`,
             { signal: controller?.signal },
         );
         if (!current()) return;
@@ -924,7 +921,7 @@ document.addEventListener('submit', async (event) => {
                 state.token = form.elements.token.value;
                 const api = new WorkbenchAPI(state.base, state.token);
                 state.api = api;
-                const capabilities = await api.json('/v0/capabilities', {
+                const capabilities = await api.json('/capabilities', {
                     signal: controller.signal,
                 });
                 if (state.api !== api || controller.signal.aborted) return;
@@ -1071,7 +1068,7 @@ async function bootstrap() {
             ]);
             if (!response.ok) throw new Error('Demo data is unavailable');
             state.api = new BrowserDemoAPI(await response.json());
-            state.capabilities = await state.api.json('/v0/capabilities');
+            state.capabilities = await state.api.json('/capabilities');
             await refreshWorkspace();
         } else login();
         configTimer = setInterval(() => loadTheme(), 2000);

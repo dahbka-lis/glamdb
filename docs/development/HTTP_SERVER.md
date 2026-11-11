@@ -22,10 +22,10 @@ The offline CLI retains `create-store` and `inspect-store`. Both acquire core
 ownership and fail with `STATE_IN_USE` while the server owns the store. Online:
 
 ```sh
-glamdb-cli request --path /v0/collections
-glamdb-cli request --path /v0/collections --body collection.json
-glamdb-cli request --path /v0/collections/COLLECTION_UUID/append --body append.json
-glamdb-cli request --path /v0/collections/COLLECTION_UUID/scan --body query.json
+glamdb-cli request --path /collections
+glamdb-cli request --path /collections --body collection.json
+glamdb-cli request --path /collections/COLLECTION_UUID/append --body append.json
+glamdb-cli request --path /collections/COLLECTION_UUID/scan --body query.json
 ```
 
 `request` defaults to GET, or POST with `--body FILE` (`-` reads stdin).
@@ -46,7 +46,7 @@ validator. Native `outcome_json_test` separately pins complete recovery/receipt
 serialization. The existing [mock contract](HTTP_MOCK_CONTRACT.md) remains a
 separate, broader development profile.
 
-| HTTP route (under `/v0`) | Public core operation | Availability |
+| HTTP route | Public core operation | Availability |
 | --- | --- | --- |
 | `GET /capabilities` | Adapter inventory | Native features, predicates, transport limits |
 | `GET /collections` | `ListCollections` | Complete bounded list; no pagination |

@@ -16,7 +16,7 @@ with tempfile.TemporaryDirectory(dir='/tmp') as directory:
         body = json.dumps({'operation_id': '00000000-0000-0000-0000-000000000003',
                            'rows': [{'key': 'interrupted-client'}]}).encode()
         with socket.create_connection(('127.0.0.1', port)) as connection:
-            connection.sendall((f'POST /v0/collections/00112233-4455-6677-8899-aabbccddeeff/append HTTP/1.1\r\n'
+            connection.sendall((f'POST /collections/00112233-4455-6677-8899-aabbccddeeff/append HTTP/1.1\r\n'
                 f'Host: localhost\r\nAuthorization: Bearer test-token\r\nContent-Type: application/json\r\n'
                 f'Content-Length: {len(body)}\r\n\r\n').encode() + body)
             assert select.select([process.stdout], [], [], 10)[0], 'publication did not start'

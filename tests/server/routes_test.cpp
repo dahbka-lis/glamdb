@@ -26,7 +26,7 @@ TEST(NativeRoutes, OutcomeLookupRetainsUnknownRecoveryContext)
     TRoutes routes(engine, {}, "secret");
     NTransport::TRequest request;
     request.Method = "GET";
-    request.Target = std::string("/v0/collections/") + test::collection_id + "/operations/" + test::operation_id;
+    request.Target = std::string("/collections/") + test::collection_id + "/operations/" + test::operation_id;
     request.Headers["authorization"] = "Bearer secret";
     const auto response = routes.Handle(request);
     ASSERT_EQ(response.Status, 503);

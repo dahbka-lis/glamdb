@@ -1,6 +1,6 @@
 # GlamDB Python network SDK
 
-This package talks only to the public `/v0` HTTP endpoints. It does not import
+This package talks only to the public HTTP endpoints (for example, `/collections`). It does not import
 the C++ core, a Python storage writer, the development mock, or verification
 tools. The repository currently supplies a disposable mock HTTP adapter; passing
 SDK tests against it does not establish storage durability.

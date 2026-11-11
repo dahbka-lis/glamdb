@@ -14,7 +14,7 @@ TEST(Transport, RejectsAmbiguousJsonAndFraming)
              "Content-Length: +1\r\n",
              "Content-Length: 1,1\r\n"})
     {
-        EXPECT_THROW(ParseHeaders(std::string("POST /v0/collections HTTP/1.1\r\nHost: local\r\n") + header + "\r\n"),
+        EXPECT_THROW(ParseHeaders(std::string("POST /collections HTTP/1.1\r\nHost: local\r\n") + header + "\r\n"),
             TFailure);
     }
 }
@@ -52,7 +52,7 @@ TEST(Transport, RejectsUnknownFieldsAndUnsupportedQueries)
     EXPECT_THROW(ParseScan("id", schema, ParseJson(R"({"predicate":{"op":"or","args":[]}})")), TFailure);
     EXPECT_THROW(ParseScan("id", schema, ParseJson(R"({"limit":true})")), TFailure);
     EXPECT_THROW(ParseScan("id", schema, ParseJson(R"({"limit":-1})")), TFailure);
-    EXPECT_THROW(ParseTarget("/v0/collections?name=a&name=b"), TFailure);
-    EXPECT_THROW(ParseTarget("/v0/%0a"), TFailure);
+    EXPECT_THROW(ParseTarget("/collections?name=a&name=b"), TFailure);
+    EXPECT_THROW(ParseTarget("/%0a"), TFailure);
 }
 } // namespace glamdb::NTransport

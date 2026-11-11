@@ -48,7 +48,9 @@ class NativeHTTP(unittest.TestCase):
 
     def request(self, path, body=None, token=TOKEN, accept='application/json', method=None):
         conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
-        headers = {'Authorization': 'Bearer ' + token, 'Accept': accept}
+        headers = {'Accept': accept}
+        if token is not None:
+            headers['Authorization'] = 'Bearer ' + token
         if body is not None:
             headers['Content-Type'] = 'application/json'
         conn.request(method or ('POST' if body is not None else 'GET'), path,
@@ -70,10 +72,10 @@ class NativeHTTP(unittest.TestCase):
             {'name': 'key', 'type': 'string', 'nullable': False},
             {'name': 'n', 'type': 'int64', 'nullable': True},
             {'name': 'ts', 'type': 'timestamp_us_utc', 'nullable': True}]}}
-        info = self.api('/v0/collections', body)
+        info = self.api('/collections', body)
         self.assertEqual(info['collection_id'], cid)
-        self.assertEqual(self.api('/v0/collections', body), info)
-        return '/v0/collections/' + cid
+        self.assertEqual(self.api('/collections', body), info)
+        return '/collections/' + cid
 
     def test_append_scan_retry_restart_and_cli(self):
         path = self.collection()
@@ -103,7 +105,10 @@ class NativeHTTP(unittest.TestCase):
         self.assertEqual(json.loads(cli.stdout)['fields'][1]['type'], 'int64')
 
     def test_auth_limits_framing_and_static(self):
-        self.assertEqual(self.request('/v0/collections', token='wrong')[0], 401)
+        for path in ('/collections', '/collections:resolve?name=events', '/capabilities', '/%63ollections'):
+            self.assertEqual(self.request(path, token='wrong')[0], 401)
+            self.assertEqual(self.request(path, token=None)[0], 401)
+        self.assertEqual(self.request('/v0/collections')[0], 404)
         self.assertEqual(self.request('/')[0], 200)
         self.assertEqual(self.request('/workbench/config')[0], 200)
         self.assertEqual(self.request('/../store.identity')[0], 404)
@@ -115,7 +120,7 @@ class NativeHTTP(unittest.TestCase):
             ('Content-Length: -1\r\n', 400),
         ]:
             with self.subTest(headers=headers), socket.create_connection(('127.0.0.1', self.port)) as sock:
-                sock.sendall(('POST /v0/collections HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ' + TOKEN + '\r\n' + headers + '\r\n').encode())
+                sock.sendall(('POST /collections HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ' + TOKEN + '\r\n' + headers + '\r\n').encode())
                 self.assertIn(f' {status} '.encode(), sock.recv(4096))
         with socket.create_connection(('127.0.0.1', self.port)) as slow:
             slow.settimeout(4)
@@ -124,7 +129,7 @@ class NativeHTTP(unittest.TestCase):
         self.assertEqual(self.request('/healthz')[0], 200)
 
     def test_validation_capabilities_and_arrow(self):
-        caps = self.api('/v0/capabilities')
+        caps = self.api('/capabilities')
         self.assertFalse(caps['mock'])
         self.assertEqual(caps['backend'], 'local')
         path = self.collection()
@@ -250,7 +255,7 @@ class NativeHTTP(unittest.TestCase):
         second = subprocess.run([CLI, 'inspect-store', '--root', self.root, '--store-id', self.store_id], capture_output=True, text=True)
         self.assertNotEqual(second.returncode, 0)
         self.assertIn('STATE_IN_USE', second.stderr)
-        self.assertEqual(self.request('/%76%30/collections', token='wrong')[0], 401)
+        self.assertEqual(self.request('/%63ollections', token='wrong')[0], 401)
         path = self.collection()
         body = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'lost-response'}]}
         wire = json.dumps(body).encode()

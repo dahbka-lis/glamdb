@@ -146,7 +146,7 @@ class Client:
     @staticmethod
     def _path(collection_id: str | UUID, suffix: str = "") -> tuple[str, str]:
         cid = uuid_string(collection_id, "collection_id")
-        return cid, f"v0/collections/{cid}" + (f"/{suffix}" if suffix else "")
+        return cid, f"collections/{cid}" + (f"/{suffix}" if suffix else "")
 
     @staticmethod
     def _selector(snapshot_id: Any) -> dict[str, str]:
@@ -173,16 +173,17 @@ class Client:
         return Page(tuple(items), cursor, value)
 
     def capabilities(self, *, deadline: float | None = None) -> dict[str, Any]:
-        return self._read("v0/capabilities", deadline=deadline)
+        return self._read("capabilities", deadline=deadline)
 
     def list_collections(self, *, page_size: int = 100, cursor: str | None = None,
                          deadline: float | None = None) -> Page:
-        return self._page(self._read("v0/collections", params=self._page_params(page_size, cursor), deadline=deadline))
+        return self._page(self._read("collections", params=self._page_params(page_size, cursor), deadline=deadline))
 
     def resolve_collection(self, name: str, *, deadline: float | None = None) -> dict[str, Any]:
         if not isinstance(name, str) or not name:
             raise ValidationError("exact collection name is required")
-        return self._read("v0/collections:resolve", params={"name": name}, deadline=deadline)
+        # Keep the colon in the relative path instead of treating it as a URI scheme.
+        return self._read("./collections:resolve", params={"name": name}, deadline=deadline)
 
     def get_collection(self, collection_id: str | UUID, *, deadline: float | None = None) -> dict[str, Any]:
         cid, path = self._path(collection_id)
@@ -226,7 +227,7 @@ class Client:
         if not isinstance(name, str) or not name:
             raise ValidationError("exact collection name is required")
         budget = Deadline(deadline, collection_id=cid)
-        status, value = self._json("POST", "v0/collections", budget,
+        status, value = self._json("POST", "collections", budget,
                                    body=json_bytes({"collection_id": cid, "name": name, "schema": schema.to_dict()}))
         try:
             kind = value.get("outcome")
@@ -304,7 +305,7 @@ class Client:
                 raise ValidationError("append rows are required")
             request = self.prepare_append(cid, rows, operation_id=op, schema=schema,
                                           expected_snapshot=expected_snapshot, deadline=remaining)
-        status, value = self._json("POST", f"v0/collections/{request.collection_id}/append", budget, body=request.body)
+        status, value = self._json("POST", f"collections/{request.collection_id}/append", budget, body=request.body)
         return self._append_outcome(status, value, budget, expected_payload_hash=request.payload_hash)
 
     @staticmethod

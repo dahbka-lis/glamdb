@@ -45,7 +45,7 @@ def test_public_reads_use_bearer_auth_exact_routes_and_preserve_cursor_parameter
             return reply({"mode": "append", "mock": True})
         if request.url.path.endswith("schema"):
             return reply(SCHEMA.to_dict())
-        if request.url.path.endswith(("snapshots", "files")) or request.url.path == "/v0/collections":
+        if request.url.path.endswith(("snapshots", "files")) or request.url.path == "/collections":
             return reply({"items": [{"id": "retained"}], "next_cursor": "opaque +/="})
         return reply({"collection_id": CID, "name": "exact name", "schema": SCHEMA.to_dict()})
     with client_with(handler) as client:
@@ -59,15 +59,15 @@ def test_public_reads_use_bearer_auth_exact_routes_and_preserve_cursor_parameter
         client.files(CID, page_size=7, cursor="opaque +/=", snapshot_id="4")
         client.file(CID, "file-1", snapshot_id="4")
     assert seen == [
-        ("GET", "/v0/capabilities", {}),
-        ("GET", "/v0/collections", {"page_size": "7", "cursor": "opaque +/="}),
-        ("GET", "/v0/collections:resolve", {"name": "exact name"}),
-        ("GET", f"/v0/collections/{CID}", {}),
-        ("GET", f"/v0/collections/{CID}/schema", {}),
-        ("GET", f"/v0/collections/{CID}/stats", {"snapshot_id": "initial"}),
-        ("GET", f"/v0/collections/{CID}/snapshots", {"page_size": "7", "cursor": "opaque +/=", "snapshot_id": "4"}),
-        ("GET", f"/v0/collections/{CID}/files", {"page_size": "7", "cursor": "opaque +/=", "snapshot_id": "4"}),
-        ("GET", f"/v0/collections/{CID}/files/file-1", {"snapshot_id": "4"}),
+        ("GET", "/capabilities", {}),
+        ("GET", "/collections", {"page_size": "7", "cursor": "opaque +/="}),
+        ("GET", "/collections:resolve", {"name": "exact name"}),
+        ("GET", f"/collections/{CID}", {}),
+        ("GET", f"/collections/{CID}/schema", {}),
+        ("GET", f"/collections/{CID}/stats", {"snapshot_id": "initial"}),
+        ("GET", f"/collections/{CID}/snapshots", {"page_size": "7", "cursor": "opaque +/=", "snapshot_id": "4"}),
+        ("GET", f"/collections/{CID}/files", {"page_size": "7", "cursor": "opaque +/=", "snapshot_id": "4"}),
+        ("GET", f"/collections/{CID}/files/file-1", {"snapshot_id": "4"}),
     ]
 
 

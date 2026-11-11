@@ -163,7 +163,7 @@ check script runs real HTTP/HTTPS tests and Chromium, not only transport doubles
 Node API tests also open localhost sockets to exercise Fetch gzip/Brotli decoding
 and Arrow cancellation. Session-isolation browser tests delay responses across
 collection, snapshot and connection changes.
-The check script also packages/serves the public demo under /glamdb/ and verifies no /v0/
+The check script also packages/serves the public demo under /glamdb/ and verifies no API
 requests, token prompt, cross-visitor state or credential files are introduced.
 See [validation](docs/development/WORKBENCH_VALIDATION.md) for exact evidence and
 limits. Keep secrets in environment or process memory; never browser storage.
