@@ -173,7 +173,11 @@ CompareOp Predicate::op() const noexcept
 const Literal& Predicate::value() const noexcept
 {
     static const Literal EmptyLiteral{std::string{}};
-    return (node_ && node_->optional_value) ? *node_->optional_value : EmptyLiteral;
+    const auto& value = optional_value();
+    if (value.has_value()) {
+        return *value;
+    }
+    return EmptyLiteral;
 }
 
 const OptionalLiteral& Predicate::optional_value() const noexcept
@@ -343,13 +347,12 @@ bool Matches(CompareOp op, const T& left, const T& right)
 template <typename TArray, typename TValue>
 void EvalCompareTyped(const arrow::Array& column,
     int64_t offset,
-    size_t count,
     CompareOp op,
     const TValue& literal,
     std::span<ETruthValue> out)
 {
     const auto& array = static_cast<const TArray&>(column);
-    for (size_t i = 0; i < count; ++i) {
+    for (size_t i = 0; i < out.size(); ++i) {
         const auto row = offset + static_cast<int64_t>(i);
         if (array.IsNull(row)) {
             out[i] = ETruthValue::Unknown;
@@ -361,7 +364,6 @@ void EvalCompareTyped(const arrow::Array& column,
 
 void EvalCompareStrip(const arrow::Array& column,
     int64_t offset,
-    size_t count,
     FieldType type,
     CompareOp op,
     const Literal& value,
@@ -371,24 +373,22 @@ void EvalCompareStrip(const arrow::Array& column,
         case FieldType::String:
             EvalCompareTyped<arrow::StringArray, std::string_view>(column,
                 offset,
-                count,
                 op,
                 std::string_view(std::get<std::string>(value)),
                 out);
             return;
         case FieldType::Bool:
-            EvalCompareTyped<arrow::BooleanArray, bool>(column, offset, count, op, std::get<bool>(value), out);
+            EvalCompareTyped<arrow::BooleanArray, bool>(column, offset, op, std::get<bool>(value), out);
             return;
         case FieldType::Int64:
-            EvalCompareTyped<arrow::Int64Array, int64_t>(column, offset, count, op, std::get<int64_t>(value), out);
+            EvalCompareTyped<arrow::Int64Array, int64_t>(column, offset, op, std::get<int64_t>(value), out);
             return;
         case FieldType::Float64:
-            EvalCompareTyped<arrow::DoubleArray, double>(column, offset, count, op, std::get<double>(value), out);
+            EvalCompareTyped<arrow::DoubleArray, double>(column, offset, op, std::get<double>(value), out);
             return;
         case FieldType::TimestampUsUtc:
             EvalCompareTyped<arrow::TimestampArray, int64_t>(column,
                 offset,
-                count,
                 op,
                 std::get<TimestampUs>(value).value,
                 out);
@@ -399,7 +399,6 @@ void EvalCompareStrip(const arrow::Array& column,
 template <typename TArray, typename TElement, typename TProject>
 void EvalInTyped(const arrow::Array& column,
     int64_t offset,
-    size_t count,
     std::span<const TElement> sortedValues,
     bool hasNull,
     TProject&& project,
@@ -407,7 +406,7 @@ void EvalInTyped(const arrow::Array& column,
 {
     const auto& array = static_cast<const TArray&>(column);
     const auto missTruth = hasNull ? ETruthValue::Unknown : ETruthValue::False;
-    for (size_t i = 0; i < count; ++i) {
+    for (size_t i = 0; i < out.size(); ++i) {
         const auto row = offset + static_cast<int64_t>(i);
         if (array.IsNull(row)) {
             out[i] = ETruthValue::Unknown;
@@ -419,18 +418,13 @@ void EvalInTyped(const arrow::Array& column,
     }
 }
 
-void EvalInStrip(const arrow::Array& column,
-    int64_t offset,
-    size_t count,
-    const TBoundInSet& set,
-    std::span<ETruthValue> out)
+void EvalInStrip(const arrow::Array& column, int64_t offset, const TBoundInSet& set, std::span<ETruthValue> out)
 {
     switch (set.Type) {
         case FieldType::String:
             EvalInTyped<arrow::StringArray, std::string>(
                 column,
                 offset,
-                count,
                 set.Strings,
                 set.HasNull,
                 [](std::string_view v) {
@@ -442,7 +436,6 @@ void EvalInStrip(const arrow::Array& column,
             EvalInTyped<arrow::BooleanArray, uint8_t>(
                 column,
                 offset,
-                count,
                 set.Bools,
                 set.HasNull,
                 [](bool v) {
@@ -454,7 +447,6 @@ void EvalInStrip(const arrow::Array& column,
             EvalInTyped<arrow::Int64Array, int64_t>(
                 column,
                 offset,
-                count,
                 set.Ints,
                 set.HasNull,
                 [](int64_t v) {
@@ -466,7 +458,6 @@ void EvalInStrip(const arrow::Array& column,
             EvalInTyped<arrow::DoubleArray, double>(
                 column,
                 offset,
-                count,
                 set.Doubles,
                 set.HasNull,
                 [](double v) {
@@ -478,7 +469,6 @@ void EvalInStrip(const arrow::Array& column,
             EvalInTyped<arrow::TimestampArray, int64_t>(
                 column,
                 offset,
-                count,
                 set.Ints,
                 set.HasNull,
                 [](int64_t v) {
@@ -571,7 +561,8 @@ Result<TBoundPredicate> BindPredicate(const Predicate& predicate, const SchemaSp
                     }
                     bound.ReferencedFields.push_back(*fieldIndex);
                     const auto& field = schema.fields[*fieldIndex];
-                    if (!current.optional_value().has_value()) {
+                    const auto& optionalValue = current.optional_value();
+                    if (!optionalValue.has_value()) {
                         bound.Ops.push_back(TBoundOp{
                             .Kind = EBoundOpKind::PushCompareNull,
                             .FieldIndex = *fieldIndex,
@@ -580,7 +571,7 @@ Result<TBoundPredicate> BindPredicate(const Predicate& predicate, const SchemaSp
                         });
                         break;
                     }
-                    auto literal = CheckLiteral(field, *current.optional_value());
+                    auto literal = CheckLiteral(field, *optionalValue);
                     if (!literal) {
                         return std::unexpected(literal.error());
                     }
@@ -776,22 +767,12 @@ Result<std::vector<int64_t>> SelectRows(const TBoundPredicate& predicate,
                     }
                     case EBoundOpKind::PushCompare: {
                         auto out = pushStrip(stripLen);
-                        EvalCompareStrip(*referencedColumns[op.RefIndex],
-                            offset,
-                            stripLen,
-                            op.Type,
-                            op.Op,
-                            op.Value,
-                            out);
+                        EvalCompareStrip(*referencedColumns[op.RefIndex], offset, op.Type, op.Op, op.Value, out);
                         break;
                     }
                     case EBoundOpKind::PushIn: {
                         auto out = pushStrip(stripLen);
-                        EvalInStrip(*referencedColumns[op.RefIndex],
-                            offset,
-                            stripLen,
-                            predicate.InSets[op.InSetIndex],
-                            out);
+                        EvalInStrip(*referencedColumns[op.RefIndex], offset, predicate.InSets[op.InSetIndex], out);
                         break;
                     }
                     case EBoundOpKind::PushIsNull: {

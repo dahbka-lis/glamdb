@@ -146,6 +146,11 @@ joins a writer attempt or holds a SQLite read transaction.
 
 - `SnapshotSelector`: `Latest` (resolved at open), `Id`, `InitialEmpty`.
   `ScanInfo.selector_resolved` reports `Id(snapshot)` or `InitialEmpty`.
+- Omitted projection selects every field; an empty projection selects no
+  columns while preserving matching row cardinality, duplicates and limits.
+  Filter-only fields remain hidden. `ScanInfo` fixes the output schema and view
+  before `Next()`, including empty views and zero limits. Without projected or
+  filter fields, the verified Parquet row-group counts supply batch cardinality.
 - Opening a scan reads the committed root and the selected manifest list; the
   cursor reads each manifest's live entries only when it needs the next data
   file, so `limit = 0` reads no manifest and a small limit reads only the
@@ -199,11 +204,14 @@ of reader, writer, metadata and recovery reservations.
 | --- | --- |
 | `cmake --build --preset local` (Clang 18.1.3, `GLAMDB_BUILD_STORAGE=ON`) and `format-check` | PASS |
 | `ctest --preset local` (unit `ScanPredicate.*`, mock `ScanMockTest.*`, vertical `EngineVerticalTest.*`, `glamdb.scan_process`, `glamdb.transport.*`, `glamdb.native_http`, `glamdb.http_review`, `glamdb.native_http_fault`, installed consumer) | PASS |
-| `glamdb_vertical` (`engine_vertical_test.cpp`, `engine_integrity_test.cpp`) | PASS: commit-gate boundaries, layout violations, retry verification, crafted same-length Parquet corruption (including filter-only columns), compound 3VL predicates across multiple Parquet files, quotas, write latch |
-| `glamdb_mock` (label `mock`, in-memory FileIO) | PASS, including compound 3VL truth tables, De Morgan laws with `NULL`, multi-column filter-only validation, and read-only working/temporary directory |
+| Unit `ScanPredicate.*` | PASS: independent 3VL truth tables, De Morgan laws with `NULL`, typed binding and partial evaluation strips |
+| `glamdb_vertical` (`engine_vertical_test.cpp`, `engine_integrity_test.cpp`) | PASS: commit-gate boundaries, layout violations, retry verification, crafted same-length Parquet corruption (including filter-only columns), compound predicates, zero-column cardinality across files/row groups, typed boundary rows, quotas, write latch |
+| `glamdb_mock` (label `mock`, in-memory FileIO) | PASS: compound predicates, zero-column cardinality, multi-column filter-only validation, and read-only working/temporary directory |
 | Separate `GLAMDB_BUILD_STORAGE=OFF` build (`build/nostorage`) and CTest (`ScanPredicate.*`, `Transport.*`, `installed_consumer`, `EngineBootstrap.*`) | PASS |
 | `tests/verification/test_oracle.py` against `glamdb_verify` | PASS |
-| `tidy-check`, sanitizer presets, TSan, Python `pytest`/`httpx`/`pyarrow`/`jsonschema` client & schema runner, Node/Playwright workbench checks, power-loss qualification | NOT RUN in this environment |
+| Python `pytest`; native HTTP/SDK/Arrow/JSON Schema runner (`GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1`) | PASS: 658 Python tests; native zero-column JSON/Arrow pagination and replay, empty view, zero limit and wire conformance |
+| LLVM 18 static analysis of 119 translation units, with the corrected transport test rechecked | PASS: all reported diagnostics resolved |
+| Sanitizer presets, TSan, Node/Playwright workbench checks, power-loss qualification | NOT RUN in this environment |
 
 Value validation reads only decoded columns of the projection and predicate;
 latent corruption in unread columns or unread data pages is not detected by
