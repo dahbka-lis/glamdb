@@ -10,7 +10,9 @@ import unittest
 import uuid
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
+from tls_proxy import tls_proxy
 
 DRIVER = sys.argv.pop(1)
 TOKEN = 'fault-test-token'
@@ -145,6 +147,68 @@ class NativeFaultHTTP(unittest.TestCase):
         finally:
             for stream in streams:
                 stream.close()
+
+    def test_slow_uploads_preserve_control_body_capacity(self):
+        self.check_control_body_capacity(self.port)
+
+    def test_https_slow_uploads_preserve_control_body_capacity(self):
+        with tls_proxy(self.port, self.tmp.name) as (port, context):
+            self.check_control_body_capacity(port, context)
+
+    def check_control_body_capacity(self, port, context=None):
+        path = self.collection()
+        cursor = self.api(path + '/scan/open', {})['cursor']
+        with ExitStack() as stack:
+            def upload(target, token=TOKEN):
+                stream = stack.enter_context(socket.create_connection(('127.0.0.1', port), timeout=5))
+                if context is not None:
+                    stream = stack.enter_context(context.wrap_socket(stream, server_hostname='localhost'))
+                authorization = '' if token is None else f'Authorization: Bearer {token}\r\n'
+                stream.sendall((f'POST {target} HTTP/1.1\r\nHost: local\r\n{authorization}'
+                    'Content-Type: application/json\r\nContent-Length: 2\r\nExpect: 100-continue\r\n\r\n').encode())
+                head = b''
+                while not head.endswith(b'\r\n\r\n'):
+                    chunk = stream.recv(1)
+                    self.assertTrue(chunk, 'listener closed before an admission response')
+                    head += chunk
+                return stream, head
+
+            ordinary = []
+            for _ in range(12):
+                stream, head = upload(path + '/append')
+                self.assertIn(b' 100 ', head)
+                ordinary.append(stream)
+            _, head = upload(path + '/append')
+            self.assertIn(b' 503 ', head)
+            self.assertIn(b'Retry-After: 1\r\n', head)
+            # Public paths cannot borrow authenticated control capacity.
+            self.assertIn(b' 503 ', upload('/assets/close', token=None)[1])
+            self.assertIn(b' 401 ', upload(self.base + '/open', token='wrong')[1])
+            self.assertEqual(self.api('/healthz')['status'], 'live')
+            self.api(path + '/scan/%63ancel', {'cursor': cursor})
+            self.api(self.base + '/reconcile', {})
+
+            protected = []
+            for target in (self.base + '/open', self.base + '/%6fpen',
+                           self.base.replace('/databases/', '/%64atabases/') + '/open', self.base + '/open'):
+                stream, head = upload(target)
+                self.assertIn(b' 100 ', head)
+                protected.append(stream)
+            self.assertIn(b' 503 ', upload(self.base + '/open')[1])
+            # Completed and disconnected bodies both return their capacity.
+            protected[0].sendall(b'{}')
+            response = http.client.HTTPResponse(protected[0])
+            response.begin()
+            self.assertEqual(response.status, 200, response.read())
+            self.assertIn(b' 100 ', upload(self.base + '/open')[1])
+            ordinary[0].close()
+            deadline = time.monotonic() + 3
+            while True:
+                _, head = upload(path + '/append')
+                if b' 100 ' in head:
+                    break
+                self.assertIn(b' 503 ', head)
+                self.assertLess(time.monotonic(), deadline, 'disconnected body retained its reservation')
 
     def test_discards_waiting_on_close_do_not_starve_control_requests(self):
         path = self.collection()

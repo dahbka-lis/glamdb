@@ -47,6 +47,9 @@ Scans use bounded fixed-view pages with per-database quotas, finite replay reten
 expiry and explicit cancellation. Separate HTTP data, lifecycle and control workers
 keep healthy databases and descriptors available during long operations.
 Outcome lookup refuses catalog contention without blocking control workers.
+HTTP body admission reserves four of sixteen slots from ordinary uploads for
+authenticated database lifecycle and scan cancellation, including through a TLS
+proxy; public/static POSTs cannot spend that reserve.
 Scan pages reserve replay capacity before consumption; admission refusal preserves
 the existing cursor and its last replay. Other page failures invalidate it.
 The network CLI also builds independently with OpenSSL; optional offline commands

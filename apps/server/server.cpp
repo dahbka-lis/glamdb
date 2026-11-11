@@ -10,6 +10,17 @@ namespace glamdb::NServer {
 using namespace NTransport;
 namespace {
 using TTcp = asio::ip::tcp;
+bool IsControlBody(const TRequest& request)
+{
+    const auto [path, query] = ParseTarget(request.Target);
+    (void)query;
+    const auto split = path.starts_with("/databases/") ? path.find('/', 11) : std::string::npos;
+    const auto suffix = split == std::string::npos ? path : path.substr(split);
+    return path == "/databases" ||
+        (split != std::string::npos &&
+            (suffix == "/open" || suffix == "/close" || suffix == "/reconcile" || suffix == "/discard")) ||
+        (suffix.starts_with("/collections/") && suffix.ends_with("/scan/cancel"));
+}
 class TSession;
 struct TState
 {
@@ -26,7 +37,7 @@ struct TState
     std::map<std::string, size_t> DatabaseCalls;
     std::map<std::string, size_t> HeaderPeers;
     std::chrono::milliseconds Timeout;
-    size_t Headers = 0, Bodies = 0, DataCalls = 0, ControlCalls = 0, LifecycleCalls = 0;
+    size_t Headers = 0, Bodies = 0, OrdinaryBodies = 0, DataCalls = 0, ControlCalls = 0, LifecycleCalls = 0;
 };
 
 class TSession : public std::enable_shared_from_this<TSession>
@@ -157,6 +168,9 @@ private:
         ReleaseHeaders();
         if (BodyAdmitted_) {
             --State_.Bodies;
+            if (!ControlBody_) {
+                --State_.OrdinaryBodies;
+            }
             BodyAdmitted_ = false;
         }
         ReleaseCall();
@@ -183,11 +197,18 @@ private:
         Input_.erase(0, size);
         Require(Input_.size() <= Request_.ContentLength, "pipelining is unsupported");
         if (Request_.ContentLength != 0) {
-            if (State_.Bodies >= 16) {
+            const bool control = IsControlBody(Request_);
+            // Keep cancellation and recovery available during stalled uploads,
+            // including unauthenticated POSTs to public static resources.
+            if (State_.Bodies >= 16 || (!control && State_.OrdinaryBodies >= 12)) {
                 Busy();
                 return;
             }
             ++State_.Bodies;
+            if (!control) {
+                ++State_.OrdinaryBodies;
+            }
+            ControlBody_ = control;
             BodyAdmitted_ = true;
         }
         Deadline(State_.Timeout, true);
@@ -350,7 +371,8 @@ private:
     size_t Checked_ = 0, Generation_ = 0;
     size_t* Calls_ = nullptr;
     std::atomic<bool> WorkerFailed_{false};
-    bool ReadingHeaders_ = false, BodyAdmitted_ = false, Processing_ = false, Writing_ = false, Closed_ = false;
+    bool ReadingHeaders_ = false, BodyAdmitted_ = false, ControlBody_ = false;
+    bool Processing_ = false, Writing_ = false, Closed_ = false;
 };
 } // namespace
 
