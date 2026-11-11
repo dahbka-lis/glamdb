@@ -204,21 +204,21 @@ sanitizers and a small multi-database HTTP/reopen campaign.
 
 ## Validation status
 
-These checks record evidence before this merge. Shared-resource results cover
-`a0b6e8f`; scan-lifetime results were reported by official main `103ea38`.
-No local builds, tests or analyzers were run after this merge, as requested.
+These checks were run locally after integration with official main `d61aeaa`.
+The [resource validation report](SHARED_RESOURCES_VALIDATION.md) records exact
+commands, counts and the remaining qualification limits.
 
 | Check | Status |
 | --- | --- |
-| `cmake --build --preset local` (Clang 18.1.3, `GLAMDB_BUILD_STORAGE=ON`) and `format-check`, `quality-negative-check` | PASS |
-| `ctest --preset local` (unit, mock, vertical, fault, integration including `glamdb.scan_process`, installed consumer, tooling, smoke) | PASS, see the PR description for counts; standalone child-process helpers are skipped as expected |
+| `cmake --build build/local` (Clang 18.1.3, `GLAMDB_BUILD_STORAGE=ON`) and `format-check`, `quality-negative-check` | PASS |
+| Full native CTest suite (unit, mock, vertical, fault, integration including `glamdb.scan_process`, installed consumer, tooling, smoke) | PASS: 674 passed, three standalone helper skips, one existing disabled benchmark |
 | `glamdb_vertical` (`engine_vertical_test.cpp`, `engine_integrity_test.cpp`) | PASS: commit-gate boundaries, layout violations, retry verification, crafted same-length Parquet corruption (including filter-only columns), compound 3VL predicates across multiple Parquet files, quotas, write latch |
 | `glamdb_mock` (label `mock`, in-memory FileIO) | PASS, including compound 3VL truth tables, De Morgan laws with `NULL`, multi-column filter-only validation, and read-only working/temporary directory |
-| Separate `GLAMDB_BUILD_STORAGE=OFF` build and CTest | PASS |
-| `tests/verification/test_oracle.py` against `glamdb_verify` | PASS |
+| Separate `GLAMDB_BUILD_STORAGE=OFF` build and CTest | PASS: 332 passed, one existing disabled benchmark |
+| Fixed-view pages and shared metadata admission | PASS in normal and ASan/UBSan/LSan builds: retained page copies after close, replay/continuation under pressure and expiry reclamation |
 | Shared resource tests under ASan/UBSan/LSan | PASS; see the [resource validation report](SHARED_RESOURCES_VALIDATION.md) |
-| `TScanLifetimeTest` on official main `103ea38` (real files and production backend) | Reported PASS in normal and ASan/UBSan builds: batch/array/buffer/slice/C Data retention, final-release reopen, deterministic cancel/shutdown barriers before batch/EOS, empty and zero-limit views; not rerun after merge |
-| `ScanMockTest` on official main `103ea38` (in-memory FileIO, real Arrow/Parquet) | Reported PASS in normal and ASan/UBSan builds: extracted-buffer FileIO/owner retention, decoded/filtered Arrow pool accounting and compound predicates; not rerun after merge |
+| `TScanLifetimeTest` (real files and production backend) | PASS in normal and ASan/UBSan/LSan builds: batch/array/buffer/slice/C Data retention, final-release reopen, deterministic cancel/shutdown barriers before batch/EOS, empty and zero-limit views |
+| `ScanMockTest` (in-memory FileIO, real Arrow/Parquet) | PASS in normal and ASan/UBSan/LSan builds: extracted-buffer FileIO/owner retention, decoded/filtered Arrow pool accounting and compound predicates |
 | Full-repo `tidy-check`, full sanitizer presets, TSan, power-loss qualification | NOT RUN in this change |
 
 Value validation reads only decoded columns of the projection and predicate;

@@ -4,6 +4,7 @@
 #include "core/api/canonical.h"
 #include "core/api/codec.h"
 #include "core/engine/engine_factory.h"
+#include "core/engine/metadata_pages.h"
 #include "core/engine/storage_mapping.h"
 #include "core/engine/store_lease.h"
 
@@ -182,6 +183,7 @@ struct Engine::Impl
     size_t owned_input_bytes = 0;
     std::vector<CollectionInfo> collections;
     std::vector<CollectionView> confirmed_views;
+    TMetadataPages metadata_pages;
     // Roots that scans resolved from confirmed_views and are still reading,
     // and superseded roots waiting for those readers (all under state_mutex).
     std::map<std::string, std::size_t, std::less<>> root_readers;
@@ -452,6 +454,45 @@ struct Engine::Impl
         return *it;
     }
 
+    template <typename T, typename TLoad>
+    Result<T> ReadMetadataPage(const TMetadataPageRequest& request, std::string_view parameters, TLoad&& load)
+    {
+        try {
+            uint64_t admissionGeneration = 0;
+            {
+                std::lock_guard lock(state_mutex);
+                CheckReady();
+                admissionGeneration = metadata_pages.GetGeneration();
+            }
+            auto page = metadata_pages.Read(
+                request,
+                parameters,
+                [&]() -> Result<TMetadataPages::TListing> {
+                    auto listing = load();
+                    if (!listing) {
+                        return std::unexpected(listing.error());
+                    }
+                    return TMetadataPages::TListing(std::move(*listing));
+                },
+                TMetadataPages::TClock::now(),
+                admissionGeneration,
+                resources);
+            if (!page) {
+                return std::unexpected(page.error());
+            }
+            std::lock_guard lock(state_mutex);
+            CheckReady();
+            Require(metadata_pages.GetGeneration() == admissionGeneration,
+                "INVALID_CURSOR",
+                "Metadata cursor admission was invalidated.");
+            return std::get<T>(std::move(*page));
+        } catch (const Failure& error) {
+            return std::unexpected(error.detail);
+        } catch (const std::exception& error) {
+            return std::unexpected(ExceptionError(error));
+        }
+    }
+
     // Writer only. After a committed append replaced `superseded` in
     // confirmed_views: queue its root and remove every queued root that no
     // planning scan still holds. Removal stays on the writer because capacity
@@ -626,6 +667,7 @@ struct Engine::Impl
             std::lock_guard lock(state_mutex);
             ready = false;
             start_generation = ++health_generation;
+            metadata_pages.Clear();
         }
         if (reopen) {
             if (backend) {
@@ -891,6 +933,56 @@ Result<std::vector<CollectionInfo>> Engine::ListCollections() const
         return impl->collections;
     } catch (const Failure& error) {
         return std::unexpected(error.detail);
+    }
+}
+
+Result<TCollectionPage> Engine::ListCollectionsPage(const TMetadataPageRequest& request) const
+{
+    return impl_->ReadMetadataPage<TCollectionPage>(request, "collections-v1", [&]() -> Result<TCollectionPage> {
+        auto collections = ListCollections();
+        if (!collections) {
+            return std::unexpected(collections.error());
+        }
+        const auto highWater = collections->empty() ? 0 : collections->back().creation_sequence;
+        return TCollectionPage{.CreationHighWaterMark = highWater, .Collections = std::move(*collections)};
+    });
+}
+
+Result<SnapshotHistory> Engine::ListSnapshotsPage(std::string_view collectionID,
+    const TMetadataPageRequest& request) const
+{
+    try {
+        Require(ValidUuid(collectionID), "INVALID_ARGUMENT", "Collection ID must be a canonical UUID.");
+        return impl_->ReadMetadataPage<SnapshotHistory>(request,
+            std::string("snapshots-v1:") + std::string(collectionID),
+            [&] {
+                return ListSnapshots(collectionID);
+            });
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
+Result<TFileListing> Engine::ListFilesPage(std::string_view collectionID,
+    const TMetadataPageRequest& request,
+    SnapshotSelector selector) const
+{
+    try {
+        Require(ValidUuid(collectionID), "INVALID_ARGUMENT", "Collection ID must be a canonical UUID.");
+        Encoder parameters;
+        parameters.Text("files-v1");
+        parameters.Text(collectionID);
+        parameters.Number(static_cast<uint8_t>(selector.kind));
+        parameters.Number(selector.snapshot_id);
+        return impl_->ReadMetadataPage<TFileListing>(request, parameters.bytes, [&] {
+            return ListFiles(collectionID, selector);
+        });
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        return std::unexpected(ExceptionError(error));
     }
 }
 
@@ -1623,6 +1715,7 @@ Status Engine::Shutdown(std::chrono::milliseconds timeout)
 {
     const auto impl = impl_;
     impl->closing = true;
+    impl->metadata_pages.Clear();
     std::unique_lock lock(impl->writer, std::defer_lock);
     if (!lock.try_lock_for(std::max(timeout, std::chrono::milliseconds(0)))) {
         return std::unexpected(ErrorDetail{"DEADLINE_EXCEEDED",

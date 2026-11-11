@@ -40,8 +40,11 @@ capacity-sized leases, including extracted explanation schemas and predicate
 subtrees. Explanations copy their admitted predicate tree into nodes sharing the
 result lease; node, vector and string capacities are included. DTO reservations
 include 128 bytes per allocation and another 4 KiB for capacities of at least
-4 KiB to cover allocator headers and rounding in this profile. Independently copied caller DTOs belong
-to the host budget. These envelopes do not establish a universal RSS upper bound
+4 KiB to cover allocator headers and rounding in this profile. Fixed-view pages
+also charge listing construction, cached descriptors/tokens and each returned
+page to that parent. Expiry reclaims cached leases before working admission;
+returned pages retain independent leases after engine close. Independently copied
+caller DTOs belong to the host budget. These envelopes do not establish a universal RSS upper bound
 for arbitrary corrupt files.
 
 New appends return a known original receipt before acquiring new execution

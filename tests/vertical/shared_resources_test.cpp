@@ -85,6 +85,85 @@ TEST(SharedResources, RetainedSliceAndExportKeepAllocationChargesAfterClose)
     EXPECT_EQ(owner->GetUsage().memory_bytes[4], 0);
 }
 
+TEST(SharedResources, MetadataPagesRetainIndependentChargesAfterClose)
+{
+    for (const int64_t pageSize : {1, 100}) {
+        SCOPED_TRACE(pageSize);
+        test::TempDir temporary;
+        auto owner = std::make_shared<ResourceOwner>();
+        auto created = CreateStore(
+            {.store_id = test::store_id, .absolute_root = (temporary.path / "store").string(), .resources = owner});
+        ASSERT_TRUE(created) << created.error().message;
+        auto engine = std::move(*created);
+        ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", Schema}).disposition,
+            CommitDisposition::Committed);
+        ASSERT_EQ(engine->CreateCollection({SecondCollection, "other", Schema}).disposition,
+            CommitDisposition::Committed);
+        ASSERT_TRUE(engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}}).result);
+        ASSERT_TRUE(engine->AppendDurable({test::collection_id, SecondOperation, {}, {Batch(SecondRows)}}).result);
+        const TMetadataPageRequest request{.PageSize = pageSize};
+        auto collections = engine->ListCollectionsPage(request);
+        auto history = engine->ListSnapshotsPage(test::collection_id, request);
+        auto files = engine->ListFilesPage(test::collection_id, request);
+        ASSERT_TRUE(collections);
+        ASSERT_TRUE(history);
+        ASSERT_TRUE(files);
+        ASSERT_EQ(collections->Collections.size(), pageSize == 1 ? 1U : 2U);
+        ASSERT_EQ(history->snapshots.size(), pageSize == 1 ? 1U : 2U);
+        ASSERT_EQ(files->Files.size(), pageSize == 1 ? 1U : 2U);
+        ASSERT_TRUE(engine->Shutdown(1000ms));
+        engine.reset();
+        const auto allPages = owner->GetUsage().memory_bytes[1];
+        EXPECT_GT(allPages, 0);
+        collections = TCollectionPage{};
+        const auto historyAndFiles = owner->GetUsage().memory_bytes[1];
+        EXPECT_LT(historyAndFiles, allPages);
+        history = SnapshotHistory{};
+        EXPECT_LT(owner->GetUsage().memory_bytes[1], historyAndFiles);
+        EXPECT_GT(owner->GetUsage().memory_bytes[1], 0);
+        files = TFileListing{};
+        EXPECT_EQ(owner->GetUsage().memory_bytes[1], 0);
+    }
+}
+
+TEST(SharedResources, MetadataPagePressurePreservesContinuationAndReplay)
+{
+    test::TempDir temporary;
+    auto owner = std::make_shared<ResourceOwner>();
+    auto created = CreateStore(
+        {.store_id = test::store_id, .absolute_root = (temporary.path / "store").string(), .resources = owner});
+    ASSERT_TRUE(created) << created.error().message;
+    auto engine = std::move(*created);
+    ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", Schema}).disposition,
+        CommitDisposition::Committed);
+    ASSERT_EQ(engine->CreateCollection({SecondCollection, "other", Schema}).disposition, CommitDisposition::Committed);
+    const auto first = engine->ListCollectionsPage({.PageSize = 1});
+    ASSERT_TRUE(first);
+    ASSERT_FALSE(first->NextPageToken.empty());
+    const TMetadataPageRequest request{.PageSize = 1, .PageToken = first->NextPageToken};
+    auto pressure =
+        owner->Reserve(ResourceClass::Metadata, owner->GetLimits().memory_bytes[1] - owner->GetUsage().memory_bytes[1]);
+    ASSERT_TRUE(pressure);
+    const auto refused = engine->ListCollectionsPage(request);
+    EXPECT_FALSE(refused);
+    if (!refused) {
+        EXPECT_EQ(refused.error().code, "RESOURCE_EXHAUSTED");
+    }
+    EXPECT_TRUE(engine->GetHealth().read_available);
+    pressure->reset();
+    const auto second = engine->ListCollectionsPage(request);
+    ASSERT_TRUE(second);
+    ASSERT_EQ(second->Collections.size(), 1U);
+    EXPECT_EQ(second->Collections.front().collection_id, SecondCollection);
+    const auto beforeReplay = owner->GetUsage().memory_bytes[1];
+    const auto replay = engine->ListCollectionsPage(request);
+    ASSERT_TRUE(replay);
+    EXPECT_GT(owner->GetUsage().memory_bytes[1], beforeReplay);
+    EXPECT_EQ(replay->Collections, second->Collections);
+    EXPECT_EQ(replay->NextPageToken, second->NextPageToken);
+    ASSERT_TRUE(engine->Shutdown(1000ms));
+}
+
 TEST(SharedResources, CompoundScanLiteralsRequireRetainedMetadataAdmission)
 {
     test::TempDir temporary;

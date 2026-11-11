@@ -81,9 +81,27 @@ Status Attach(const std::shared_ptr<ResourceOwner>& owner, uint64_t bytes, std::
 }
 } // namespace
 
+Status RetainMetadata(const std::shared_ptr<ResourceOwner>& owner, TCollectionPage& result)
+{
+    TCapacity capacity;
+    capacity.Add(result.NextPageToken);
+    capacity.Allocation(result.Collections.capacity(), sizeof(CollectionInfo));
+    for (const auto& collection : result.Collections) {
+        capacity.Add(collection.collection_id);
+        capacity.Add(collection.name);
+        capacity.Add(collection.table_uuid);
+        capacity.Allocation(collection.schema.fields.capacity(), sizeof(FieldSpec));
+        for (const auto& field : collection.schema.fields) {
+            capacity.Add(field.name);
+        }
+    }
+    return Attach(owner, capacity.Bytes, result.ResourceLease);
+}
+
 Status RetainMetadata(const std::shared_ptr<ResourceOwner>& owner, SnapshotHistory& result)
 {
     TCapacity capacity;
+    capacity.Add(result.NextPageToken);
     capacity.Add(result.identity);
     capacity.Allocation(result.snapshots.capacity(), sizeof(SnapshotMetadata));
     for (const auto& snapshot : result.snapshots) {
@@ -138,6 +156,7 @@ Status RetainMetadata(const std::shared_ptr<ResourceOwner>& owner, ScanExplanati
 Status RetainMetadata(const std::shared_ptr<ResourceOwner>& owner, TFileListing& result)
 {
     TCapacity capacity;
+    capacity.Add(result.NextPageToken);
     capacity.Add(result.Identity);
     capacity.Allocation(result.Files.capacity(), sizeof(TDataFileMetadata));
     for (const auto& file : result.Files) {

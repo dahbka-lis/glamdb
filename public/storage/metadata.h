@@ -19,6 +19,23 @@ struct EngineCapabilities
     bool durability_qualified = false;
 };
 
+struct TMetadataPageRequest
+{
+    int64_t PageSize = 100;
+    std::string PageToken{};
+    // Trusted adapter-supplied principal and authorization generation/scope.
+    std::string AuthorizationContext{};
+};
+
+struct TCollectionPage
+{
+    // Declared first so payload allocations are freed before the reservation.
+    std::shared_ptr<const void> ResourceLease{};
+    int64_t CreationHighWaterMark = 0;
+    std::vector<CollectionInfo> Collections{};
+    std::string NextPageToken{};
+};
+
 struct SnapshotMetadata
 {
     int64_t snapshot_id = 0;
@@ -35,6 +52,7 @@ struct SnapshotHistory
     BaseIdentity identity{};
     // Oldest first; initial empty is a view, not a snapshot.
     std::vector<SnapshotMetadata> snapshots{};
+    std::string NextPageToken{};
 };
 
 struct CollectionStatistics
@@ -80,6 +98,7 @@ struct TFileListing
     BaseIdentity Identity{};
     SnapshotSelector SelectorResolved{};
     std::vector<TDataFileMetadata> Files{};
+    std::string NextPageToken{};
 };
 
 struct TColumnChunkMetadata

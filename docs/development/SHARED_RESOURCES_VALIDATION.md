@@ -5,21 +5,23 @@ Checks updated on 2026-11-12 after integration with official main.
 Environment: Ubuntu 24.04.4, Linux x86-64, Clang 18.1.3, Debug builds,
 pinned libc++ 18 and repository dependencies. The test filesystem reports
 `ext2/ext3` through `stat -f`; this is not the dedicated G4 qualification volume.
-The checks below cover official main through `1f48601`. Later merges through
-`103ea38` resolved documentation and scan ownership conflicts without local runs,
-as requested.
+The checks below cover official main through `d61aeaa`, including the later scan
+ownership and fixed-view paging integrations. They were run locally after the
+merge. The HTTP measurements below record the earlier three-database campaign.
 
 ## Checks
 
 | Check | Result |
 | --- | --- |
-| Storage-enabled build and full native CTest suite | PASS: 645 passed, three skipped, one disabled; 649 discovered |
-| Resource owner/pool, shared-store, compound predicate, native route, file metadata, workspace recovery, HTTP admission/lifecycle and profile tests under ASan/UBSan/LSan | PASS: 95 tests, leak detection enabled |
-| Storage-disabled full CTest suite | PASS: 324 passed, one existing disabled test |
-| Affected Python SDK outcome, scan-page and cleanup tests | PASS: 97 tests |
-| LLVM 18 formatting | PASS: 206 project files |
-| LLVM 18 static analysis with configured warnings as errors | PASS: 24 original changed translation units; 21 integration units checked, including project headers |
+| Storage-enabled build and full native CTest suite | PASS: 674 passed, three skipped, one disabled; 678 discovered |
+| Resource owner/pool, shared-store, compound predicate, native route, file metadata, fixed-view pages, scan lifetime, workspace recovery, HTTP admission/lifecycle and profile tests under ASan/UBSan/LSan | PASS: 130 tests, leak detection enabled |
+| Storage-disabled full CTest suite | PASS: 332 passed, one existing disabled test |
+| LLVM 18 formatting | PASS: 211 project files |
+| LLVM 18 static analysis with configured warnings as errors | PASS: all 14 integration units changed since `a0b6e8f`, including project headers |
 | Quality negative checks and `git diff --check` | PASS |
+
+The earlier SDK unit run at `a0b6e8f` passed 97 outcome, scan-page and cleanup
+tests. The current native suite also runs real SDK HTTP scenarios.
 
 The skipped cases are the standalone `CapacityRecoveryChild.RejectsOverBudgetStore`,
 `RecoveryChildProcess.ReopensPublishedRoot` and
@@ -37,13 +39,14 @@ Commands, with the normal and instrumented build directories configured as
 described in [BUILDING.md](BUILDING.md):
 
 ```sh
-cmake --build build/local --parallel 2
+cmake --build build/local --parallel 6
 GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 \
   ctest --test-dir build/local --output-on-failure --parallel 2
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
   UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 ARROW_DEFAULT_MEMORY_POOL=system \
-  ctest --test-dir build/issue-43-asan --output-on-failure -V --parallel 2 \
-  -R 'ResourceOwner|ResourcePool|MetadataResources|SharedResources|SharedPressure|TFileMetadataTest|RecoveryWorkspaces|ScanPredicate|ScanMockTest|Compound|Admission|ScanSessionsTest|ReplayAdmissionTest|glamdb\.(native_http|http_review|native_http_fault|scan_http|http_lifecycle|resource_profile)$'
+  GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 \
+  ctest --test-dir build/issue-43-asan --output-on-failure --parallel 2 \
+  -R 'ResourceOwner|ResourcePool|MetadataResources|SharedResources|SharedPressure|TFileMetadataTest|RecoveryWorkspaces|ScanPredicate|ScanMockTest|Compound|Admission|ScanSessionsTest|ReplayAdmissionTest|TScanLifetimeTest|TMetadataPagesTest|SupersededRoot|glamdb\.(native_http|http_review|native_http_fault|scan_http|http_lifecycle|resource_profile)$'
 ctest --test-dir build/nostorage --output-on-failure --parallel 2
 cmake --build build/local --target format-check quality-negative-check
 ctest --test-dir build/local --output-on-failure -V -R '^glamdb.resource_profile$'
@@ -132,6 +135,19 @@ fixture uses 16 GiB Metadata. The eight-store, 64-session HTTP quota cases use
 4 GiB Data, 16 GiB Metadata and 8 GiB Recovery. These cases first refused under
 the smaller default profile. Production defaults and the three-database measured
 profile remain 2 GiB Data, 8 GiB Metadata and 4 GiB Recovery.
+
+Fixed-view metadata pages now reserve construction, cached descriptors/tokens
+and returned copies from the engine's shared metadata parent. Every returned
+page retains its own capacity-sized lease after engine close. Two regressions
+first failed on retained-page charges and continuation/replay admission, then
+passed after accounting was integrated.
+
+Independent review found that working admission could prevent expired cache
+leases from being reclaimed, and vector compaction could release leases before
+overwritten payloads. A third regression reproduced expiry under saturation.
+Expiry now precedes working admission, and sessions use separately freed list
+nodes. The reviewer confirmed both findings resolved; normal and sanitizer
+runs cover these changes.
 
 ## Measured HTTP profile
 
