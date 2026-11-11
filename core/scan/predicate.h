@@ -9,6 +9,7 @@
 
 namespace arrow {
 class Array;
+class MemoryPool;
 } // namespace arrow
 
 namespace glamdb::detail {
@@ -30,6 +31,7 @@ Result<TBoundPredicate> BindPredicate(const Predicate& predicate, const SchemaSp
 Result<std::vector<int64_t>> SelectRows(const TBoundPredicate& predicate, const arrow::Array& column);
 
 // Copies the selected rows, preserving NULLs, for the five supported types.
-Result<std::shared_ptr<arrow::Array>> TakeRows(const arrow::Array& column, std::span<const int64_t> rows);
+Result<std::shared_ptr<arrow::Array>>
+TakeRows(const arrow::Array& column, std::span<const int64_t> rows, arrow::MemoryPool* pool = nullptr);
 
 } // namespace glamdb::detail
