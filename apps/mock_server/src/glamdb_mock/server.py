@@ -199,7 +199,7 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
 
     @app.exception_handler(HTTPException)
     async def http_error(_request, error):
-        return _error(error.status_code, "NOT_FOUND" if error.status_code == 404 else "INVALID_ARGUMENT", "resource does not exist" if error.status_code == 404 else "HTTP request is not supported")
+        return _error(error.status_code, "ROUTE_NOT_FOUND" if error.status_code == 404 else "INVALID_ARGUMENT", "resource does not exist" if error.status_code == 404 else "HTTP request is not supported")
 
     @app.get("/health")
     @app.get("/healthz")
@@ -321,7 +321,7 @@ def create_app(*, token, ui_dir, theme_file=None, seed_demo=False, enable_develo
                 return _json(existing.response, existing.status)
             if item.pending_operation:
                 raise MockError(503, "RECOVERY_REQUIRED", "operation absence is not authoritative during mock recovery", "resolve_original_operation")
-        raise MockError(404, "NOT_FOUND", "operation does not exist")
+        raise MockError(404, "OPERATION_NOT_FOUND", "operation does not exist")
 
     @app.post("/development/collections/{collection_id}/operations/{operation_id}:resolve")
     async def development_resolve(collection_id: str, operation_id: str, request: Request):

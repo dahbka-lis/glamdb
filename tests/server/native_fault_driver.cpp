@@ -2,6 +2,10 @@
 #include "apps/server/server.h"
 #include "tests/support/journal_fault_vfs.h"
 
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <unistd.h>
+
 #include <cstdio>
 #include <iostream>
 #include <sstream>
@@ -29,12 +33,38 @@ try {
             std::fputs(text, stdout);
             std::fflush(stdout);
         };
+        std::vector<int> descriptors;
+        rlimit original{};
         std::string line;
         while (std::getline(std::cin, line)) {
             std::istringstream command(line);
             std::string target;
             int commit = 0, after = 0;
             command >> target >> commit >> after;
+            if (target == "exhaust-fds") {
+                getrlimit(RLIMIT_NOFILE, &original);
+                rlimit limit = original;
+                limit.rlim_cur = std::min<rlim_t>(original.rlim_cur, 96);
+                setrlimit(RLIMIT_NOFILE, &limit);
+                for (;;) {
+                    const int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+                    if (fd < 0) {
+                        break;
+                    }
+                    descriptors.push_back(fd);
+                }
+                reply("armed\n");
+                continue;
+            }
+            if (target == "release-fds") {
+                for (const auto fd : descriptors) {
+                    close(fd);
+                }
+                descriptors.clear();
+                setrlimit(RLIMIT_NOFILE, &original);
+                reply("armed\n");
+                continue;
+            }
             if (target == "pause") {
                 core.PauseBeforeDelete(commit);
                 reply("armed\n");

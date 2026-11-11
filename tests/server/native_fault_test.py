@@ -2,6 +2,7 @@
 import http.client
 import json
 import select
+import socket
 import subprocess
 import sys
 import tempfile
@@ -73,6 +74,35 @@ class NativeFaultHTTP(unittest.TestCase):
         self.api(self.base + '/collections', body)
         return self.base + '/collections/' + cid
 
+    def test_listener_recovers_after_descriptor_exhaustion(self):
+        self.arm('exhaust-fds', 0, False)
+        try:
+            with socket.create_connection(('127.0.0.1', self.port), timeout=5) as connection:
+                connection.sendall(b'GET /healthz HTTP/1.1\r\nHost: local\r\n\r\n')
+                # Let at least one accept report EMFILE before restoring capacity.
+                time.sleep(0.3)
+        finally:
+            self.arm('release-fds', 0, False)
+        self.assertEqual(self.api('/healthz')['status'], 'live')
+
+    def test_blocked_database_does_not_starve_controls_or_other_database(self):
+        path = self.collection()
+        other = self.api('/databases', {'name': 'independent'})['database_id']
+        body = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'blocked'}]}
+        self.arm('pause', 1, False)
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            append = workers.submit(self.api, path + '/append', body)
+            self.wait_for_publication()
+            try:
+                self.assertEqual(self.api('/healthz')['status'], 'live')
+                self.assertEqual(len(self.api('/databases')['items']), 2)
+                self.assertEqual(self.api('/databases/' + other + '/collections')['items'], [])
+                self.assertEqual(self.api(self.base)['state'], 'open')
+                self.assertEqual(self.api(self.base + '/open', {})['state'], 'open')
+            finally:
+                self.arm('release', 0, False)
+            self.assertEqual(append.result(timeout=10)['outcome'], 'committed')
+
     def test_control_acknowledgements_after_startup(self):
         # The readiness record and control replies come from different threads.
         # TSan must see no shared stream-state race during this handshake.
@@ -116,11 +146,12 @@ class NativeFaultHTTP(unittest.TestCase):
                 lookup_unknown = self.api(lookup, status=503)
                 self.assertEqual(lookup_unknown['outcome'], 'commit_unknown')
                 self.assertEqual(lookup_unknown['recovery'], unknown['recovery'])
+                self.assertEqual(self.api(path + '/append', body, status=503)['recovery'], unknown['recovery'])
                 blocked = self.api(path + '/append', {'operation_id': str(uuid.uuid4()),
                     'rows': [{'key': 'must-not-publish'}]}, status=503)
                 self.assertEqual(blocked['error']['code'], 'RECOVERY_REQUIRED')
                 self.arm('core', 1, True)
-                self.api(self.base + '/reconcile', {}, status=500)
+                self.api(self.base + '/reconcile', {}, status=503)
                 self.api(lookup, status=503)
                 self.arm('core', 0, False)
                 self.api(self.base + '/reconcile', {})
@@ -218,7 +249,7 @@ class NativeFaultHTTP(unittest.TestCase):
                     if action == 'open':
                         self.api(self.base + '/close', {})
                     self.arm('registry', 1, after)
-                    self.api(self.base + '/' + action, {}, status=500)
+                    self.api(self.base + '/' + action, {}, status=503)
                     self.api('/databases', {'name': 'blocked'}, status=503)
                     self.arm('registry', 0, False)
                     self.stop()
@@ -235,7 +266,7 @@ class NativeFaultHTTP(unittest.TestCase):
                     body = {'name': database, 'database_id': database}
                     root = self.directory / 'databases' / database
                     self.arm('registry', commit, after)
-                    self.api('/databases', body, status=500)
+                    self.api('/databases', body, status=503)
                     self.assertEqual(root.exists(), commit == 2)
                     identity = root / 'store.identity'
                     inode = identity.stat().st_ino if identity.exists() else None
@@ -266,7 +297,7 @@ class NativeFaultHTTP(unittest.TestCase):
         self.assertEqual(self.api('/databases/' + other)['state'], 'error')
         new = self.api('/databases', {'name': 'healthy'})
         self.assertEqual(new['state'], 'open')
-        error = self.api(self.base + '/open', {}, status=500)
+        error = self.api(self.base + '/open', {}, status=409)
         self.assertEqual(error['error']['code'], 'STORE_IDENTITY_MISMATCH')
         self.assertTrue(list(root.rglob('store.identity')))
         self.stop()
@@ -289,7 +320,7 @@ class NativeFaultHTTP(unittest.TestCase):
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
                     status, _ = self.request(self.base + '/collections')
-                    if status == 409:
+                    if status == 429:
                         break
                     time.sleep(0.01)
                 else:

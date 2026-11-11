@@ -1,5 +1,6 @@
 #pragma once
 
+#include "apps/transport/errors.h"
 #include "storage/engine.h"
 
 #include <arrow/api.h>
@@ -7,6 +8,7 @@
 
 namespace glamdb::NTransport {
 using TJson = nlohmann::json;
+inline constexpr size_t MaxJsonEvents = 5200000;
 inline constexpr size_t MaxRequestBytes = 16ULL * 1024 * 1024;
 inline constexpr size_t MaxResponseBytes = 16ULL * 1024 * 1024;
 
@@ -34,6 +36,16 @@ std::shared_ptr<arrow::RecordBatch> ParseRows(const SchemaSpec& schema, const TJ
 ScanRequest ParseScan(std::string collectionID, const SchemaSpec& schema, const TJson& body);
 TJson EncodeSchema(const arrow::Schema& schema);
 TJson EncodeRows(const arrow::RecordBatch& batch);
+// Append rows to an unfinished JSON array (initially "["). Returns consumed
+// rows; leaves an oversized next row for the next page. The first row may
+// exceed the soft target, but never the hard response-envelope allowance.
+struct TRowJsonBudget
+{
+    size_t MaxRows;
+    size_t TargetBytes;
+    size_t HardBytes;
+};
+size_t AppendRowsJson(const arrow::RecordBatch& batch, std::string& output, const TRowJsonBudget& budget);
 TJson EncodeIdentity(const BaseIdentity& identity);
 TJson EncodeError(const ErrorDetail& error);
 int ErrorStatus(std::string_view code);

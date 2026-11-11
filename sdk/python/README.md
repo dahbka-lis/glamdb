@@ -82,7 +82,11 @@ fabricated failed write outcome.
 `TransportError`, `DeadlineExceeded`, `ProtocolError`, `AuthenticationError`
 and `HTTPError` are separate from those outcomes. A lost response or malformed
 write response does not prove that publication failed. Exceptions retain the
-caller operation and collection IDs when applicable. The SDK does not add
+caller operation and collection IDs when applicable. A server/gateway 5xx write
+response without an authoritative outcome raises `OutcomeUnknownError` (an
+`HTTPError` subclass); preserve the original IDs and reconcile or look up that
+operation before deciding whether to retry. Database and route 404 errors never
+mean an append operation is absent. The SDK does not add
 credentials to error messages, and redirects are disabled.
 
 Keep the original operation UUID, schema and input payload across a disconnect
@@ -93,7 +97,7 @@ detached copy. After restarting, prepare the same payload with the same IDs.
 
 `client.find_append_outcome(collection_id, operation_id)` returns the original
 terminal outcome, an `OperationInProgress`, `commit_unknown`, or `None` for an
-authoritative `NOT_FOUND`. A recovery-pending HTTP error remains an error;
+authoritative `OPERATION_NOT_FOUND`. A recovery-pending HTTP error remains an error;
 it is not absence. Do not change the ID just because a response was lost or an
 outcome is unknown. A terminal failed outcome may request a *new, explicit*
 operation ID for a corrected attempt. A retry whose content conflicts with the
@@ -151,10 +155,24 @@ parameters, selector and page size; do not resolve latest again between pages.
 ## Streaming and transport ownership
 
 Always use `with client.scan_batches(...) as stream:` or call `stream.close()`.
-Breaking a loop whose iterator is retained does not immediately release it.
+The client tracks iterators weakly; dropping an iterator releases its cursor via
+a nonthrowing finalizer. Explicit close remains preferable because garbage
+collection timing varies. Breaking a loop whose iterator is retained does not
+immediately release it.
 Exiting the context or closing the client closes every reader and HTTP
 response, including on a consumer exception. Already returned Arrow batches
-remain usable after those owners close.
+remain usable after those owners close. Iteration failures remain sticky: another
+`next()` raises the original failure, and integrity never becomes complete.
+
+`scan_json`, `scan_batches` and `scan_pages` use `/scan/open` before fetching a
+page, so retries and cleanup use the same known cursor even if the first page
+response is lost. JSON and Arrow convenience scans support legacy single-response
+adapters only when the open route explicitly returns `ROUTE_NOT_FOUND`; other
+404 errors and transport failures never restart the scan. The development mock
+remains a single-response adapter and does not emulate native cursor sessions.
+Use `with client.scan_pages(collection_id) as pages:` to consume JSON pages
+incrementally; early close cancels the continuation and keeps integrity
+`not_complete`.
 
 The response reader accepts bounded reads and keeps only a small network chunk
 plus the current Arrow read; it never materializes the complete HTTP body.
@@ -194,9 +212,11 @@ passed incrementally: 42 codec tests; 81 codec/client/predicate/request tests;
 copying, canonical output scalars, identity on schema-fetch timeout, and closing
 all streams after a close error. Receipt-validation regressions first exposed
 39 failures for invalid hashes, versions and receipt fields before the fix.
-The current suite has 172 passing tests.
-Transport doubles represent the unimplemented server boundary; codec, HTTP
-client logic, canonical hash and PyArrow IPC encoding/decoding are real. The
+The current SDK unit suite has 263 tests, including cursor abandonment, sticky
+iteration failures, first-page replay, distinct operation absence and uncertain
+5xx write failures. Transport doubles isolate the HTTP boundary; codec, HTTP
+client logic, canonical hash and PyArrow IPC encoding/decoding are real. Native
+HTTP and browser suites separately exercise the C++ server. The
 canonical append hash is independently checked against fixed single-type and
 all-type golden vectors.
 Repository-level actual HTTP integration is maintained separately from these

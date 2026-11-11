@@ -2,6 +2,7 @@
 
 #include "apps/transport/http.h"
 
+#include <chrono>
 #include <memory>
 
 namespace glamdb::NServer {
@@ -10,7 +11,9 @@ namespace glamdb::NServer {
 class TScans
 {
 public:
-    TScans();
+    // Internal service policy; production routes use these bounded defaults.
+    explicit TScans(std::chrono::milliseconds idle = std::chrono::seconds(60),
+        std::chrono::milliseconds lifetime = std::chrono::minutes(5));
     ~TScans();
     NTransport::TResponse Open(const std::shared_ptr<Engine>& engine,
         const std::string& database,

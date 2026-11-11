@@ -25,9 +25,13 @@ try {
         "use --data-dir, or both --root and --store-id for a legacy store");
     const auto token = glamdb::NTransport::ReadToken();
     if (uiRoot.empty()) {
-        const auto executable = std::filesystem::canonical("/proc/self/exe");
+        std::error_code error;
+        auto executable = std::filesystem::canonical("/proc/self/exe", error);
+        if (error) {
+            executable = std::filesystem::canonical(argv[0], error);
+        }
         const auto installed = executable.parent_path().parent_path() / "share/glamdb/ui";
-        if (std::filesystem::is_directory(installed)) {
+        if (!error && std::filesystem::is_directory(installed, error)) {
             uiRoot = installed.string();
         }
     }

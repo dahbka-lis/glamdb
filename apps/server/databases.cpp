@@ -90,6 +90,8 @@ struct TEntry
     bool Closing = false;
     std::string State = "closed";
     std::optional<ErrorDetail> Error;
+    bool RegistryFence = false;
+    std::shared_ptr<const TJson> Descriptor;
 };
 TJson Describe(const TEntry& entry)
 {
@@ -108,6 +110,86 @@ TJson Describe(const TEntry& entry)
     }
     return value;
 }
+void Publish(TEntry& entry)
+{
+    std::atomic_store(&entry.Descriptor, std::make_shared<const TJson>(Describe(entry)));
+}
+TJson Current(const TEntry& entry)
+{
+    return *std::atomic_load(&entry.Descriptor);
+}
+void ConfigureRegistry(detail::Database& registry)
+{
+    registry.Execute("PRAGMA busy_timeout=250");
+    Require(registry.Text("PRAGMA journal_mode=DELETE") == "delete", "registry requires DELETE journal", "IO_ERROR");
+    registry.Execute("PRAGMA synchronous=EXTRA");
+    Require(registry.Integer("PRAGMA synchronous") == 3, "registry requires EXTRA synchronous", "IO_ERROR");
+}
+void SyncDirectory(const std::filesystem::path& path)
+{
+    TDirectoryLock directory;
+    directory.Descriptor = open(path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    Require(directory.Descriptor >= 0 && fsync(directory.Descriptor) == 0,
+        "cannot sync registry directory",
+        "IO_ERROR");
+}
+void InitializeRegistry(const std::filesystem::path& directory, const std::string& vfs)
+{
+    const auto staging = directory / "registry.initializing.sqlite";
+    // Only our unpublished initialization files and an empty database parent may
+    // remain after a crash. Anything else could contain accepted user data.
+    for (const auto& file : std::filesystem::directory_iterator(directory)) {
+        const auto name = file.path().filename().string();
+        const auto status = file.symlink_status();
+        const bool emptyParent =
+            name == "databases" && std::filesystem::is_directory(status) && std::filesystem::is_empty(file.path());
+        const bool temporary =
+            (name == "registry.initializing.sqlite" || name == "registry.initializing.sqlite-journal") &&
+            std::filesystem::is_regular_file(status);
+        Require(emptyParent || temporary,
+            "registry missing from nonempty data directory; refusing to replace it",
+            "CORRUPTION");
+    }
+    std::filesystem::remove(staging);
+    std::filesystem::remove(staging.string() + "-journal");
+    std::filesystem::create_directory(directory / "databases");
+    SyncDirectory(directory / "databases");
+    {
+        detail::Database registry;
+        registry.Open(staging, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, vfs);
+        ConfigureRegistry(registry);
+        registry.Execute("BEGIN IMMEDIATE");
+        registry.Execute("CREATE TABLE databases(id TEXT PRIMARY KEY NOT NULL, name TEXT UNIQUE NOT NULL, "
+                         "initialized INTEGER NOT NULL CHECK(initialized IN (0,1)), auto_open INTEGER NOT NULL "
+                         "CHECK(auto_open IN (0,1)), limits TEXT NOT NULL DEFAULT '" +
+            EncodeLimits(Limits{}).dump() + "') STRICT");
+        registry.Execute("PRAGMA user_version=2");
+        registry.Execute("COMMIT");
+        registry.Close();
+    }
+    SyncDirectory(directory);
+    std::filesystem::rename(staging, directory / "registry.sqlite");
+    SyncDirectory(directory);
+    SyncDirectory(directory.parent_path());
+}
+void PreserveIncompleteStore(const std::filesystem::path& path)
+{
+    Require(std::filesystem::is_directory(std::filesystem::symlink_status(path)),
+        "incomplete store is not a directory",
+        "CORRUPTION");
+    TDirectoryLock ownership;
+    ownership.Descriptor = open(path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    Require(ownership.Descriptor >= 0 && flock(ownership.Descriptor, LOCK_EX | LOCK_NB) == 0,
+        "incomplete store is already owned",
+        "STATE_IN_USE");
+    Require(!std::filesystem::exists(std::filesystem::symlink_status(path / "store.ready")),
+        "ready store cannot be replaced",
+        "CORRUPTION");
+    // Preserve every byte for inspection. Never remove an initialized/ready store.
+    std::filesystem::rename(path,
+        path.parent_path() / ("incomplete-" + path.filename().string() + "-" + detail::NewUuid()));
+    SyncDirectory(path.parent_path());
+}
 void ValidateName(const std::string& name)
 {
     Require(!name.empty() && name.size() <= 128 && detail::ValidUtf8(name) &&
@@ -123,7 +205,9 @@ struct TDatabases::TImpl
     detail::Database Registry;
     mutable std::mutex Mutex;
     std::map<std::string, std::shared_ptr<TEntry>> Entries;
-    bool Healthy = true;
+    std::atomic<bool> Healthy{true};
+    using TEntries = std::vector<std::shared_ptr<TEntry>>;
+    std::shared_ptr<const TEntries> PublishedEntries = std::make_shared<const TEntries>();
     std::function<void(const std::string&)> ScanCanceller;
 
     void CancelScans(const std::string& id)
@@ -140,69 +224,102 @@ struct TDatabases::TImpl
 
     void Write(std::string_view sql, std::initializer_list<detail::SqlValue> values = {})
     {
-        // Caller holds Mutex. A failed SQLite write may have committed: stop
-        // registry mutations until restart rather than act on uncertain intent.
         Require(Healthy, "registry needs restart after an uncertain write", "RECOVERY_REQUIRED");
         try {
             Registry.Execute(sql, values);
+        } catch (const detail::Failure& error) {
+            const int code = error.native_code & 255;
+            const bool definite = Registry.Autocommit() &&
+                (code == SQLITE_BUSY || code == SQLITE_LOCKED || code == SQLITE_FULL || code == SQLITE_CONSTRAINT);
+            if (!definite) {
+                Healthy = false;
+            }
+            throw;
         } catch (...) {
             Healthy = false;
             throw;
         }
     }
+    void PublishEntries()
+    {
+        auto entries = std::make_shared<TEntries>();
+        for (const auto& [id, entry] : Entries) {
+            (void)id;
+            entries->push_back(entry);
+        }
+        std::atomic_store(&PublishedEntries, std::shared_ptr<const TEntries>(std::move(entries)));
+    }
     std::shared_ptr<TEntry> Find(const std::string& id) const
     {
         Require(detail::ValidUuid(id), "invalid database ID");
-        std::lock_guard lock(Mutex);
-        const auto it = Entries.find(id);
-        Require(it != Entries.end(), "database not found", "NOT_FOUND");
-        return it->second;
-    }
-    std::vector<std::shared_ptr<TEntry>> Snapshot() const
-    {
-        std::lock_guard lock(Mutex);
-        std::vector<std::shared_ptr<TEntry>> result;
-        for (const auto& [id, entry] : Entries) {
-            (void)id;
-            result.push_back(entry);
+        for (const auto& entry : Snapshot()) {
+            if (entry->ID == id) {
+                return entry;
+            }
         }
-        return result;
+        throw TFailure({"DATABASE_NOT_FOUND", "database not found", RetryHint::OperatorAction});
+    }
+    TEntries Snapshot() const
+    {
+        return *std::atomic_load(&PublishedEntries);
+    }
+    void OpenError(TEntry& entry, const ErrorDetail& error)
+    {
+        entry.State = "error";
+        entry.Error = error;
+        if (entry.Instance && (!entry.Initialized || !entry.AutoOpen)) {
+            entry.RegistryFence = true;
+            entry.Error = ErrorDetail{"RECOVERY_REQUIRED",
+                Healthy ? "database registration is incomplete; retry reconciliation"
+                        : "database registration is uncertain; restart to resolve registry state",
+                RetryHint::SameIdAfterReconcile};
+        }
+        Publish(entry);
     }
     void Open(TEntry& entry, bool create)
     {
-        {
-            std::lock_guard lock(Mutex);
-            Require(Healthy, "registry needs restart", "RECOVERY_REQUIRED");
-        }
+        Require(!create || entry.Initialized || Healthy, "registry needs restart", "RECOVERY_REQUIRED");
+        Require(!entry.RegistryFence || Healthy,
+            "database registry intent is uncertain; restart before reopening",
+            "RECOVERY_REQUIRED");
         Require(!entry.Closing, "retry close before reopening this database", "DATABASE_BUSY");
         if (entry.Instance) {
             Require(entry.State == "open", "database needs reconciliation or close", "RECOVERY_REQUIRED");
             return;
         }
         const auto path = Root / "databases" / entry.ID;
+        entry.State = "opening";
+        Publish(entry);
         try {
-            auto engine =
-                create && !entry.Initialized && !std::filesystem::exists(std::filesystem::symlink_status(path))
+            const bool initialize = create && !entry.Initialized &&
+                !std::filesystem::exists(std::filesystem::symlink_status(path / "store.ready"));
+            if (initialize && std::filesystem::exists(std::filesystem::symlink_status(path))) {
+                PreserveIncompleteStore(path);
+            }
+            auto engine = initialize
                 ? Unwrap(CreateStore({entry.ID, path.string(), "local-delete-extra-v1", entry.ResourceLimits}))
                 : Unwrap(OpenExisting({path.string(), entry.ID, "local-delete-extra-v1", entry.ResourceLimits}));
             entry.Instance = std::move(engine);
-            {
+            if (!entry.Initialized || !entry.AutoOpen) {
                 std::lock_guard lock(Mutex);
                 Write("UPDATE databases SET initialized=1, auto_open=1 WHERE id=?", {entry.ID});
             }
             entry.Initialized = true;
             entry.AutoOpen = true;
+            entry.RegistryFence = false;
             entry.State = "open";
             entry.Error.reset();
+            Publish(entry);
             entry.Accepting = true;
         } catch (const TFailure& error) {
-            entry.State = "error";
-            entry.Error = error.Detail;
+            OpenError(entry, error.Detail);
             throw;
         } catch (const detail::Failure& error) {
-            entry.State = "error";
-            entry.Error = error.detail;
+            OpenError(entry, error.detail);
             throw;
+        } catch (const std::exception&) {
+            OpenError(entry, {"IO_ERROR", "database open failed", RetryHint::OperatorAction});
+            throw TFailure(*entry.Error);
         }
     }
 };
@@ -227,37 +344,12 @@ TDatabases::TDatabases(const std::filesystem::path& directory, const std::string
     self.Root = directory;
     const auto registry = directory / "registry.sqlite";
     const bool fresh = !std::filesystem::exists(std::filesystem::symlink_status(registry));
-    Require(!fresh || std::filesystem::is_empty(directory),
-        "registry missing from nonempty data directory; refusing to replace it",
-        "CORRUPTION");
-    self.Registry.Open(registry, SQLITE_OPEN_READWRITE | (fresh ? SQLITE_OPEN_CREATE : 0), registryVfs);
-    Require(self.Registry.Text("PRAGMA journal_mode=DELETE") == "delete",
-        "registry requires DELETE journal",
-        "IO_ERROR");
-    self.Registry.Execute("PRAGMA synchronous=EXTRA");
-    Require(self.Registry.Integer("PRAGMA synchronous") == 3, "registry requires EXTRA synchronous", "IO_ERROR");
     if (fresh) {
-        self.Registry.Execute("CREATE TABLE databases(id TEXT PRIMARY KEY NOT NULL, name TEXT UNIQUE NOT NULL, "
-                              "initialized INTEGER NOT NULL CHECK(initialized IN (0,1)), auto_open INTEGER NOT NULL "
-                              "CHECK(auto_open IN (0,1))) STRICT");
-        self.Registry.Execute("PRAGMA user_version=1");
-        Require(mkdir((directory / "databases").c_str(), 0700) == 0, "cannot create database parent", "IO_ERROR");
-        Require(fsync(self.DirectoryLock.Descriptor) == 0, "cannot sync server data directory", "IO_ERROR");
-        TDirectoryLock parent;
-        parent.Descriptor = open(directory.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        Require(parent.Descriptor >= 0 && fsync(parent.Descriptor) == 0, "cannot sync server parent", "IO_ERROR");
+        InitializeRegistry(directory, registryVfs);
     }
-    const auto version = self.Registry.Integer("PRAGMA user_version");
-    Require(version == 1 || version == 2, "unsupported server registry version", "CORRUPTION");
-    if (version == 1) {
-        // ALTER and the version advance share one durable SQLite transaction.
-        // Failed/uncertain commits abort startup; reopening resolves old or new state.
-        self.Registry.Execute("BEGIN IMMEDIATE");
-        self.Registry.Execute(
-            "ALTER TABLE databases ADD COLUMN limits TEXT NOT NULL DEFAULT '" + EncodeLimits(Limits{}).dump() + "'");
-        self.Registry.Execute("PRAGMA user_version=2");
-        self.Registry.Execute("COMMIT");
-    }
+    self.Registry.Open(registry, SQLITE_OPEN_READWRITE, registryVfs);
+    ConfigureRegistry(self.Registry);
+    Require(self.Registry.Integer("PRAGMA user_version") == 2, "unsupported server registry version", "CORRUPTION");
     Require(std::filesystem::is_directory(std::filesystem::symlink_status(directory / "databases")),
         "database parent is absent or a symlink",
         "CORRUPTION");
@@ -288,12 +380,19 @@ TDatabases::TDatabases(const std::filesystem::path& directory, const std::string
             "invalid or oversized registry",
             "CORRUPTION");
     }
+    for (const auto& [id, entry] : self.Entries) {
+        (void)id;
+        Publish(*entry);
+    }
+    self.PublishEntries();
     for (const auto& entry : self.Snapshot()) {
         if (entry->AutoOpen) {
             try {
                 self.Open(*entry, false);
             } catch (const TFailure&) {
                 // One unavailable store must not hide the database administration API.
+                continue;
+            } catch (const detail::Failure&) {
                 continue;
             }
         }
@@ -305,16 +404,14 @@ TJson TDatabases::List() const
 {
     auto items = TJson::array();
     for (const auto& entry : Impl_->Snapshot()) {
-        std::shared_lock lock(entry->Gate);
-        items.push_back(Describe(*entry));
+        items.push_back(Current(*entry));
     }
     return {{"items", items}, {"next_cursor", nullptr}};
 }
 TJson TDatabases::Get(const std::string& id) const
 {
     const auto entry = Impl_->Find(id);
-    std::shared_lock lock(entry->Gate);
-    return Describe(*entry);
+    return Current(*entry);
 }
 TJson TDatabases::Create(const TJson& body)
 {
@@ -327,7 +424,6 @@ TJson TDatabases::Create(const TJson& body)
     std::shared_ptr<TEntry> entry;
     {
         std::lock_guard lock(Impl_->Mutex);
-        Require(Impl_->Healthy, "registry needs restart", "RECOVERY_REQUIRED");
         for (const auto& [id, candidate] : Impl_->Entries) {
             if (candidate->Name == name || id == supplied) {
                 Require(candidate->Name == name && (supplied.empty() || id == supplied),
@@ -338,6 +434,7 @@ TJson TDatabases::Create(const TJson& body)
             }
         }
         if (!entry) {
+            Require(Impl_->Healthy, "registry needs restart", "RECOVERY_REQUIRED");
             Require(Impl_->Entries.size() < 64, "database limit reached", "RESOURCE_EXHAUSTED");
             entry = std::make_shared<TEntry>();
             entry->Name = name;
@@ -345,10 +442,30 @@ TJson TDatabases::Create(const TJson& body)
             entry->ResourceLimits = requestedLimits;
             Impl_->Write("INSERT INTO databases(id,name,initialized,auto_open,limits) VALUES(?,?,0,1,?)",
                 {entry->ID, entry->Name, EncodeLimits(entry->ResourceLimits).dump()});
+            Publish(*entry);
             Impl_->Entries.emplace(entry->ID, entry);
+            Impl_->PublishEntries();
+        }
+    }
+    {
+        std::shared_lock fast(entry->Gate, std::try_to_lock);
+        if (fast.owns_lock() && entry->Accepting) {
+            const auto descriptor = Current(*entry);
+            Require(!body.contains("limits") || EncodeLimits(requestedLimits) == descriptor.at("limits"),
+                "database already exists with different limits",
+                "ALREADY_EXISTS");
+            if (descriptor.at("state") == "open") {
+                return descriptor;
+            }
         }
     }
     std::lock_guard lifecycle(entry->Lifecycle);
+    if (entry->Accepting && entry->State == "open") {
+        Require(!body.contains("limits") || EncodeLimits(requestedLimits) == EncodeLimits(entry->ResourceLimits),
+            "database already exists with different limits",
+            "ALREADY_EXISTS");
+        return Current(*entry);
+    }
     const bool admitted = entry->Accepting.exchange(false);
     std::unique_lock lock(entry->Gate);
     try {
@@ -375,22 +492,45 @@ TJson TDatabases::Change(const std::string& id, std::string_view action, const T
         CheckKeys(body, {});
     }
     const auto entry = Impl_->Find(id);
+    if (action == "open") {
+        std::shared_lock fast(entry->Gate, std::try_to_lock);
+        if (fast.owns_lock() && entry->Accepting) {
+            const auto descriptor = Current(*entry);
+            if (descriptor.at("state") == "open") {
+                const auto limits = body.contains("limits")
+                    ? ParseLimits(body.at("limits"), ParseLimits(descriptor.at("limits")))
+                    : ParseLimits(descriptor.at("limits"));
+                Require(EncodeLimits(limits) == descriptor.at("limits"),
+                    "close database before changing limits",
+                    "DATABASE_BUSY");
+                return descriptor;
+            }
+        }
+    }
     std::lock_guard lifecycle(entry->Lifecycle);
-    {
-        std::lock_guard registryLock(Impl_->Mutex);
-        Require(Impl_->Healthy, "registry needs restart", "RECOVERY_REQUIRED");
+    if (action == "open" && entry->Accepting && entry->State == "open") {
+        const auto limits =
+            body.contains("limits") ? ParseLimits(body.at("limits"), entry->ResourceLimits) : entry->ResourceLimits;
+        Require(EncodeLimits(limits) == EncodeLimits(entry->ResourceLimits),
+            "close database before changing limits",
+            "DATABASE_BUSY");
+        return Current(*entry);
     }
     const bool admitted = entry->Accepting.exchange(false);
-    std::unique_lock lock(entry->Gate); // admitted calls drain; new calls fail before waiting
-    if (action == "open") {
-        try {
+    const auto previousState = entry->State;
+    entry->State = action == "close" ? "closing" : action == "reconcile" ? "reconciling" : "opening";
+    Publish(*entry);
+    std::unique_lock lock(entry->Gate);
+    try {
+        if (action == "open") {
             const auto limits =
                 body.contains("limits") ? ParseLimits(body.at("limits"), entry->ResourceLimits) : entry->ResourceLimits;
             const bool changed = EncodeLimits(limits) != EncodeLimits(entry->ResourceLimits);
-            Require(!changed || (!entry->Instance && !entry->Closing && entry->State == "closed"),
+            Require(!changed || (!entry->Instance && !entry->Closing && previousState == "closed"),
                 "close database before changing limits",
                 "DATABASE_BUSY");
-            if (!entry->Instance && !entry->Closing) {
+            entry->State = previousState;
+            if (!entry->Instance && !entry->Closing && (changed || !entry->AutoOpen)) {
                 std::lock_guard registryLock(Impl_->Mutex);
                 Impl_->Write("UPDATE databases SET limits=?, auto_open=1 WHERE id=?",
                     {EncodeLimits(limits).dump(), entry->ID});
@@ -399,62 +539,113 @@ TJson TDatabases::Change(const std::string& id, std::string_view action, const T
             }
             Impl_->Open(*entry, false);
             entry->Accepting = entry->State == "open";
-        } catch (...) {
-            entry->Accepting = admitted;
-            throw;
-        }
-    } else if (action == "close") {
-        {
-            std::lock_guard registryLock(Impl_->Mutex);
-            try {
-                Impl_->Write("UPDATE databases SET auto_open=0 WHERE id=?", {entry->ID});
-            } catch (const detail::Failure& error) {
+        } else if (action == "close") {
+            if (Impl_->Healthy && entry->AutoOpen) {
+                try {
+                    std::lock_guard registryLock(Impl_->Mutex);
+                    Impl_->Write("UPDATE databases SET auto_open=0 WHERE id=?", {entry->ID});
+                    entry->AutoOpen = false;
+                } catch (...) {
+                    if (!Impl_->Healthy) {
+                        entry->RegistryFence = true;
+                        entry->Error = ErrorDetail{"RECOVERY_REQUIRED",
+                            "close intent is uncertain; restart to resolve registry state",
+                            RetryHint::SameIdAfterReconcile};
+                    }
+                    throw;
+                }
+            }
+            entry->Closing = true;
+            Impl_->CancelScans(entry->ID);
+            entry->Error.reset();
+            if (entry->Instance) {
+                const auto closed = entry->Instance->Shutdown(std::chrono::seconds(60));
+                if (!closed) {
+                    entry->Error = closed.error();
+                    if (closed.error().code == "DEADLINE_EXCEEDED") {
+                        throw TFailure(closed.error());
+                    }
+                    // Shutdown acquired the writer lock; admitted calls and cursor
+                    // leases have drained. Destruction closes the catalog without
+                    // requiring recovery of damaged files.
+                }
+                entry->Instance.reset();
+            }
+            entry->Closing = false;
+            entry->State = "closed";
+            if (!Impl_->Healthy) {
+                entry->Error = ErrorDetail{"RECOVERY_REQUIRED",
+                    "closed locally; restart to resolve registry open intent",
+                    RetryHint::SameIdAfterReconcile};
+            }
+        } else {
+            Require(entry->Instance && !entry->Closing, "open database or retry close first", "DATABASE_CLOSED");
+            Impl_->CancelScans(entry->ID);
+            const auto reconciled = entry->Instance->Reconcile();
+            if (reconciled && entry->RegistryFence && Impl_->Healthy) {
+                std::lock_guard registryLock(Impl_->Mutex);
+                Impl_->Write("UPDATE databases SET initialized=1, auto_open=1 WHERE id=?", {entry->ID});
+                entry->Initialized = true;
+                entry->AutoOpen = true;
+                entry->RegistryFence = false;
+            }
+            entry->Accepting = !entry->RegistryFence;
+            if (!reconciled) {
                 entry->State = "error";
-                entry->Error = error.detail;
-                entry->Accepting = admitted;
-                throw;
+                entry->Error = reconciled.error();
+                throw TFailure(reconciled.error());
+            }
+            entry->State = entry->RegistryFence ? "error" : "open";
+            if (!entry->RegistryFence) {
+                entry->Error.reset();
             }
         }
-        entry->AutoOpen = false;
-        entry->Closing = true;
-        entry->State = "closing";
-        Impl_->CancelScans(entry->ID);
-        if (entry->Instance) {
-            const auto closed = entry->Instance->Shutdown(std::chrono::seconds(60));
-            if (!closed) {
-                entry->Error = closed.error();
-                throw TFailure(closed.error());
-            }
-            entry->Instance.reset();
-        }
-        entry->Closing = false;
-        entry->State = "closed";
-        entry->Error.reset();
-    } else {
-        Require(action == "reconcile", "unknown database action");
-        Require(entry->Instance && !entry->Closing, "open database or retry close first", "DATABASE_CLOSED");
-        Impl_->CancelScans(entry->ID);
-        const auto reconciled = entry->Instance->Reconcile();
-        if (!reconciled) {
+    } catch (...) {
+        if (entry->RegistryFence) {
             entry->State = "error";
-            entry->Error = reconciled.error();
-            // Core readiness blocks unsafe work, but durable outcome lookup
-            // must remain available while recovery is unresolved.
-            entry->Accepting = true;
-            throw TFailure(reconciled.error());
+        } else if (entry->Closing) {
+            entry->State = "closing";
+        } else if (entry->State == "opening" || entry->State == "closing" || entry->State == "reconciling") {
+            entry->State = previousState;
+            entry->Accepting = admitted;
+        } else if (action == "open") {
+            entry->Accepting = admitted;
         }
-        entry->State = "open";
-        entry->Error.reset();
-        entry->Accepting = true;
+        Publish(*entry);
+        throw;
     }
-    return Describe(*entry);
+    Publish(*entry);
+    return Current(*entry);
 }
-TResponse TDatabases::Use(const std::string& id, const std::function<TResponse(std::shared_ptr<Engine>)>& call) const
+TResponse TDatabases::Use(const std::string& id,
+    const std::function<TResponse(std::shared_ptr<Engine>)>& call,
+    bool recoveryOnly) const
 {
     const auto entry = Impl_->Find(id);
-    Require(entry->Accepting, "database is closed or busy", "DATABASE_CLOSED");
+    const auto descriptor = Current(*entry);
+    const bool recovery = recoveryOnly && descriptor.at("state") == "error";
+    if (!entry->Accepting && !recovery) {
+        const auto state = descriptor.at("state").get<std::string>();
+        if (state == "error" && descriptor.contains("error") &&
+            descriptor.at("error").at("code") == "RECOVERY_REQUIRED")
+        {
+            throw TFailure({"RECOVERY_REQUIRED",
+                "database admission is fenced until registry recovery",
+                RetryHint::SameIdAfterReconcile});
+        }
+        const bool busy = state == "opening" || state == "closing" || state == "reconciling" || state == "open";
+        throw TFailure({busy ? "DATABASE_BUSY" : "DATABASE_CLOSED",
+            busy ? "database lifecycle is busy; retry the same request" : "database is closed",
+            busy ? RetryHint::SameIdAfterReconcile : RetryHint::OperatorAction});
+    }
     std::shared_lock lock(entry->Gate, std::try_to_lock);
-    Require(lock.owns_lock() && entry->Accepting, "database is closed or busy", "DATABASE_CLOSED");
+    Require(lock.owns_lock(), "database lifecycle is busy; retry the same request", "DATABASE_BUSY");
+    Require(!entry->RegistryFence || recoveryOnly,
+        "database admission is fenced until registry recovery",
+        "RECOVERY_REQUIRED");
+    Require(entry->Instance && (entry->Accepting || (recoveryOnly && entry->RegistryFence)),
+        "database is closed",
+        "DATABASE_CLOSED");
     return call(entry->Instance);
 }
 void TDatabases::SetScanCanceller(std::function<void(const std::string&)> cancel)
@@ -472,8 +663,13 @@ void TDatabases::Shutdown()
         Impl_->CancelScans(entry->ID);
         if (entry->Instance) {
             const auto closed = entry->Instance->Shutdown(std::chrono::seconds(60));
-            if (closed) {
+            if (closed || closed.error().code != "DEADLINE_EXCEEDED") {
+                if (!closed) {
+                    entry->Error = closed.error();
+                }
                 entry->Instance.reset();
+                entry->State = "closed";
+                Publish(*entry);
             } else if (!first) {
                 first = closed.error();
             }

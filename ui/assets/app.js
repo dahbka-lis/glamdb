@@ -5,6 +5,7 @@ import {
     displayValue,
     selectView,
     resetConnection,
+    switchDatabase,
     buildPredicate,
     wireRows,
     prepareMutation,
@@ -66,14 +67,14 @@ function toast(message) {
 function report(error) {
     if (error.name !== 'AbortError') toast(error.message ?? 'Something went wrong');
 }
-function resetSession() {
+function resetSession(database = undefined) {
     databaseSelectionGeneration++;
     connectionController?.abort();
     viewController?.abort();
     queryController?.abort();
     connectionController = viewController = queryController = null;
     queryGeneration++;
-    state = resetConnection(state);
+    state = database === undefined ? resetConnection(state) : switchDatabase(state, database);
     creationFields = [];
     $('#modal').close();
     $('#modal').replaceChildren();
@@ -159,7 +160,7 @@ function login() {
 
 async function databaseWorkspace(database = null) {
     const { base, token } = state;
-    resetSession();
+    resetSession(database);
     state.base = base;
     state.token = token;
     state.database = database;
@@ -200,7 +201,7 @@ async function databaseList() {
         `<header class="topbar">${brand()}<div class="top-actions"><button class="text-button" data-action="databases">Refresh databases</button><button class="text-button" data-action="disconnect">Disconnect</button></div></header>
     <main id="main-content" class="main">${heading('Your databases', 'Create a database or open an existing workspace.', false)}
     <section class="panel"><div class="panel-body"><form id="database-form" class="button-row"><label class="field">Database name<input name="name" required maxlength="128" autocomplete="off"></label><button class="button primary" type="submit">Create database</button></form></div></section>
-    <section class="panel"><div class="table-wrap"><table aria-label="Databases"><thead><tr><th>Database</th><th>State</th><th>Actions</th></tr></thead><tbody>${result.items.map((db) => `<tr><td><strong>${e(db.name)}</strong><p class="small mono">${e(db.database_id)}</p>${db.error ? `<p role="alert">${e(db.error.message)}</p>` : ''}</td><td>${e(db.state)}</td><td><div class="button-row"><button class="button small" data-action="database-use" data-id="${e(db.database_id)}">${db.state === 'open' ? 'Use database' : 'Open database'}</button><button class="button small" data-action="database-close" data-id="${e(db.database_id)}" ${db.state === 'closed' ? 'disabled' : ''}>Close database</button><button class="button small" data-action="database-reconcile" data-id="${e(db.database_id)}" ${db.state === 'closed' || db.state === 'closing' ? 'disabled' : ''}>Reconcile</button></div></td></tr>`).join('')}</tbody></table></div>${result.items.length ? '' : '<p class="result-empty">No databases yet. Create your first database above.</p>'}</section></main>`;
+    <section class="panel"><div class="table-wrap"><table aria-label="Databases"><thead><tr><th>Database</th><th>State</th><th>Actions</th></tr></thead><tbody>${result.items.map((db) => `<tr><td><strong>${e(db.name)}</strong><p class="small mono">${e(db.database_id)}</p>${db.error ? `<p role="alert">${e(db.error.message)}</p>` : ''}</td><td>${e(db.state)}</td><td><div class="button-row"><button class="button small" data-action="database-use" data-id="${e(db.database_id)}" ${['open', 'closed'].includes(db.state) ? '' : 'disabled'}>${db.state === 'open' ? 'Use database' : 'Open database'}</button><button class="button small" data-action="database-close" data-id="${e(db.database_id)}" ${['open', 'error'].includes(db.state) || (db.state === 'closing' && db.error) ? '' : 'disabled'}>Close database</button><button class="button small" data-action="database-reconcile" data-id="${e(db.database_id)}" ${['open', 'error'].includes(db.state) ? '' : 'disabled'}>Reconcile</button></div></td></tr>`).join('')}</tbody></table></div>${result.items.length ? '' : '<p class="result-empty">No databases yet. Create your first database above.</p>'}</section></main>`;
 }
 async function databaseAction(target) {
     const api = state.api,
@@ -213,10 +214,14 @@ async function databaseAction(target) {
         (selection === null || selection === databaseSelectionGeneration);
     setBusy(target, true);
     try {
-        const db = await api.json(
-            `/databases/${encodeURIComponent(target.dataset.id)}/${action === 'use' ? 'open' : action}`,
-            { method: 'POST', body: {}, signal },
-        );
+        const db =
+            action === 'use'
+                ? await api.selectDatabase(target.dataset.id, signal)
+                : await api.json(`/databases/${encodeURIComponent(target.dataset.id)}/${action}`, {
+                      method: 'POST',
+                      body: {},
+                      signal,
+                  });
         if (!current()) return;
         if (action === 'use') await databaseWorkspace(db);
         else await databaseList();
@@ -473,7 +478,7 @@ function explainView() {
 }
 function operationsView() {
     const ops = state.operations.filter((op) => op.collectionId === state.collectionId);
-    return `${heading('Keep your operations close.', 'An unknown outcome is unresolved. A timeout is not a rollback.')}<section class="panel"><div class="panel-header"><h2>This session's appends</h2>${badge('Synchronous API')}</div>${
+    return `${heading('Keep your operations close.', 'An unknown outcome is unresolved. A timeout is not a rollback.')}${state.managed ? '<p><button class="button" data-action="reconcile-workspace">Reconcile database</button></p>' : ''}<section class="panel"><div class="panel-header"><h2>This session's appends</h2>${badge('Synchronous API')}</div>${
         ops.length
             ? ops
                   .slice()
@@ -484,7 +489,7 @@ function operationsView() {
                   )
                   .join('')
             : '<p class="result-empty">No appends submitted in this browser session. Server outcomes are queried by operation ID.</p>'
-    }</section>`;
+    }</section><section class="panel"><div class="panel-body"><form id="operation-lookup-form" class="button-row"><label class="field">Operation ID<input name="operation" required autocomplete="off" placeholder="Original operation UUID"></label><button class="button" type="submit" ${state.collectionId ? '' : 'disabled'}>Look up operation</button></form><p class="small muted">Look up an original ID in this collection. This does not submit or retry a write.</p></div></section>`;
 }
 function styleView() {
     const c = state.theme;
@@ -1001,9 +1006,14 @@ function navigate(tab) {
 
 document.addEventListener('submit', async (event) => {
     if (
-        !['connect-form', 'database-form', 'query-form', 'create-form', 'append-form'].includes(
-            event.target.id,
-        )
+        ![
+            'connect-form',
+            'database-form',
+            'query-form',
+            'create-form',
+            'append-form',
+            'operation-lookup-form',
+        ].includes(event.target.id)
     )
         return;
     event.preventDefault();
@@ -1040,6 +1050,15 @@ document.addEventListener('submit', async (event) => {
         else if (form.id === 'query-form') await runQuery();
         else if (form.id === 'append-form') await appendForm(form);
         else if (form.id === 'create-form') await createForm(form);
+        else if (form.id === 'operation-lookup-form') {
+            const epoch = state.epoch;
+            const outcome = await api.json(
+                `${collectionPath()}/operations/${encodeURIComponent(form.elements.operation.value.trim())}`,
+                { allowOutcome: true, signal: connectionController?.signal },
+            );
+            if (state.api === api && state.epoch === epoch && form.isConnected)
+                showModal('Operation outcome', `<pre class="json-block">${json(outcome)}</pre>`);
+        }
     } catch (error) {
         if (state.api === api) report(error);
     }
@@ -1052,7 +1071,11 @@ document.addEventListener('click', async (event) => {
     try {
         if (action === 'databases') await databaseWorkspace();
         else if (action.startsWith('database-')) await databaseAction(target);
-        else if (action === 'nav') navigate(target.dataset.tab);
+        else if (action === 'reconcile-workspace') {
+            await api.json('/reconcile', { method: 'POST', body: {} });
+            if (state.api === api)
+                toast('Database reconciled. Check the original operation outcome.');
+        } else if (action === 'nav') navigate(target.dataset.tab);
         else if (action === 'menu') $('#sidebar').classList.toggle('open');
         else if (action === 'disconnect') {
             if (publicDemo) {

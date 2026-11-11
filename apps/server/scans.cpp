@@ -1,23 +1,33 @@
 #include "apps/server/scans.h"
-#include "core/api/binary.h"
-#include "core/api/canonical.h"
 
 #include <arrow/io/memory.h>
 #include <arrow/ipc/api.h>
+#include <arrow/util/byte_size.h>
+#include <openssl/evp.h>
 
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <random>
 #include <thread>
+#include <unordered_map>
 
 namespace glamdb::NServer {
 using namespace NTransport;
 namespace {
-constexpr size_t MaxSessions = 8;
+constexpr size_t MaxSessions = 64;
+constexpr std::ptrdiff_t MaxDatabaseSessions = 8;
+constexpr size_t MaxReplayBytes = size_t{128} * 1024 * 1024;
 constexpr size_t PageRows = 10000;
 constexpr size_t PageBytes = size_t{4} * 1024 * 1024;
-constexpr auto IdleTimeout = std::chrono::seconds(60);
+int64_t Now()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 std::string Token()
 {
     std::random_device random;
@@ -27,6 +37,22 @@ std::string Token()
         value += Hex[random() & 15];
     }
     return value;
+}
+std::string Checksum(std::string_view bytes)
+{
+    unsigned char digest[EVP_MAX_MD_SIZE]{};
+    unsigned int size = 0;
+    Require(EVP_Digest(bytes.data(), bytes.size(), digest, &size, EVP_sha256(), nullptr) == 1 && size == 32,
+        "cannot checksum Arrow response",
+        "INTERNAL");
+    constexpr char Hex[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(64);
+    for (unsigned int i = 0; i < size; ++i) {
+        result += Hex[digest[i] >> 4];
+        result += Hex[digest[i] & 15];
+    }
+    return result;
 }
 class TBoundedOutput final : public arrow::io::OutputStream
 {
@@ -63,20 +89,36 @@ TJson Snapshot(const ScanInfo& info)
         ? TJson(std::to_string(info.selector_resolved.snapshot_id))
         : TJson(nullptr);
 }
+template <class T>
+T ArrowValue(arrow::Result<T> value)
+{
+    Require(value.ok(), "cannot assemble Arrow scan page", "RESOURCE_EXHAUSTED");
+    return std::move(value).ValueUnsafe();
+}
+int64_t IpcSize(const arrow::RecordBatch& batch)
+{
+    int64_t size = 0;
+    Require(arrow::ipc::GetRecordBatchSize(batch, &size).ok(), "cannot size Arrow scan page", "INTERNAL");
+    return size;
+}
 } // namespace
 
 struct TScans::TImpl
 {
     struct TSession
     {
+        std::mutex Mutex;
         std::string Database, Collection, NextToken, ReplayToken;
-        bool Arrow = false;
+        bool Arrow = false, Ended = false;
+        std::atomic<bool> Cancelled{false}, Complete{false};
+        const int64_t Created = Now();
+        std::atomic<int64_t> Touched{Created};
         std::shared_ptr<ScanCursor> Cursor;
-        std::shared_ptr<arrow::RecordBatch> Pending;
+        std::deque<std::shared_ptr<arrow::RecordBatch>> Pending;
         ScanInfo Info;
         TJson Schema;
         TResponse Replay;
-        std::chrono::steady_clock::time_point Touched = std::chrono::steady_clock::now();
+        size_t ChargedBytes = 0;
         ~TSession()
         {
             if (Cursor) {
@@ -84,18 +126,50 @@ struct TScans::TImpl
             }
         }
     };
+    using TPtr = std::shared_ptr<TSession>;
+    // Registry protection never covers planning, cursor I/O, encoding, hashing,
+    // response copying or waiting for a session mutex.
     std::mutex Mutex;
     std::condition_variable Wake;
     bool Stopping = false;
-    std::vector<std::unique_ptr<TSession>> Sessions;
+    size_t ReplayBytes = 0;
+    std::vector<TPtr> Sessions;
+    std::unordered_map<std::string, TPtr> Tokens;
+    const std::chrono::milliseconds IdleTimeout, Lifetime;
     std::thread Reaper;
 
-    TImpl()
-        : Reaper([this] {
-            std::unique_lock lock(Mutex);
-            while (!Stopping) {
-                Wake.wait_for(lock, std::chrono::seconds(1));
-                Expire();
+    struct TExpiryPolicy
+    {
+        std::chrono::milliseconds Idle;
+        std::chrono::milliseconds Lifetime;
+    };
+    struct TLookup
+    {
+        const std::string& Database;
+        const std::string& Collection;
+        const std::string& Token;
+    };
+    explicit TImpl(const TExpiryPolicy& policy)
+        : IdleTimeout(policy.Idle)
+        , Lifetime(policy.Lifetime)
+        , Reaper([this]() noexcept {
+            for (;;) {
+                try {
+                    std::unique_lock lock(Mutex);
+                    if (Wake.wait_for(lock, std::min(IdleTimeout, std::chrono::milliseconds(1000)), [this] {
+                            return Stopping;
+                        }))
+                    {
+                        return;
+                    }
+                    lock.unlock();
+                    Sweep();
+                } catch (...) {
+                    // Allocation or backend cleanup failures must not escape a
+                    // background thread. The next bounded wait retries cleanup
+                    // and observes shutdown with fresh, well-defined lock ownership.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
             }
         })
     { }
@@ -107,120 +181,338 @@ struct TScans::TImpl
         }
         Wake.notify_all();
         Reaper.join();
+        // Member-owned sessions cancel through RAII after the reaper joins.
     }
-    void Expire()
+    bool Expired(const TSession& session) const
     {
-        const auto now = std::chrono::steady_clock::now();
-        std::erase_if(Sessions, [&](const auto& session) {
-            return now - session->Touched >= IdleTimeout;
+        const auto now = Now();
+        return now - session.Created >= Lifetime.count() || now - session.Touched.load() >= IdleTimeout.count();
+    }
+    void CheckActive(const TSession& session) const
+    {
+        Require(!session.Cancelled.load() && !Expired(session), "scan cursor not found or expired", "NOT_FOUND");
+    }
+    void MarkLocked(const TPtr& session)
+    {
+        session->Cancelled = true;
+        std::erase_if(Tokens, [&](const auto& item) {
+            return item.second == session;
         });
     }
-    TSession& Find(const std::string& database, const std::string& collection, const std::string& token)
+    // Caller owns the session mutex. Keep a shared reference until after the
+    // registry lock is released, so buffer/cursor destruction cannot hold it.
+    void Release(const TPtr& session)
     {
-        Require(!token.empty() && token.size() == 32, "scan cursor not found or expired", "NOT_FOUND");
-        for (auto& session : Sessions) {
-            if (session->Database == database && session->Collection == collection &&
-                (session->NextToken == token || session->ReplayToken == token))
-            {
-                session->Touched = std::chrono::steady_clock::now();
-                return *session;
-            }
+        session->Cancelled = true;
+        if (session->Cursor) {
+            session->Cursor->Cancel();
+            session->Cursor.reset();
         }
-        throw TFailure({"NOT_FOUND", "scan cursor not found or expired"});
+        session->Pending.clear();
+        session->Replay = {};
+        std::lock_guard lock(Mutex);
+        ReplayBytes -= session->ChargedBytes;
+        session->ChargedBytes = 0;
+        MarkLocked(session);
+        std::erase(Sessions, session);
     }
-    TResponse Page(TSession& session, const std::string& token)
+    void Sweep()
     {
-        if (session.ReplayToken == token) {
-            return session.Replay;
-        }
-        auto sink = std::make_shared<TBoundedOutput>();
-        std::shared_ptr<arrow::ipc::RecordBatchWriter> writer;
-        if (session.Arrow) {
-            const auto created =
-                arrow::ipc::MakeStreamWriter(sink, std::const_pointer_cast<arrow::Schema>(session.Info.output_schema));
-            Require(created.ok(), "cannot create Arrow stream", "RESOURCE_EXHAUSTED");
-            writer = *created;
-        }
-        auto rows = TJson::array();
-        size_t count = 0, bytes = 0;
-        bool ended = false;
-        while (count < PageRows && bytes < PageBytes) {
-            if (!session.Pending) {
-                session.Pending = Unwrap(session.Cursor->Next());
+        std::array<TPtr, MaxSessions> expired;
+        size_t count = 0;
+        {
+            std::lock_guard lock(Mutex);
+            for (const auto& session : Sessions) {
+                if (session->Cancelled.load() || Expired(*session)) {
+                    MarkLocked(session);
+                    expired[count++] = session;
+                }
             }
-            if (!session.Pending) {
-                ended = true;
+        }
+        for (size_t index = 0; index < count; ++index) {
+            const auto& session = expired[index];
+            std::unique_lock lock(session->Mutex, std::try_to_lock);
+            if (lock.owns_lock()) {
+                Release(session);
+            }
+        }
+    }
+    void Clear(const std::string* database)
+    {
+        std::vector<TPtr> removed;
+        {
+            std::lock_guard lock(Mutex);
+            for (const auto& session : Sessions) {
+                if (!database || session->Database == *database) {
+                    MarkLocked(session);
+                    removed.push_back(session);
+                }
+            }
+        }
+        for (const auto& session : removed) {
+            std::lock_guard lock(session->Mutex);
+            Release(session);
+        }
+    }
+    TPtr Find(const TLookup& key)
+    {
+        Require(key.Token.size() == 32, "scan cursor not found or expired", "NOT_FOUND");
+        std::lock_guard lock(Mutex);
+        const auto found = Tokens.find(key.Token);
+        Require(found != Tokens.end() && found->second->Database == key.Database &&
+                found->second->Collection == key.Collection,
+            "scan cursor not found or expired",
+            "NOT_FOUND");
+        return found->second;
+    }
+    void EvictCompleted(const std::string* database, const TPtr& except = {})
+    {
+        std::vector<TPtr> candidates;
+        {
+            std::lock_guard lock(Mutex);
+            for (const auto& session : Sessions) {
+                if (session != except && session->Complete.load() && (!database || session->Database == *database)) {
+                    candidates.push_back(session);
+                }
+            }
+        }
+        for (const auto& session : candidates) {
+            std::unique_lock lock(session->Mutex, std::try_to_lock);
+            if (lock.owns_lock()) {
+                Release(session);
+            }
+        }
+    }
+    void Register(const TPtr& session)
+    {
+        Sweep();
+        bool localFull = false, globalFull = false;
+        {
+            std::lock_guard lock(Mutex);
+            localFull = std::count_if(Sessions.begin(), Sessions.end(), [&](const auto& item) {
+                return item->Database == session->Database;
+            }) >= MaxDatabaseSessions;
+            globalFull = Sessions.size() >= MaxSessions;
+        }
+        if (globalFull) {
+            EvictCompleted(nullptr);
+        } else if (localFull) {
+            EvictCompleted(&session->Database);
+        }
+        std::lock_guard lock(Mutex);
+        const auto localCount = std::count_if(Sessions.begin(), Sessions.end(), [&](const auto& item) {
+            return item->Database == session->Database;
+        });
+        Require(Sessions.size() < MaxSessions && localCount < MaxDatabaseSessions,
+            "too many scan sessions; cancel unused cursors or retry after expiry",
+            "RESOURCE_EXHAUSTED");
+        Sessions.push_back(session);
+        Tokens.emplace(session->NextToken, session);
+    }
+    void Charge(const TPtr& session, size_t bytes)
+    {
+        bool full = false;
+        {
+            std::lock_guard lock(Mutex);
+            full = bytes > MaxReplayBytes - (ReplayBytes - session->ChargedBytes);
+        }
+        if (full) {
+            EvictCompleted(nullptr, session);
+        }
+        std::lock_guard lock(Mutex);
+        Require(bytes <= MaxReplayBytes - (ReplayBytes - session->ChargedBytes),
+            "scan replay memory is full; retry after cancelling unused scans",
+            "RESOURCE_EXHAUSTED");
+        ReplayBytes = ReplayBytes - session->ChargedBytes + bytes;
+        session->ChargedBytes = bytes;
+    }
+    bool Peek(TSession& session)
+    {
+        CheckActive(session);
+        while (session.Pending.empty() && !session.Ended) {
+            auto batch = Unwrap(session.Cursor->Next());
+            CheckActive(session);
+            if (!batch) {
+                session.Ended = true;
+            } else if (batch->num_rows() != 0) {
+                session.Pending.push_back(std::move(batch));
+            }
+        }
+        return !session.Pending.empty();
+    }
+    void Consume(TSession& session, int64_t count)
+    {
+        auto& batch = session.Pending.front();
+        if (count == batch->num_rows()) {
+            session.Pending.pop_front();
+        } else {
+            batch = batch->Slice(count);
+        }
+    }
+    TJson Envelope(const TSession& session, const std::string& next, size_t count)
+    {
+        return {{"schema", session.Schema},
+            {"snapshot_id", Snapshot(session.Info)},
+            {"identity", EncodeIdentity(session.Info.identity)},
+            {"next_cursor", next.empty() ? TJson(nullptr) : TJson(next)},
+            {"profile", {{"rows_returned", std::to_string(count)}}}};
+    }
+    std::string JsonRows(TSession& session, size_t& count)
+    {
+        std::string rows = "[";
+        const auto overhead = Envelope(session, std::string(32, '0'), PageRows).dump().size() + 9;
+        Require(overhead < MaxResponseBytes, "scan schema exceeds response byte limit");
+        while (count < PageRows && rows.size() < PageBytes && Peek(session)) {
+            const auto take = AppendRowsJson(*session.Pending.front(),
+                rows,
+                {.MaxRows = PageRows - count, .TargetBytes = PageBytes, .HardBytes = MaxResponseBytes - overhead});
+            if (take == 0) {
                 break;
             }
-            size_t take = 0;
-            while (take < static_cast<size_t>(session.Pending->num_rows())) {
-                const auto row = EncodeRows(*session.Pending->Slice(static_cast<int64_t>(take), 1)).at(0);
-                const auto size = row.dump().size() + 1;
-                if (count && (bytes + size > PageBytes || count == PageRows)) {
+            Consume(session, static_cast<int64_t>(take));
+            count += take;
+        }
+        rows += ']';
+        return rows;
+    }
+    std::string ArrowPage(TSession& session, size_t& count)
+    {
+        std::vector<std::shared_ptr<arrow::RecordBatch>> pieces, groups;
+        size_t bytes = 0;
+        while (count < PageRows && bytes < PageBytes && Peek(session)) {
+            const auto& pending = session.Pending.front();
+            int64_t take = std::min(pending->num_rows(), static_cast<int64_t>(PageRows - count));
+            auto slice = pending->Slice(0, take);
+            auto size = ArrowValue(arrow::util::ReferencedBufferSize(*slice));
+            if (static_cast<uint64_t>(size) > PageBytes - bytes) {
+                int64_t low = 0, high = take;
+                while (low < high) {
+                    const auto middle = low + (high - low + 1) / 2;
+                    const auto candidate = ArrowValue(arrow::util::ReferencedBufferSize(*pending->Slice(0, middle)));
+                    if (static_cast<uint64_t>(candidate) <= PageBytes - bytes) {
+                        low = middle;
+                    } else {
+                        high = middle - 1;
+                    }
+                }
+                take = count == 0 ? std::max<int64_t>(1, low) : low;
+                if (take == 0) {
                     break;
                 }
-                bytes += size;
-                ++count;
-                ++take;
-                if (!session.Arrow) {
-                    rows.push_back(row);
+                slice = pending->Slice(0, take);
+                size = ArrowValue(arrow::util::ReferencedBufferSize(*slice));
+            }
+            pieces.push_back(std::move(slice));
+            count += static_cast<size_t>(take);
+            bytes += static_cast<size_t>(size);
+            Consume(session, take);
+            // Bound object/control memory when core returns one filtered row
+            // per batch, without repeatedly copying the whole growing page.
+            if (pieces.size() == 128) {
+                groups.push_back(ArrowValue(arrow::ConcatenateRecordBatches(pieces)));
+                pieces.clear();
+            }
+        }
+        if (!pieces.empty()) {
+            groups.push_back(pieces.size() == 1 ? pieces.front() : ArrowValue(arrow::ConcatenateRecordBatches(pieces)));
+        }
+        auto sink = std::make_shared<TBoundedOutput>();
+        auto writer = ArrowValue(
+            arrow::ipc::MakeStreamWriter(sink, std::const_pointer_cast<arrow::Schema>(session.Info.output_schema)));
+        if (!groups.empty()) {
+            auto batch = groups.size() == 1 ? groups.front() : ArrowValue(arrow::ConcatenateRecordBatches(groups));
+            const auto prefix =
+                static_cast<size_t>(ArrowValue(arrow::ipc::SerializeSchema(*session.Info.output_schema))->size()) +
+                8; // schema message plus explicit EOS
+            Require(prefix < MaxResponseBytes, "Arrow schema exceeds response byte limit");
+            const auto target = PageBytes > prefix ? PageBytes - prefix : 0;
+            int64_t take = batch->num_rows();
+            if (static_cast<uint64_t>(IpcSize(*batch)) > target) {
+                int64_t low = 0, high = take;
+                while (low < high) {
+                    const auto middle = low + (high - low + 1) / 2;
+                    if (static_cast<uint64_t>(IpcSize(*batch->Slice(0, middle))) <= target) {
+                        low = middle;
+                    } else {
+                        high = middle - 1;
+                    }
                 }
+                take = std::max<int64_t>(1, low);
             }
-            if (writer && take) {
-                Require(writer->WriteRecordBatch(*session.Pending->Slice(0, static_cast<int64_t>(take))).ok(),
-                    "Arrow response exceeds transport limit",
-                    "RESOURCE_EXHAUSTED");
+            if (take < batch->num_rows()) {
+                session.Pending.push_front(batch->Slice(take));
             }
-            session.Pending = take == static_cast<size_t>(session.Pending->num_rows())
-                ? nullptr
-                : session.Pending->Slice(static_cast<int64_t>(take));
-            if (session.Pending) {
-                break;
-            }
+            batch = batch->Slice(0, take);
+            Require(static_cast<uint64_t>(IpcSize(*batch)) <= MaxResponseBytes - prefix,
+                "individual Arrow row exceeds response byte limit");
+            count = static_cast<size_t>(take);
+            Require(writer->WriteRecordBatch(*batch).ok(), "cannot write Arrow scan page", "INTERNAL");
         }
-        // Look ahead once so the final page advertises EOS, never an empty fake
-        // success after a read failure. Failures invalidate the entire session.
-        if (!session.Pending && !ended) {
-            session.Pending = Unwrap(session.Cursor->Next());
+        Require(writer->Close().ok(), "cannot finish Arrow scan page", "INTERNAL");
+        return std::move(sink->Bytes);
+    }
+    TResponse Page(const TPtr& session, const std::string& token)
+    {
+        CheckActive(*session);
+        Require(token == session->ReplayToken || token == session->NextToken,
+            "scan cursor not found or expired",
+            "NOT_FOUND");
+        if (token == session->ReplayToken) {
+            auto response = session->Replay;
+            CheckActive(*session);
+            return response; // Replay does not extend idle or absolute lifetime.
         }
-        const auto next = session.Pending ? Token() : std::string{};
-        const auto snapshot = Snapshot(session.Info);
+        size_t count = 0;
+        auto bytes = session->Arrow ? ArrowPage(*session, count) : JsonRows(*session, count);
+        const auto next = Peek(*session) ? Token() : std::string{};
         TResponse response;
-        if (writer) {
-            Require(writer->Close().ok(), "Arrow response exceeds transport limit", "RESOURCE_EXHAUSTED");
-            response = {200, std::move(sink->Bytes), "application/vnd.apache.arrow.stream"};
+        if (session->Arrow) {
+            response = {200, std::move(bytes), "application/vnd.apache.arrow.stream"};
+            const auto snapshot = Snapshot(session->Info);
             response.Headers["X-GlamDB-Snapshot-Id"] = snapshot.is_null() ? "initial" : snapshot.get<std::string>();
-            response.Headers["X-Content-SHA256"] = detail::Sha256(response.Body);
+            response.Headers["X-Content-SHA256"] = Checksum(response.Body);
             if (!next.empty()) {
                 response.Headers["X-GlamDB-Next-Cursor"] = next;
             }
         } else {
-            response = {200,
-                TJson{{"schema", session.Schema},
-                    {"snapshot_id", snapshot},
-                    {"rows", std::move(rows)},
-                    {"identity", EncodeIdentity(session.Info.identity)},
-                    {"next_cursor", next.empty() ? TJson(nullptr) : TJson(next)},
-                    {"profile", {{"rows_returned", std::to_string(count)}}}}
-                    .dump()};
+            auto body = Envelope(*session, next, count).dump();
+            body.pop_back();
+            body += ",\"rows\":";
+            body += bytes;
+            body += '}';
+            response = {200, std::move(body)};
         }
-        Require(response.Body.size() <= MaxResponseBytes,
-            "scan response exceeds transport limit",
-            "RESOURCE_EXHAUSTED");
-        session.ReplayToken = token;
-        session.NextToken = next;
-        session.Replay = response;
-        session.Touched = std::chrono::steady_clock::now();
+        Require(response.Body.size() <= MaxResponseBytes, "scan response exceeds response byte limit");
+        Charge(session, response.Body.size());
+        session->Replay = response;
+        CheckActive(*session);
+        session->ReplayToken = token;
+        session->NextToken = next;
+        session->Touched = Now();
         if (next.empty()) {
-            session.Cursor->Cancel();
-            session.Cursor.reset();
+            session->Cursor->Cancel();
+            session->Cursor.reset();
+            session->Complete = true;
+        }
+        {
+            std::lock_guard lock(Mutex);
+            CheckActive(*session);
+            std::erase_if(Tokens, [&](const auto& item) {
+                return item.second == session;
+            });
+            Tokens.emplace(token, session);
+            if (!next.empty()) {
+                Tokens.emplace(next, session);
+            }
         }
         return response;
     }
 };
-TScans::TScans()
-    : Impl_(std::make_unique<TImpl>())
-{ }
+TScans::TScans(std::chrono::milliseconds idle, std::chrono::milliseconds lifetime)
+{
+    Require(idle.count() > 0 && lifetime.count() > 0, "scan lifetime limits must be positive");
+    Impl_ = std::make_unique<TImpl>(TImpl::TExpiryPolicy{.Idle = idle, .Lifetime = lifetime});
+}
 TScans::~TScans() = default;
 TResponse TScans::Open(const std::shared_ptr<Engine>& engine,
     const std::string& database,
@@ -229,64 +521,54 @@ TResponse TScans::Open(const std::shared_ptr<Engine>& engine,
     bool arrow,
     bool openOnly)
 {
-    std::lock_guard lock(Impl_->Mutex);
-    Impl_->Expire();
-    TImpl::TSession* session = nullptr;
+    TImpl::TPtr session;
     std::string token;
     if (body.contains("cursor")) {
         Require(!openOnly, "open does not accept a cursor");
         CheckKeys(body, {"cursor"});
         token = body.at("cursor").get<std::string>();
-        session = &Impl_->Find(database, collection, token);
-        Require(session->Arrow == arrow, "cursor representation cannot change");
+        session = Impl_->Find({.Database = database, .Collection = collection, .Token = token});
     } else {
-        if (Impl_->Sessions.size() >= MaxSessions) {
-            // Completed replay caches retain no engine ownership and can be
-            // evicted to admit another scan. Live cursors are never evicted.
-            const auto done = std::find_if(Impl_->Sessions.begin(), Impl_->Sessions.end(), [](const auto& item) {
-                return !item->Cursor;
-            });
-            if (done != Impl_->Sessions.end()) {
-                Impl_->Sessions.erase(done);
-            }
-        }
-        Require(Impl_->Sessions.size() < MaxSessions,
-            "too many scan sessions; cancel unused cursors",
-            "RESOURCE_EXHAUSTED");
-        const auto collectionInfo = Unwrap(engine->GetCollection(collection));
-        auto created = std::make_unique<TImpl::TSession>();
-        created->Cursor = Unwrap(engine->Scan(ParseScan(collection, collectionInfo.schema, body)));
-        created->Info = created->Cursor->Info();
-        created->Database = database;
-        created->Collection = collection;
-        created->Arrow = arrow;
-        created->NextToken = Token();
-        created->Schema = EncodeSchema(*created->Info.output_schema);
-        for (auto& field : created->Schema["fields"]) {
-            for (size_t i = 0; i < collectionInfo.schema.fields.size(); ++i) {
-                if (field["name"] == collectionInfo.schema.fields[i].name) {
-                    field["field_id"] = i + 1;
+        session = std::make_shared<TImpl::TSession>();
+        session->Database = database;
+        session->Collection = collection;
+        session->Arrow = arrow;
+        session->NextToken = Token();
+        token = session->NextToken;
+    }
+    std::lock_guard lock(session->Mutex);
+    // A representation mismatch does not invalidate the owner's valid cursor.
+    Require(session->Arrow == arrow, "cursor representation cannot change");
+    Require(token == session->NextToken || token == session->ReplayToken,
+        "scan cursor not found or expired",
+        "NOT_FOUND");
+    try {
+        if (!body.contains("cursor")) {
+            Impl_->Register(session);
+            const auto info = Unwrap(engine->GetCollection(collection));
+            session->Cursor = Unwrap(engine->Scan(ParseScan(collection, info.schema, body)));
+            session->Info = session->Cursor->Info();
+            session->Schema = EncodeSchema(*session->Info.output_schema);
+            for (auto& field : session->Schema["fields"]) {
+                for (size_t i = 0; i < info.schema.fields.size(); ++i) {
+                    if (field["name"] == info.schema.fields[i].name) {
+                        field["field_id"] = i + 1;
+                    }
                 }
             }
         }
-        session = created.get();
-        token = session->NextToken;
-        Impl_->Sessions.push_back(std::move(created));
-    }
-    if (openOnly) {
-        return {200,
-            TJson{{"cursor", token},
-                {"snapshot_id", Snapshot(session->Info)},
-                {"schema", session->Schema},
-                {"identity", EncodeIdentity(session->Info.identity)}}
-                .dump()};
-    }
-    try {
-        return Impl_->Page(*session, token);
+        Impl_->CheckActive(*session);
+        if (openOnly) {
+            return {200,
+                TJson{{"cursor", token},
+                    {"snapshot_id", Snapshot(session->Info)},
+                    {"schema", session->Schema},
+                    {"identity", EncodeIdentity(session->Info.identity)}}
+                    .dump()};
+        }
+        return Impl_->Page(session, token);
     } catch (...) {
-        std::erase_if(Impl_->Sessions, [&](const auto& item) {
-            return item.get() == session;
-        });
+        Impl_->Release(session);
         throw;
     }
 }
@@ -294,24 +576,24 @@ TResponse TScans::Cancel(const std::string& database, const std::string& collect
 {
     CheckKeys(body, {"cursor"});
     const auto token = body.at("cursor").get<std::string>();
-    std::lock_guard lock(Impl_->Mutex);
-    Impl_->Expire();
-    auto* session = &Impl_->Find(database, collection, token);
-    std::erase_if(Impl_->Sessions, [&](const auto& item) {
-        return item.get() == session;
-    });
+    const auto session = Impl_->Find({.Database = database, .Collection = collection, .Token = token});
+    {
+        std::lock_guard lock(Impl_->Mutex);
+        Impl_->CheckActive(*session);
+        Impl_->MarkLocked(session);
+    }
+    std::unique_lock lock(session->Mutex, std::try_to_lock);
+    if (lock.owns_lock()) {
+        Impl_->Release(session);
+    }
     return {200, R"({"cancelled":true})"};
 }
 void TScans::Clear(const std::string& database)
 {
-    std::lock_guard lock(Impl_->Mutex);
-    std::erase_if(Impl_->Sessions, [&](const auto& session) {
-        return session->Database == database;
-    });
+    Impl_->Clear(&database);
 }
 void TScans::Clear()
 {
-    std::lock_guard lock(Impl_->Mutex);
-    Impl_->Sessions.clear();
+    Impl_->Clear(nullptr);
 }
 } // namespace glamdb::NServer

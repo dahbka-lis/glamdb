@@ -38,6 +38,15 @@ TEST(NativeRoutes, OutcomeLookupRetainsUnknownRecoveryContext)
     EXPECT_EQ(value["recovery"]["attempt_id"], recovery.attempt_id);
     EXPECT_EQ(value["recovery"]["payload_hash"], recovery.payload_hash);
     EXPECT_TRUE(value["recovery"]["publication_started"].get<bool>());
+    request.Method = "POST";
+    request.Target = std::string("/collections/") + test::collection_id + "/append";
+    request.Headers["content-type"] = "application/json";
+    request.Body = NTransport::TJson({{"operation_id", test::operation_id}, {"rows", {{{"n", "1"}}}}}).dump();
+    const auto retried = routes.Handle(request);
+    ASSERT_EQ(retried.Status, 503);
+    EXPECT_EQ(NTransport::ParseJson(retried.Body)["recovery"], value["recovery"]);
+    request.Method = "GET";
+    request.Target = std::string("/collections/") + test::collection_id + "/operations/" + test::operation_id;
     vfs.Disarm();
     ASSERT_TRUE(engine->Reconcile());
     EXPECT_EQ(NTransport::ParseJson(routes.Handle(request).Body)["outcome"], "committed");

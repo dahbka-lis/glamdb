@@ -5,77 +5,69 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
-#include <regex>
-#include <set>
 
 namespace glamdb::NTransport {
 namespace {
 const std::vector<std::string> TypeNames{"string", "bool", "int64", "float64", "timestamp_us_utc"};
 
-// Validate the stream without constructing or filtering a DOM. The pinned
-// callback DOM parser rescans the parent array after each object, making even
-// an always-true callback quadratic for append batches. A separate SAX pass
-// preserves the original event/depth limits and decoded-key checks.
-class TJsonValidator final : public nlohmann::json_sax<TJson>
+// A single SAX pass constructs the DOM and rejects decoded duplicate keys.
+// Each frame owns its container; array growth cannot invalidate child frames.
+class TJsonParser final : public nlohmann::json_sax<TJson>
 {
 public:
+    TJson Result;
     bool null() override
     {
-        return Visit();
+        return Add(nullptr);
     }
-    bool boolean(bool) override
+    bool boolean(bool value) override
     {
-        return Visit();
+        return Add(value);
     }
-    bool number_integer(number_integer_t) override
+    bool number_integer(number_integer_t value) override
     {
-        return Visit();
+        return Add(value);
     }
-    bool number_unsigned(number_unsigned_t) override
+    bool number_unsigned(number_unsigned_t value) override
     {
-        return Visit();
+        return Add(value);
     }
-    bool number_float(number_float_t, const string_t&) override
+    bool number_float(number_float_t value, const string_t&) override
     {
-        return Visit();
+        return Add(value);
     }
-    bool string(string_t&) override
+    bool string(string_t& value) override
     {
-        return Visit();
+        return Add(std::move(value));
     }
     bool binary(binary_t&) override
     {
-        return Visit();
+        return false;
     }
     bool start_object(size_t) override
     {
-        Visit();
-        ++Depth_;
-        Objects_.emplace_back();
-        return true;
+        return Start(TJson::object());
+    }
+    bool start_array(size_t) override
+    {
+        return Start(TJson::array());
     }
     bool key(string_t& value) override
     {
         Visit();
-        Require(Objects_.back().insert(value).second, "duplicate JSON key");
+        auto& frame = Stack_.back();
+        Require(!frame.Value.contains(value), "duplicate JSON key");
+        frame.Value[value] = nullptr;
+        frame.Key = std::move(value);
         return true;
     }
     bool end_object() override
     {
-        --Depth_;
-        Objects_.pop_back();
-        return Visit();
-    }
-    bool start_array(size_t) override
-    {
-        Visit();
-        ++Depth_;
-        return true;
+        return End();
     }
     bool end_array() override
     {
-        --Depth_;
-        return Visit();
+        return End();
     }
     bool parse_error(size_t, const std::string&, const TJson::exception&) override
     {
@@ -83,66 +75,92 @@ public:
     }
 
 private:
-    bool Visit()
+    struct TFrame
     {
-        Require(Depth_ <= 32 && ++Nodes_ <= 1000000, "JSON complexity limit exceeded");
+        TJson Value;
+        std::string Key;
+    };
+    std::vector<TFrame> Stack_;
+    size_t Nodes_ = 0;
+    void Visit()
+    {
+        // Accommodate all 10,000 rows of the maximum 256-field schema.
+        Require(Stack_.size() <= 32 && ++Nodes_ <= MaxJsonEvents, "JSON complexity limit exceeded");
+    }
+    bool Start(TJson value)
+    {
+        Visit();
+        Stack_.push_back({std::move(value), {}});
         return true;
     }
-    size_t Depth_ = 0;
-    size_t Nodes_ = 0;
-    std::vector<std::set<std::string>> Objects_;
+    bool Add(TJson value)
+    {
+        Visit();
+        if (Stack_.empty()) {
+            Result = std::move(value);
+        } else if (Stack_.back().Value.is_array()) {
+            Stack_.back().Value.push_back(std::move(value));
+        } else {
+            Stack_.back().Value.at(Stack_.back().Key) = std::move(value);
+        }
+        return true;
+    }
+    bool End()
+    {
+        auto value = std::move(Stack_.back().Value);
+        Stack_.pop_back();
+        return Add(std::move(value));
+    }
 };
 
 int64_t ParseTimestamp(const TJson& value)
 {
     Require(value.is_string(), "timestamp must be an RFC3339 string");
-    const auto text = value.get<std::string>();
-    static const std::regex Pattern(
-        R"((\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2}))");
-    std::smatch match;
-    Require(text.size() <= 32 && std::regex_match(text, match, Pattern), "invalid UTC microsecond timestamp");
-    const auto number = [&](size_t index) {
-        return std::stoi(match[index].str());
+    const auto& text = value.get_ref<const std::string&>();
+    Require(text.size() >= 20 && text.size() <= 32 && text[4] == '-' && text[7] == '-' && text[10] == 'T' &&
+            text[13] == ':' && text[16] == ':',
+        "invalid UTC microsecond timestamp");
+    const auto number = [&](size_t start, size_t count) {
+        int result = 0;
+        Require(start + count <= text.size(), "invalid timestamp digits");
+        for (size_t i = start; i < start + count; ++i) {
+            Require(text[i] >= '0' && text[i] <= '9', "invalid timestamp digits");
+            result = result * 10 + text[i] - '0';
+        }
+        return result;
     };
-    const auto date = std::chrono::year(number(1)) / number(2) / number(3);
-    Require(date.ok() && number(1) >= 1 && number(4) < 24 && number(5) < 60 && number(6) < 60,
-        "invalid timestamp date/time");
-    auto fraction = match[7].str();
-    fraction.resize(6, '0');
-    const auto zone = match[8].str();
-    int offset = 0;
-    if (zone != "Z") {
-        const int hours = std::stoi(zone.substr(1, 2));
-        const int minutes = std::stoi(zone.substr(4, 2));
-        Require(hours < 24 && minutes < 60, "invalid timestamp offset");
-        offset = (hours * 60 + minutes) * (zone[0] == '+' ? 1 : -1);
+    const auto year = number(0, 4), hour = number(11, 2), minute = number(14, 2), second = number(17, 2);
+    const auto date = std::chrono::year(year) / number(5, 2) / number(8, 2);
+    Require(date.ok() && year >= 1 && hour < 24 && minute < 60 && second < 60, "invalid timestamp date/time");
+    size_t position = 19;
+    int fraction = 0;
+    if (text[position] == '.') {
+        const auto start = ++position;
+        while (position < text.size() && text[position] >= '0' && text[position] <= '9') {
+            ++position;
+        }
+        Require(position > start && position - start <= 6, "invalid timestamp fraction");
+        fraction = number(start, position - start);
+        for (size_t i = position - start; i < 6; ++i) {
+            fraction *= 10;
+        }
     }
-    const auto instant = std::chrono::sys_days(date) + std::chrono::hours(number(4)) +
-        std::chrono::minutes(number(5) - offset) + std::chrono::seconds(number(6)) +
-        std::chrono::microseconds(std::stoi(fraction));
+    int offset = 0;
+    if (position < text.size() && text[position] == 'Z') {
+        Require(position + 1 == text.size(), "invalid timestamp zone");
+    } else {
+        Require(position + 6 == text.size() && (text[position] == '+' || text[position] == '-') &&
+                text[position + 3] == ':',
+            "invalid timestamp zone");
+        const auto hours = number(position + 1, 2), minutes = number(position + 4, 2);
+        Require(hours < 24 && minutes < 60, "invalid timestamp offset");
+        offset = (hours * 60 + minutes) * (text[position] == '+' ? 1 : -1);
+    }
+    const auto instant = std::chrono::sys_days(date) + std::chrono::hours(hour) +
+        std::chrono::minutes(minute - offset) + std::chrono::seconds(second) + std::chrono::microseconds(fraction);
     const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(instant.time_since_epoch()).count();
     Require(micros >= -62135596800000000LL && micros <= 253402300799999999LL, "timestamp outside years 0001..9999");
     return micros;
-}
-
-std::string FormatTimestamp(int64_t micros)
-{
-    const std::chrono::sys_time<std::chrono::microseconds> instant{std::chrono::microseconds(micros)};
-    const auto day = std::chrono::floor<std::chrono::days>(instant);
-    const std::chrono::year_month_day date{day};
-    const std::chrono::hh_mm_ss time{instant - day};
-    char buffer[40]{};
-    std::snprintf(buffer,
-        sizeof(buffer),
-        "%04d-%02u-%02uT%02lld:%02lld:%02lld.%06lldZ",
-        static_cast<int>(date.year()),
-        static_cast<unsigned>(date.month()),
-        static_cast<unsigned>(date.day()),
-        static_cast<long long>(time.hours().count()),
-        static_cast<long long>(time.minutes().count()),
-        static_cast<long long>(time.seconds().count()),
-        static_cast<long long>(time.subseconds().count()));
-    return buffer;
 }
 
 std::shared_ptr<arrow::DataType> ArrowType(FieldType type)
@@ -191,16 +209,16 @@ void CheckArrow(const arrow::Status& status)
 void Require(bool condition, std::string_view message, std::string_view code)
 {
     if (!condition) {
-        throw TFailure({std::string(code), detail::BoundedDiagnostic(message)});
+        throw TFailure({std::string(code), detail::BoundedDiagnostic(message), ErrorPolicy(code).Hint});
     }
 }
 
 TJson ParseJson(std::string_view bytes)
 {
-    Require(bytes.size() <= MaxRequestBytes, "request is too large", "RESOURCE_EXHAUSTED");
-    TJsonValidator validator;
-    Require(TJson::sax_parse(bytes, &validator), "invalid JSON request");
-    return TJson::parse(bytes);
+    Require(bytes.size() <= MaxRequestBytes, "request is too large", "PAYLOAD_TOO_LARGE");
+    TJsonParser parser;
+    Require(TJson::sax_parse(bytes, &parser), "invalid JSON request");
+    return std::move(parser.Result);
 }
 
 void CheckKeys(const TJson& value, std::initializer_list<std::string_view> keys)
@@ -255,28 +273,45 @@ std::shared_ptr<arrow::RecordBatch> ParseRows(const SchemaSpec& schema, const TJ
         fields.push_back(arrow::field(field.name, type, field.nullable));
         std::unique_ptr<arrow::ArrayBuilder> builder;
         CheckArrow(arrow::MakeBuilder(arrow::default_memory_pool(), type, &builder));
+        CheckArrow(builder->Reserve(static_cast<int64_t>(rows.size())));
         builders.push_back(std::move(builder));
     }
     for (const auto& row : rows) {
         Require(row.is_object(), "row must be an object");
-        for (auto item = row.begin(); item != row.end(); ++item) {
-            const auto& name = item.key();
-            Require(std::ranges::any_of(schema.fields,
-                        [&](const auto& field) {
-                            return field.name == name;
-                        }),
-                "unknown row field");
-        }
+        size_t matched = 0;
         for (size_t i = 0; i < schema.fields.size(); ++i) {
             const auto& field = schema.fields[i];
             const auto value = row.find(field.name);
+            matched += value != row.end();
             if (value == row.end() || value->is_null()) {
                 Require(field.nullable, "missing or null required field");
                 CheckArrow(builders[i]->AppendNull());
             } else {
-                CheckArrow(builders[i]->AppendScalar(*ParseScalar(field.type, *value)));
+                auto& builder = *builders[i];
+                switch (field.type) {
+                    case FieldType::String:
+                        Require(value->is_string(), "expected string");
+                        CheckArrow(
+                            static_cast<arrow::StringBuilder&>(builder).Append(value->get_ref<const std::string&>()));
+                        break;
+                    case FieldType::Bool:
+                        Require(value->is_boolean(), "expected boolean");
+                        CheckArrow(static_cast<arrow::BooleanBuilder&>(builder).Append(value->get<bool>()));
+                        break;
+                    case FieldType::Int64:
+                        CheckArrow(static_cast<arrow::Int64Builder&>(builder).Append(ParseInt64(*value)));
+                        break;
+                    case FieldType::Float64:
+                        Require(value->is_number() && std::isfinite(value->get<double>()), "expected finite number");
+                        CheckArrow(static_cast<arrow::DoubleBuilder&>(builder).Append(value->get<double>()));
+                        break;
+                    case FieldType::TimestampUsUtc:
+                        CheckArrow(static_cast<arrow::TimestampBuilder&>(builder).Append(ParseTimestamp(*value)));
+                        break;
+                }
             }
         }
+        Require(matched == row.size(), "unknown row field");
     }
     arrow::ArrayVector arrays;
     for (auto& builder : builders) {
@@ -394,46 +429,6 @@ TJson EncodeSchema(const arrow::Schema& schema)
     return {{"fields", fields}};
 }
 
-TJson EncodeRows(const arrow::RecordBatch& batch)
-{
-    auto rows = TJson::array();
-    size_t bytes = 0;
-    for (int64_t row = 0; row < batch.num_rows(); ++row) {
-        auto item = TJson::object();
-        for (int column = 0; column < batch.num_columns(); ++column) {
-            const auto& array = *batch.column(column);
-            auto& value = item[batch.schema()->field(column)->name()];
-            if (array.IsNull(row)) {
-                value = nullptr;
-                continue;
-            }
-            switch (array.type_id()) {
-                case arrow::Type::STRING:
-                    value = static_cast<const arrow::StringArray&>(array).GetString(row);
-                    break;
-                case arrow::Type::BOOL:
-                    value = static_cast<const arrow::BooleanArray&>(array).Value(row);
-                    break;
-                case arrow::Type::INT64:
-                    value = std::to_string(static_cast<const arrow::Int64Array&>(array).Value(row));
-                    break;
-                case arrow::Type::DOUBLE:
-                    value = static_cast<const arrow::DoubleArray&>(array).Value(row);
-                    break;
-                case arrow::Type::TIMESTAMP:
-                    value = FormatTimestamp(static_cast<const arrow::TimestampArray&>(array).Value(row));
-                    break;
-                default:
-                    throw TFailure({"INTERNAL", "unsupported output type"});
-            }
-        }
-        bytes += item.dump().size() + 1;
-        Require(bytes <= MaxResponseBytes, "JSON response exceeds transport limit", "RESOURCE_EXHAUSTED");
-        rows.push_back(std::move(item));
-    }
-    return rows;
-}
-
 TJson EncodeIdentity(const BaseIdentity& identity)
 {
     return {{"store_id", identity.store_id},
@@ -457,32 +452,6 @@ TJson EncodeError(const ErrorDetail& error)
 
 int ErrorStatus(std::string_view code)
 {
-    if (code == "INVALID_ARGUMENT") {
-        return 400;
-    }
-    if (code == "UNAUTHORIZED") {
-        return 401;
-    }
-    if (code == "NOT_FOUND" || code == "COLLECTION_NOT_FOUND" || code == "SNAPSHOT_NOT_FOUND") {
-        return 404;
-    }
-    if (code == "DATABASE_CLOSED" || code == "DATABASE_BUSY" || code == "DATABASE_REQUIRED" || code == "STATE_IN_USE" ||
-        code == "ALREADY_EXISTS" || code == "OPERATION_CONFLICT" || code == "SCHEMA_MISMATCH")
-    {
-        return 409;
-    }
-    if (code == "PRECONDITION_FAILED") {
-        return 412;
-    }
-    if (code == "RESOURCE_EXHAUSTED" || code == "CAPACITY_EXCEEDED") {
-        return 429;
-    }
-    if (code == "UNSUPPORTED_OPERATION") {
-        return 501;
-    }
-    if (code == "RECOVERY_REQUIRED" || code == "DEPENDENCY_UNAVAILABLE" || code == "OPERATION_IN_PROGRESS") {
-        return 503;
-    }
-    return 500;
+    return ErrorPolicy(code).Status;
 }
 } // namespace glamdb::NTransport

@@ -212,6 +212,71 @@ class ScanHTTP(NativeHTTP):
         for token in tokens:
             self.api(path + '/scan/cancel', {'cursor': token})
 
+    def test_abandoned_sdk_iterators_release_native_scan_capacity(self):
+        import gc
+        from glamdb_sdk import Client
+        path = self.collection()
+        cid = path.rsplit('/', 1)[-1]
+        with Client('http://127.0.0.1:' + str(self.port), 'native-test-secret',
+                    database_id=self.store_id, timeout=60) as client:
+            for count in (10000, 1):
+                client.append(cid, [{'key': 'same'}] * count, operation_id=str(uuid.uuid4()))
+            for scan in (client.scan_pages, client.scan_batches):
+                for _ in range(9):
+                    for page in scan(cid):
+                        break
+                    gc.collect()
+            # Keep the original client alive: cleanup must follow iterator lifetime.
+            with Client('http://127.0.0.1:' + str(self.port), 'native-test-secret',
+                        database_id=self.store_id) as other:
+                self.assertEqual(len(other.scan_json(cid).rows), 10001)
+        tokens = [self.api(path + '/scan/open', {})['cursor'] for _ in range(8)]
+        for token in tokens:
+            self.api(path + '/scan/cancel', {'cursor': token})
+
+    def test_scan_capacity_is_isolated_between_databases(self):
+        path = self.collection()
+        tokens = [self.api(path + '/scan/open', {})['cursor'] for _ in range(8)]
+        self.api(path + '/scan/open', {}, status=429)
+        other = self.api('/databases', {'name': 'quota_other'})['database_id']
+        cid = str(uuid.uuid4())
+        base = '/databases/' + other + '/collections'
+        self.api(base, {'collection_id': cid, 'name': 'other',
+            'schema': {'fields': [{'name': 'key', 'type': 'string', 'nullable': False}]}})
+        result = self.api(base + '/' + cid + '/scan', {})
+        self.assertEqual(result['rows'], [])
+        for token in tokens:
+            self.api(path + '/scan/cancel', {'cursor': token})
+
+    def test_arrow_small_batches_and_selective_rows_fit_real_ipc_pages(self):
+        import hashlib
+        import pyarrow as pa
+        cid = str(uuid.uuid4())
+        fields = [{'name': 'key', 'type': 'string', 'nullable': False}] + [
+            {'name': 'n' + str(i), 'type': 'int64', 'nullable': False} for i in range(63)]
+        self.api('/collections', {'collection_id': cid, 'name': 'ipc_wide', 'schema': {'fields': fields}})
+        path = '/collections/' + cid
+        for _ in range(4):
+            rows = [dict({'key': 'same'}, **{'n' + str(i): str(int(index % 4 == 0)) for i in range(63)})
+                    for index in range(6000)]
+            self.api(path + '/append', {'operation_id': str(uuid.uuid4()), 'rows': rows})
+        for body, expected in [({'batch_rows': 1, 'limit': 6000}, 6000),
+            ({'batch_rows': 4, 'predicate': {'op': 'eq', 'field': 'n0', 'value': '1'}}, 6000)]:
+            count = 0
+            while True:
+                status, headers, data = self.request(path + '/scan', body, accept='application/vnd.apache.arrow.stream')
+                self.assertEqual(status, 200, data[:1024])
+                self.assertLessEqual(len(data), 16 * 1024 * 1024)
+                self.assertEqual(hashlib.sha256(data).hexdigest(), headers['X-Content-SHA256'])
+                batches = list(pa.ipc.open_stream(data))
+                self.assertLessEqual(len(batches), 1, 'small core batches must be coalesced for IPC')
+                count += sum(batch.num_rows for batch in batches)
+                cursor = headers.get('X-GlamDB-Next-Cursor')
+                if cursor is None:
+                    break
+                body = {'cursor': cursor}
+            self.assertEqual(count, expected)
+
     def test_idle_cursor_expires_and_releases_capacity(self):
         import time
         path = self.collection()

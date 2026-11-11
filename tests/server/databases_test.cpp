@@ -13,6 +13,37 @@ namespace glamdb::NServer {
 using namespace NTransport;
 using namespace std::chrono_literals;
 
+TEST(Databases, RepeatedOpenAndCreateDoNotDrainAcceptedRequests)
+{
+    test::TempDir temporary;
+    TDatabases databases(temporary.path / "server");
+    const auto info = databases.Create({{"name", "a"}});
+    const auto id = info.at("database_id").get<std::string>();
+    for (const bool create : {false, true}) {
+        std::promise<void> entered, release;
+        auto released = release.get_future();
+        auto reader = std::async(std::launch::async, [&] {
+            return databases.Use(id, [&](const auto&) {
+                entered.set_value();
+                released.wait();
+                return TResponse{200, ""};
+            });
+        });
+        entered.get_future().wait();
+        auto repeated = std::async(std::launch::async, [&] {
+            return create ? databases.Create({{"name", "a"}}) : databases.Change(id, "open");
+        });
+        EXPECT_EQ(repeated.wait_for(100ms), std::future_status::ready);
+        EXPECT_NO_THROW(databases.Use(id, [](const auto&) {
+            return TResponse{200, ""};
+        }));
+        release.set_value();
+        reader.get();
+        EXPECT_EQ(repeated.get(), info);
+    }
+    databases.Shutdown();
+}
+
 TEST(Databases, CloseDrainsOnlyItsOwnRequests)
 {
     test::TempDir temporary;
@@ -46,6 +77,12 @@ TEST(Databases, CloseDrainsOnlyItsOwnRequests)
     }
     EXPECT_TRUE(rejected);
     EXPECT_EQ(closer.wait_for(0ms), std::future_status::timeout);
+    auto metadata = std::async(std::launch::async, [&] {
+        const auto info = databases.Get(a);
+        EXPECT_EQ(info.at("state"), "closing");
+        return databases.List();
+    });
+    EXPECT_EQ(metadata.wait_for(100ms), std::future_status::ready);
     EXPECT_EQ(databases
                   .Use(b,
                       [](const auto&) {
@@ -56,6 +93,7 @@ TEST(Databases, CloseDrainsOnlyItsOwnRequests)
     release.set_value();
     EXPECT_EQ(reader.get().Status, 200);
     EXPECT_EQ(closer.get().at("state"), "closed");
+    EXPECT_EQ(metadata.get().at("items").size(), 2U);
     EXPECT_EQ(databases.Change(a, "open").at("state"), "open");
     databases.Shutdown();
 }
@@ -76,7 +114,7 @@ TEST(Databases, ConcurrentNameReservationHasOneIdentity)
     databases.Shutdown();
 }
 
-TEST(Databases, FailedCloseRetainsOwnershipUntilRetry)
+TEST(Databases, FailedRecoveryCanCloseAndReleaseOwnership)
 {
     test::TempDir temporary;
     TDatabases databases(temporary.path / "server");
@@ -99,15 +137,16 @@ TEST(Databases, FailedCloseRetainsOwnershipUntilRetry)
     const auto saved = temporary.path / "saved-metadata";
     std::filesystem::rename(metadata, saved);
     EXPECT_THROW(databases.Change(id, "reconcile"), TFailure);
-    EXPECT_THROW(databases.Change(id, "close"), TFailure);
-    EXPECT_EQ(databases.Get(id).at("state"), "closing");
-    EXPECT_THROW(databases.Change(id, "open"), TFailure);
+    const auto closed = databases.Change(id, "close");
+    EXPECT_EQ(closed.at("state"), "closed");
+    EXPECT_TRUE(closed.contains("error"));
     EXPECT_THROW(databases.Change(id, "reconcile"), TFailure);
-    const auto competing = OpenExisting({(temporary.path / "server/databases" / id).string(), id});
-    ASSERT_FALSE(competing);
-    EXPECT_EQ(competing.error().code, "STATE_IN_USE");
     std::filesystem::rename(saved, metadata);
-    EXPECT_EQ(databases.Change(id, "close").at("state"), "closed");
+    {
+        const auto competing = OpenExisting({(temporary.path / "server/databases" / id).string(), id});
+        ASSERT_TRUE(competing);
+        EXPECT_TRUE((*competing)->Shutdown(1s));
+    }
     EXPECT_EQ(databases.Change(id, "open").at("state"), "open");
     databases.Shutdown();
 }
@@ -173,12 +212,185 @@ TEST(Databases, ReservationCrashAndIncompleteStoreRemainExplicit)
     {
         TDatabases databases(directory);
         EXPECT_EQ(databases.Get(test::table_uuid).at("state"), "error");
-        EXPECT_THROW(databases.Create({{"name", "incomplete"}}), TFailure);
-        EXPECT_TRUE(std::filesystem::is_empty(other));
+        EXPECT_EQ(databases.Create({{"name", "incomplete"}}).at("state"), "open");
+        EXPECT_TRUE(std::filesystem::exists(other / "store.ready"));
+        size_t preserved = 0;
+        for (const auto& item : std::filesystem::directory_iterator(directory / "databases")) {
+            if (item.path().filename().string().starts_with("incomplete-")) {
+                ++preserved;
+                EXPECT_TRUE(std::filesystem::is_empty(item.path()));
+            }
+        }
+        EXPECT_EQ(preserved, 1U);
         EXPECT_EQ(databases.Get(test::store_id).at("state"), "open");
         databases.Shutdown();
     }
     std::filesystem::remove(directory / "registry.sqlite");
     EXPECT_THROW(TDatabases databases(directory), TFailure);
 }
+TEST(Databases, DefiniteBusyRegistryFailureCanRetryWithoutRestart)
+{
+    test::TempDir temporary;
+    TDatabases databases(temporary.path / "server");
+    const auto id = databases.Create({{"name", "a"}}).at("database_id").get<std::string>();
+    detail::Database reader;
+    reader.Open(temporary.path / "server/registry.sqlite", SQLITE_OPEN_READONLY, "");
+    reader.Execute("BEGIN");
+    EXPECT_EQ(reader.Integer("SELECT count(*) FROM databases"), 1);
+    try {
+        databases.Change(id, "close");
+        ADD_FAILURE() << "reader must prevent registry commit";
+    } catch (const detail::Failure& error) {
+        EXPECT_EQ(error.native_code & 255, SQLITE_BUSY);
+    }
+    EXPECT_EQ(databases.Get(id).at("state"), "open");
+    EXPECT_NO_THROW(databases.Use(id, [](const auto&) {
+        return TResponse{200, ""};
+    }));
+    reader.Execute("ROLLBACK");
+    EXPECT_EQ(databases.Change(id, "close").at("state"), "closed");
+    EXPECT_EQ(databases.Create({{"name", "b"}}).at("state"), "open");
+    databases.Shutdown();
+}
+
+TEST(Databases, StartupDoesNotRewriteAlreadyPersistedOpenIntent)
+{
+    test::TempDir temporary;
+    const auto directory = temporary.path / "server";
+    std::string id;
+    {
+        TDatabases databases(directory);
+        id = databases.Create({{"name", "a"}}).at("database_id").get<std::string>();
+        databases.Shutdown();
+    }
+    test::JournalFaultVfs vfs;
+    vfs.Arm(1, true);
+    TDatabases reopened(directory, vfs.Name());
+    EXPECT_EQ(reopened.Get(id).at("state"), "open");
+    EXPECT_THROW(reopened.Create({{"name", "b"}}), detail::Failure);
+    vfs.Disarm();
+    EXPECT_EQ(reopened.Change(id, "reconcile").at("state"), "open");
+    EXPECT_NO_THROW(reopened.Use(id, [](const auto&) {
+        return TResponse{200, ""};
+    }));
+    EXPECT_EQ(reopened.Change(id, "close").at("state"), "closed");
+    reopened.Shutdown();
+}
+
+TEST(Databases, UncertainCloseFencesCallsButAllowsOutcomeRecovery)
+{
+    test::TempDir temporary;
+    test::JournalFaultVfs vfs;
+    TDatabases databases(temporary.path / "server", vfs.Name());
+    const auto id = databases.Create({{"name", "a"}}).at("database_id").get<std::string>();
+    vfs.Arm(1, true);
+    EXPECT_THROW(databases.Change(id, "close"), detail::Failure);
+    vfs.Disarm();
+    EXPECT_THROW(databases.Use(id,
+                     [](const auto&) {
+                         return TResponse{200, ""};
+                     }),
+        TFailure);
+    EXPECT_NO_THROW(databases.Use(
+        id,
+        [](const auto&) {
+            return TResponse{200, ""};
+        },
+        true));
+    EXPECT_EQ(databases.Change(id, "reconcile").at("state"), "error");
+    EXPECT_THROW(databases.Use(id,
+                     [](const auto&) {
+                         return TResponse{200, ""};
+                     }),
+        TFailure);
+    EXPECT_EQ(databases.Change(id, "close").at("state"), "closed");
+    EXPECT_THROW(databases.Change(id, "open"), TFailure);
+    EXPECT_THROW(databases.Create({{"name", "a"}}), TFailure);
+    databases.Shutdown();
+}
+
+TEST(Databases, UnknownDatabaseHasDistinctAbsenceCode)
+{
+    test::TempDir temporary;
+    TDatabases databases(temporary.path / "server");
+    try {
+        databases.Get(test::store_id);
+        ADD_FAILURE() << "unknown database must fail";
+    } catch (const TFailure& error) {
+        EXPECT_EQ(error.Detail.code, "DATABASE_NOT_FOUND");
+    }
+    databases.Shutdown();
+}
+
+TEST(Databases, DefiniteRegistrationFailureStaysFencedUntilPersistedRetry)
+{
+    test::TempDir temporary;
+    const auto root = temporary.path / "server";
+    std::string id;
+    {
+        TDatabases databases(root);
+        id = databases.Create({{"name", "a"}}).at("database_id").get<std::string>();
+        databases.Shutdown();
+    }
+    detail::Database reader;
+    reader.Open(root / "registry.sqlite", SQLITE_OPEN_READWRITE, {});
+    reader.Execute("UPDATE databases SET initialized=0 WHERE id=?", {id});
+    reader.Execute("BEGIN");
+    EXPECT_EQ(reader.Integer("SELECT initialized FROM databases"), 0);
+    TDatabases databases(root);
+    EXPECT_EQ(databases.Get(id).at("state"), "error");
+    EXPECT_THROW(databases.Change(id, "reconcile"), detail::Failure);
+    EXPECT_THROW(databases.Use(id,
+                     [](const auto&) {
+                         return TResponse{200, ""};
+                     }),
+        TFailure);
+    reader.Execute("ROLLBACK");
+    EXPECT_EQ(databases.Change(id, "reconcile").at("state"), "open");
+    EXPECT_EQ(reader.Integer("SELECT initialized FROM databases"), 1);
+    databases.Shutdown();
+}
+
+TEST(Databases, StartupRegistrationFaultDoesNotHideOtherInitializedDatabases)
+{
+    test::TempDir temporary;
+    test::JournalFaultVfs vfs;
+    const auto root = temporary.path / "server";
+    const std::string first = "00000000-0000-4000-8000-000000000001";
+    const std::string second = "00000000-0000-4000-8000-000000000002";
+    {
+        TDatabases databases(root);
+        databases.Create({{"name", "a"}, {"database_id", first}});
+        databases.Create({{"name", "b"}, {"database_id", second}});
+        databases.Shutdown();
+    }
+    {
+        detail::Database registry;
+        registry.Open(root / "registry.sqlite", SQLITE_OPEN_READWRITE, {});
+        registry.Execute("UPDATE databases SET initialized=0 WHERE id=?", {first});
+    }
+    vfs.Arm(1, true);
+    TDatabases databases(root, vfs.Name());
+    vfs.Disarm();
+    EXPECT_EQ(databases.Get(first).at("state"), "error");
+    EXPECT_EQ(databases.Get(second).at("state"), "open");
+    EXPECT_NO_THROW(databases.Use(second, [](const auto&) {
+        return TResponse{200, ""};
+    }));
+    EXPECT_EQ(databases.Change(first, "reconcile").at("state"), "error");
+    EXPECT_THROW(databases.Use(first,
+                     [](const auto&) {
+                         return TResponse{200, ""};
+                     }),
+        TFailure);
+    EXPECT_NO_THROW(databases.Use(
+        first,
+        [](const auto&) {
+            return TResponse{200, ""};
+        },
+        true));
+    EXPECT_EQ(databases.Change(first, "close").at("state"), "closed");
+    databases.Shutdown();
+}
+
 } // namespace glamdb::NServer

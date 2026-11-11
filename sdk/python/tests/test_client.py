@@ -32,7 +32,13 @@ def committed(snapshot="4", operation=OP, payload_hash=A_HASH):
 
 
 def client_with(handler, **kwargs):
-    return Client("https://example.test", "secret-value", transport=httpx.MockTransport(handler), **kwargs)
+    def legacy_handler(request):
+        # These codec/receipt tests model the older single-response adapter.
+        # Open/page/cancel wire behavior is tested in test_scan_pages.py.
+        if request.url.path.endswith('/scan/open'):
+            return reply({'error': {'code': 'ROUTE_NOT_FOUND', 'message': 'legacy adapter'}}, 404)
+        return handler(request)
+    return Client("https://example.test", "secret-value", transport=httpx.MockTransport(legacy_handler), **kwargs)
 
 
 def test_public_reads_use_bearer_auth_exact_routes_and_preserve_cursor_parameters():
@@ -127,7 +133,7 @@ def test_unknown_and_original_terminal_failure_are_returned_without_raising_or_r
 
 def test_find_distinguishes_in_progress_absence_and_original_committed_receipt():
     replies = [reply({"state": "in_progress", "operation_id": OP}),
-               reply({"error": {"code": "NOT_FOUND", "message": "absent"}}, 404), reply(committed("1"))]
+               reply({"error": {"code": "OPERATION_NOT_FOUND", "message": "absent"}}, 404), reply(committed("1"))]
     with client_with(lambda request: replies.pop(0)) as client:
         assert client.find_append_outcome(CID, OP).state == "in_progress"
         assert client.find_append_outcome(CID, OP) is None

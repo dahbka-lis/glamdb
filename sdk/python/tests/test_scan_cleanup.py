@@ -27,6 +27,8 @@ def arrow_response(cursor, valid=True):
 def test_initial_arrow_constructor_failure_releases_advertised_cursor(cancel_status):
     cancelled = []
     def handle(request):
+        if request.url.path.endswith('/open'):
+            return httpx.Response(200, json={'cursor': 'first'})
         if request.url.path.endswith('/cancel'):
             cancelled.append(json.loads(request.content)['cursor'])
             return httpx.Response(cancel_status, json={'error': {'code': 'INTERNAL', 'message': 'cleanup failed'}})
@@ -40,6 +42,8 @@ def test_initial_arrow_constructor_failure_releases_advertised_cursor(cancel_sta
 def test_initial_json_decode_failure_releases_advertised_cursor():
     cancelled = []
     def handle(request):
+        if request.url.path.endswith('/open'):
+            return httpx.Response(200, json={'cursor': 'first'})
         if request.url.path.endswith('/cancel'):
             cancelled.append(json.loads(request.content)['cursor'])
             return httpx.Response(200, json={'cancelled': True})
@@ -56,6 +60,8 @@ def test_following_arrow_constructor_failure_cancels_consumed_replay_token():
     count = 0
     def handle(request):
         nonlocal count
+        if request.url.path.endswith('/open'):
+            return httpx.Response(200, json={'cursor': 'first'})
         if request.url.path.endswith('/cancel'):
             cancelled.append(json.loads(request.content)['cursor'])
             return httpx.Response(200, json={'cancelled': True})

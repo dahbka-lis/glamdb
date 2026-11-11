@@ -16,7 +16,7 @@ cmake --build build/client
 Set `GLAMDB_TOKEN` in the environment. Keep tokens out of command-line arguments.
 Local HTTP accepts only hostnames whose resolved endpoints are all loopback addresses;
 remote servers require HTTPS. HTTPS verifies the certificate chain and hostname,
-sets SNI, and uses system trust with an optional additional `--ca-file CA.pem`.
+sets SNI for DNS names (not IP literals), and uses system trust with an optional additional `--ca-file CA.pem`.
 There is no certificate-verification bypass and redirects are never followed.
 
 ```sh
@@ -33,6 +33,8 @@ continuation/cancellation, and database open/close/reconcile. Supply the complet
 route in `--url`, or append a `--path` to a base URL. Consult the
 [native HTTP contract](../../docs/development/HTTP_SERVER.md) for route bodies and
 supported features. A body file implies POST unless `--method` is explicit.
+Supported methods are GET and POST. A base URL combined with `--path` must not
+contain a query or fragment; put a query in the path or supply a complete URL.
 `--body -` reads stdin. Cursor cancellation uses POST to the scan cancellation
 route with its cursor body.
 
@@ -55,23 +57,42 @@ Cancel with POST `.../scan/cancel` and the cursor body; the token also expires a
 and use `--headers` for Arrow continuation metadata.
 
 Output is the exact response body, including binary Arrow IPC, without an added
-newline. `--output FILE` writes a file; the default is stdout. `--headers FILE`
+newline. `--output FILE` replaces a regular file atomically after writing, syncing,
+and closing a temporary file in the same directory; a failed write preserves the
+existing file. New files have owner-only permissions. Symlinks and special files
+are rejected. The default is stdout. `--headers FILE`
 writes a separate JSON object containing `status` and all lower-case response
-header names. This exposes content type, checksum, selected snapshot and any cursor
+header names. A repeated header has an array of values, in received order; a single
+header has a string value. Header bytes above ASCII map to Latin-1 code points in
+JSON. This exposes content type, checksum, selected snapshot and any cursor
 metadata without corrupting the body. Any supplied `X-Content-SHA256` is verified
 before output. The client bounds requests to 16 MiB, response headers to 16 KiB,
 and response bodies to 64 MiB; larger scans use server continuation. It rejects
-ambiguous framing, duplicate headers, unsupported transfer/content encoding,
+ambiguous framing, duplicate Content-Length, Transfer-Encoding, X-Content-SHA256
+or X-GlamDB-Next-Cursor headers, unsupported transfer/content encoding,
 truncated responses, and checksum mismatches. It buffers one bounded response
 before writing output.
 
-Exit status is zero only for a complete 2xx response with successful output,
-one for HTTP/transport/output failure, and two for command-line parsing errors.
+Exit status is:
+
+- `0`: complete 2xx response with successful output.
+- `1`: complete non-2xx response, local validation failure, or transport failure
+  before sending a POST (also transport failures for GET).
+- `2`: command-line parsing error.
+- `3`: POST transmission started, but no valid complete response was received;
+  the write outcome may be unknown.
+- `4`: output failed after a complete response; stderr includes its HTTP status.
+
 `--timeout SECONDS` is a whole-request deadline (default 65 seconds, maximum 3600).
-A timeout, interrupted response, failed output write/flush/close, or cancelled client
-process does not prove a server write failed. Reconcile a write through its original
+A DNS, connection, HTTPS policy or TLS verification failure before request
+transmission does not claim an uncertain write. Once a POST starts transmission,
+a timeout or interrupted response does not prove that a write failed. A failed
+output write/flush/close or cancelled client process likewise does not undo a
+server operation. Reconcile a write through its original
 operation ID; never retry it under a new ID merely because the response was lost.
-A header-output failure also returns nonzero, even when the server already committed.
+A header-output failure returns `4`, even when the server already committed.
+Header and body output files are replaced independently; they are not one atomic
+multi-file transaction.
 
 The optional `glamdb-admin` executable retains local `create-store --root ...
 --store-id ...` and `inspect-store` for offline administration. Build the full

@@ -23,11 +23,11 @@ bool Clean(std::string_view value)
         return c >= 33 && c <= 126;
     });
 }
-size_t Number(std::string_view value)
+size_t Number(std::string_view value, const char* message = "invalid response length")
 {
     size_t result = 0;
     const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
-    Check(parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size(), "invalid response length");
+    Check(parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size(), message);
     return result;
 }
 struct TUrl
@@ -41,9 +41,12 @@ TUrl ParseUrl(std::string_view url)
     result.Tls = url.starts_with("https://");
     Check(result.Tls || url.starts_with("http://"), "URL must use http:// or https://");
     url.remove_prefix(result.Tls ? 8 : 7);
-    const auto slash = url.find('/');
+    const auto slash = url.find_first_of("/?#");
     result.Authority = url.substr(0, slash);
     result.Target = slash == std::string_view::npos ? "/" : std::string(url.substr(slash));
+    if (result.Target.starts_with('?')) {
+        result.Target.insert(0, "/");
+    }
     Check(Clean(result.Authority) && !result.Authority.empty() && result.Authority.find('@') == std::string::npos &&
             Clean(result.Target) && result.Target.find('#') == std::string::npos,
         "invalid URL");
@@ -65,7 +68,8 @@ TUrl ParseUrl(std::string_view url)
             result.Port = authority.substr(colon + 1);
         }
     }
-    Check(!result.Host.empty() && Number(result.Port) > 0 && Number(result.Port) <= 65535, "invalid URL port");
+    const auto port = Number(result.Port, "invalid URL port");
+    Check(!result.Host.empty() && port > 0 && port <= 65535, "invalid URL port");
     return result;
 }
 TResponse ParseResponse(const std::string& wire, bool complete = true)
@@ -77,7 +81,7 @@ TResponse ParseResponse(const std::string& wire, bool complete = true)
     const auto lineEnd = wire.find("\r\n");
     Check(lineEnd >= 13 && wire[12] == ' ', "invalid HTTP status line");
     TResponse response;
-    response.Status = static_cast<int>(Number(std::string_view(wire).substr(9, 3)));
+    response.Status = static_cast<int>(Number(std::string_view(wire).substr(9, 3), "invalid HTTP status"));
     Check(response.Status >= 200 && response.Status <= 599, "unsupported HTTP status");
     size_t position = lineEnd + 2;
     while (position < headerEnd - 2) {
@@ -87,7 +91,8 @@ TResponse ParseResponse(const std::string& wire, bool complete = true)
         auto name = wire.substr(position, colon - position);
         Check(std::ranges::all_of(name,
                   [](unsigned char c) {
-                      return std::isalnum(c) || c == '-';
+                      return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                          std::string_view("!#$%&'*+-.^_`|~").find(static_cast<char>(c)) != std::string_view::npos;
                   }),
             "invalid response header name");
         std::ranges::transform(name, name.begin(), [](unsigned char c) {
@@ -102,17 +107,22 @@ TResponse ParseResponse(const std::string& wire, bool complete = true)
         }
         Check(std::ranges::all_of(value,
                   [](unsigned char c) {
-                      return c >= 32 && c <= 126;
+                      return c == '\t' || (c >= 32 && c != 127);
                   }),
             "invalid response header value");
-        Check(response.Headers.emplace(name, value).second, "duplicate response header");
+        auto& values = response.Headers[name];
+        const bool singular = name == "content-length" || name == "transfer-encoding" || name == "x-content-sha256" ||
+            name == "x-glamdb-next-cursor";
+        Check(!singular || values.empty(), "duplicate response header");
+        values.push_back(std::move(value));
         position = end + 2;
     }
     Check(!response.Headers.contains("transfer-encoding"), "transfer encoding is unsupported");
-    Check(!response.Headers.contains("content-encoding") || response.Headers.at("content-encoding") == "identity",
+    Check(!response.Headers.contains("content-encoding") ||
+            response.Headers.at("content-encoding") == std::vector<std::string>{"identity"},
         "content encoding is unsupported");
     Check(response.Headers.contains("content-length"), "missing response content-length");
-    const auto length = Number(response.Headers.at("content-length"));
+    const auto length = Number(response.Headers.at("content-length").front());
     Check(length <= MaxBody && wire.size() - headerEnd <= length, "response exceeds declared or configured length");
     if (!complete) {
         return response;
@@ -128,7 +138,7 @@ TResponse ParseResponse(const std::string& wire, bool complete = true)
             expected += Hex[byte >> 4];
             expected += Hex[byte & 15];
         }
-        Check(response.Headers.at("x-content-sha256") == expected, "response checksum mismatch");
+        Check(response.Headers.at("x-content-sha256").front() == expected, "response checksum mismatch");
     }
     return response;
 }
@@ -136,7 +146,7 @@ TResponse ParseResponse(const std::string& wire, bool complete = true)
 TResponse SendRequest(const TRequest& request)
 {
     const auto url = ParseUrl(request.Url);
-    Check(request.Method == "GET" || request.Method == "POST" || request.Method == "DELETE", "unsupported method");
+    Check(request.Method == "GET" || request.Method == "POST", "unsupported method; use GET or POST");
     Check(Clean(request.Accept) && Clean(request.ContentType), "invalid media type");
     Check(request.Body.size() <= size_t{16} * 1024 * 1024, "request body too large");
     Check(request.TimeoutSeconds > 0 && request.TimeoutSeconds <= 3600, "timeout must be 1..3600 seconds");
@@ -162,10 +172,13 @@ TResponse SendRequest(const TRequest& request)
     asio::ssl::stream<asio::ip::tcp::socket> stream(io, context);
     stream.set_verify_mode(asio::ssl::verify_peer);
     stream.set_verify_callback(asio::ssl::host_name_verification(url.Host));
-    Check(!url.Tls || SSL_set_tlsext_host_name(stream.native_handle(), url.Host.c_str()) == 1,
+    std::error_code addressError;
+    asio::ip::make_address(url.Host, addressError);
+    Check(!url.Tls || !addressError || SSL_set_tlsext_host_name(stream.native_handle(), url.Host.c_str()) == 1,
         "cannot set TLS server name");
     asio::steady_timer timer(io, std::chrono::seconds(request.TimeoutSeconds));
     bool timedOut = false;
+    bool requestStarted = false;
     timer.async_wait([&](std::error_code error) {
         if (!error) {
             timedOut = true;
@@ -190,6 +203,9 @@ TResponse SendRequest(const TRequest& request)
         stream.next_layer().close(ignored);
     };
     auto exchange = [&](auto& connection) {
+        // Once transmission starts, a failed write can leave a partial request at
+        // the peer. Resolution, connection, policy and TLS failures precede this.
+        requestStarted = true;
         asio::async_write(connection,
             asio::buffer(bytes),
             [&, connectionPtr = &connection](const std::error_code& error, size_t) {
@@ -207,7 +223,7 @@ TResponse SendRequest(const TRequest& request)
                         }
                         try {
                             const auto frame = ParseResponse(wire, false);
-                            const auto length = Number(frame.Headers.at("content-length"));
+                            const auto length = Number(frame.Headers.at("content-length").front());
                             const auto remaining = length - (wire.size() - wire.find("\r\n\r\n") - 4);
                             if (remaining == 0) {
                                 finish({});
@@ -265,13 +281,18 @@ TResponse SendRequest(const TRequest& request)
                 });
         });
     io.run();
-    Check(!timedOut, "request timed out; write outcome may be unknown; reconcile using operation ID");
+    if (timedOut) {
+        failure = std::make_exception_ptr(std::runtime_error("request timed out"));
+    }
     if (failure) {
         try {
             std::rethrow_exception(failure);
         } catch (const std::exception& error) {
-            throw std::runtime_error(
-                std::string(error.what()) + "; write outcome may be unknown; reconcile using operation ID");
+            if (requestStarted && request.Method == "POST") {
+                throw TOutcomeUnknown(
+                    std::string(error.what()) + "; write outcome may be unknown; reconcile using operation ID");
+            }
+            throw;
         }
     }
     return response;

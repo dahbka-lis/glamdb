@@ -40,10 +40,13 @@ glamdb-cli request --path /databases/DATABASE_UUID/collections/COLLECTION_UUID/s
 
 `request` defaults to GET, or POST with `--body FILE` (`-` reads stdin).
 `--method`, `--url`, `--host` and `--port` are explicit. It writes the exact response
-bytes and exits nonzero for HTTP, transport or output failures; it never retries.
+bytes and never retries. Exit 1 denotes HTTP or pre-send transport failure, 2 CLI
+usage error, 3 an uncertain POST delivery, and 4 output failure after a complete
+HTTP response. Preserve the original operation ID when delivery is uncertain.
 `--accept application/vnd.apache.arrow.stream --output result.arrow --headers headers.json`
 retains binary Arrow and cursor/checksum metadata. HTTP is loopback-only; remote
-CLI and SDK access use verified HTTPS through a TLS reverse proxy.
+CLI and SDK access use verified HTTPS through a TLS reverse proxy. The server uses
+system OpenSSL Crypto for page SHA-256 checksums.
 
 ## Database lifecycle
 
@@ -60,7 +63,7 @@ Close/reconcile take `{}`; open accepts `{limits?:object}`. All routes require t
 routes in the next table are relative to `/databases/{id}` in managed mode;
 `GET /capabilities` at the server root advertises `features.database_management`.
 A database response contains `{database_id,name,state,limits,store?,error?}`; states are
-`open`, `closed`, `closing`, `error`. Lists contain `{items,next_cursor:null}`.
+`open`, `closed`, `opening`, `closing`, `reconciling`, `error`. Lists contain `{items,next_cursor:null}`.
 Names are unique, case-sensitive UTF-8 (1–128 bytes, no NUL or path separators).
 At most 64 databases are registered. Paths are generated from UUIDs under
 `--data-dir/databases`; clients cannot provide filesystem paths. Database and
@@ -95,30 +98,33 @@ entry and open again with sufficient limits; data is never discarded.
 
 Values are JSON integers; booleans, fractions, unknown fields and values outside
 these bounds are rejected before reserving a database. Every database response
-includes normalized limits, including closed/error states. The service registry
-upgrades transactionally from version 1 to 2, supplying defaults to existing
-entries. Older server binaries reject version 2; core store formats are unchanged.
+includes normalized limits, including closed/error states. The service registry is created directly in version 2; core store formats are unchanged.
 
 A separate `registry.sqlite` records identities and intended open state, using
 verified SQLite DELETE/EXTRA settings. The registry does not contain collection
-catalogs or data. A failed registry write blocks lifecycle mutations until restart,
-since its commit may be uncertain; it never triggers speculative store creation.
+catalogs or data. A definitely rolled-back registry write can be retried. An uncertain registry write
+blocks further lifecycle mutations until restart; outcome lookup and core reconciliation
+remain available for owned engines. Service initialization builds and syncs the complete
+registry before publishing it. Explicit create can retry an incomplete, uninitialized
+store reservation by preserving its files under an `incomplete-...` sibling. It never
+replaces an initialized store.
 A missing registry in a nonempty directory fails startup. Each service directory
 has one process owner; each core store retains its own identity and owner lock.
 Use an absolute canonical data path with an existing parent on trusted local disk.
 
 Open databases reopen on restart; explicitly closed databases stay closed. A
 failed store open is listed as an error while other databases remain usable.
-Close persists the intent to remain closed before shutdown. Failed shutdown
-retains the engine and its ownership in `closing`; fix the reported storage issue
-and retry close before reopening. Reconciliation does not undo shutdown. A client
+Close persists the intent to remain closed before shutdown. A shutdown deadline retains ownership in `closing`; retry close after calls drain.
+A terminal readiness error releases the drained engine so close/reopen can recover. Reconciliation does not undo shutdown. A client
 timeout does not roll back lifecycle changes: inspect state or retry the same
 action. Per-database leases drain accepted calls and reject new calls during
 close/reconcile; unrelated databases remain usable within the fixed worker pool.
-Database info/list requests wait for concurrent lifecycle changes. Failed core
+Database info/list requests read immutable descriptors without waiting for lifecycle changes.
+Repeated open/create of an already healthy database does not drain active calls. Failed core
 reconciliation preserves outcome lookup while core readiness rejects unsafe work.
-The workbench clears query results, schema caches and mutation drafts on database
-switch, and ignores replies from the previous session.
+The workbench clears query results and schema caches on database switch and ignores
+stale replies. It retains unresolved operation IDs and payloads per database until
+resolved or disconnected, and offers reconciliation in the active workspace.
 
 ## Contract and ownership
 
@@ -210,15 +216,15 @@ the ordinary scan body and chosen Accept header. Its JSON response contains
 `{cursor,schema,snapshot_id,identity}` and consumes no rows. Use that cursor for
 the first page. The last consumed cursor replays exactly the same response;
 advancing invalidates older cursors. A lost response to ordinary `/scan` without
-a cursor cannot be replayed: opening again creates a new scan. The SDK's
-`scan_pages()` uses the explicit open protocol.
+a cursor cannot be replayed: opening again creates a new scan. The SDK's scan entry points and the workbench use the explicit open protocol.
 
 `POST .../scan/cancel {"cursor":"TOKEN"}` accepts either the next or most recently
 consumed cursor and returns `{"cancelled":true}`. Tokens are scoped to database,
 collection and representation; stale or missing tokens return 404, never restart
-queries. Eight sessions are available across the server. Idle sessions expire
-after 60 seconds (checked every second); completed replay caches may be evicted
-to admit new scans. A failed page invalidates its session. Close, reconciliation
+queries. Each database has eight sessions within a server limit of 64. Idle sessions expire
+after 60 seconds (checked every second); replay does not refresh that deadline. All
+sessions expire after five minutes. Retained response bodies have a shared 128 MiB
+budget; completed replay caches may be evicted to admit new scans. A failed page invalidates its session. Close, reconciliation
 and shutdown release sessions after admitted calls drain. Cancellation releases
 between page calls; it does not interrupt an active filesystem read.
 
@@ -232,24 +238,39 @@ it does not register an operation. No implicit retry occurs in server or CLI.
 
 Errors are `{error:{code,message,retry_hint}}`, with the core retry hint unchanged.
 400 invalid request, 401 authentication, 404 authoritative absence, 409 conflict,
-412 precondition, 413 oversized body, 415 media type, 429 capacity, 501 unsupported,
-503 recovery/dependency/unresolved outcome, 500 unexpected/storage error.
+412 precondition, 413 oversized body, 415 media type, 429 bounded resource admission,
+501 unsupported, 503 recovery/dependency/unresolved outcome, 504 deadline,
+507 storage capacity, 500 corruption/unexpected error. Database, collection and
+operation absence have distinct codes; only `OPERATION_NOT_FOUND` proves an
+operation lookup absent. Transport errors carry the shared retry policy; unexpected
+write failures preserve the original ID for outcome resolution.
 Collections accept `page_size` 1..1000; insufficient size or any cursor returns
 501 rather than silently dropping entries or inventing an unstable cursor.
 
 ## HTTP service profile
 
-Standalone Asio provides asynchronous sockets, timers and signals. A fixed pool
-of four workers calls core; at most 16 connections bound the queue. Saturation
-closes new connections before admission. Core retains its single serialized
-writer. Header/body timeout defaults to 10 seconds (`--request-timeout-ms`);
-response writes have 30 seconds. Header limit: 16 KiB; request/response: 16 MiB;
-append: 10000 rows. Scan responses are bounded pages. JSON depth/node limits also bound parsing.
-These transport bounds are not a qualified process-memory or storage budget.
+Standalone Asio provides asynchronous sockets, timers and signals. Four data workers
+admit at most two concurrent calls per database. Two lifecycle workers and two
+control/static workers keep database descriptors and outcome lookup independent of
+long data calls; health and global capabilities run on the I/O thread. Core retains
+its single serialized writer. Overload returns 503 with `Retry-After: 1` within the
+bounded response capacity. There are at most 64 header readers (32 per peer), 16
+admitted request bodies and 96 total connections, including overload responses;
+connections beyond the final ceiling are closed. Header reads have at most one
+second; body reads use `--request-timeout-ms` (default 10 seconds), and response
+writes have five seconds. Read deadlines never cancel admitted core work.
+Transient accept failures retry with backoff. Header limit: 16 KiB; request/response:
+16 MiB; append: 10000 rows. JSON depth and event limits bound a single-pass parser
+and accommodate the full 256-field append schema. These transport bounds are not
+a qualified process-memory or storage budget.
 
 HTTP/1.1 uses Content-Length and closes each response connection. Duplicate
-headers, folded headers, Transfer-Encoding, Expect, compressed requests and
-pipelined bytes are rejected; keep-alive and chunked requests are not supported.
+headers, folded headers, Transfer-Encoding, compressed requests and pipelined bytes
+are rejected; keep-alive and chunked requests are not supported. `Expect: 100-continue`
+is acknowledged after authentication and body admission. Oversized headers return
+431, malformed line endings 400, and read timeouts 408. JSON Content-Type accepts
+case-insensitive media names and UTF-8 charset parameters. Scan Accept supports
+media lists, wildcards and quality weights.
 Use ordinary buffered JSON requests. The server defaults to 127.0.0.1:8080.
 `--listen` is explicit; terminate TLS and apply deployment limits at a trusted
 reverse proxy for remote access. There is one bearer identity, no user/RBAC layer.
@@ -319,7 +340,11 @@ its Python environment through `GLAMDB_NATIVE_PYTHON` if needed.
 `glamdb.native_http_fault` uses the production managed HTTP service and real
 storage with a test-only SQLite VFS control channel. It covers faults before/after
 create, append and registry COMMIT, failed recovery fencing, failure recording,
-producer path corruption, and close waiting for an admitted native append.
+producer path corruption, descriptor exhaustion, and close waiting for an admitted
+native append. `glamdb.http_review` checks HTTP error responses, Expect handshakes,
+idle-header admission, media negotiation and canonical scoped dispatch.
 `glamdb.scan_http` covers fixed-view pages beyond 100000 rows and 16 MiB, response
-replay, scope, cancellation, expiry, resource capacity, and real read corruption.
+replay, scope, cancellation, expiry, resource capacity, small-batch IPC, abandoned
+SDK iterators and real read corruption. Scan session tests also pause a real Parquet
+read while another database progresses and enforce the shared replay byte budget.
 These deterministic checks are separate from physical power-loss qualification.

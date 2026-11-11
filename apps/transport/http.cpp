@@ -75,7 +75,9 @@ TRequest ParseHeaders(std::string_view bytes)
     }
     Require(result.Headers.contains("host") && !result.Headers.at("host").empty(), "Host is required");
     Require(!result.Headers.contains("transfer-encoding"), "Transfer-Encoding is unsupported");
-    Require(!result.Headers.contains("expect"), "Expect is unsupported");
+    Require(!result.Headers.contains("expect") || Lower(result.Headers.at("expect")) == "100-continue",
+        "unsupported expectation",
+        "EXPECTATION_FAILED");
     Require(!result.Headers.contains("content-encoding") || result.Headers.at("content-encoding") == "identity",
         "compressed requests are unsupported");
     if (result.Headers.contains("content-length")) {
@@ -87,7 +89,7 @@ TRequest ParseHeaders(std::string_view bytes)
     return result;
 }
 
-std::string SerializeResponse(const TResponse& response)
+std::string SerializeResponseHead(const TResponse& response)
 {
     std::string output = "HTTP/1.1 " + std::to_string(response.Status) +
         " Response\r\nContent-Type: " + response.ContentType +
@@ -97,12 +99,13 @@ std::string SerializeResponse(const TResponse& response)
     for (const auto& [name, value] : response.Headers) {
         output.append(name).append(": ").append(value).append("\r\n");
     }
-    return output + "\r\n" + response.Body;
+    return output + "\r\n";
 }
 
-TResponse ErrorResponse(int status, std::string_view code, std::string_view message)
+TResponse ErrorResponse(int status, std::string_view code, std::string_view message, std::optional<RetryHint> hint)
 {
-    return {status, EncodeError({std::string(code), std::string(message)}).dump()};
+    return {status,
+        EncodeError({std::string(code), std::string(message), hint.value_or(ErrorPolicy(code).Hint)}).dump()};
 }
 
 namespace {
@@ -140,6 +143,9 @@ std::string DecodeUrl(std::string_view text)
 std::pair<std::string, std::map<std::string, std::string>> ParseTarget(std::string_view target)
 {
     const auto question = target.find('?');
+    const auto rawPath = target.substr(0, question);
+    Require(rawPath.find("%2f") == std::string_view::npos && rawPath.find("%2F") == std::string_view::npos,
+        "escaped path separators are unsupported");
     std::pair<std::string, std::map<std::string, std::string>> result{DecodeUrl(target.substr(0, question)), {}};
     if (question == std::string_view::npos) {
         return result;

@@ -72,7 +72,7 @@ class DatabaseLimits(unittest.TestCase):
         self.api(append, {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'two'}]}, 429)
         self.assertEqual(self.api('/databases', {'name': 'limited'})['limits'], limits)
         self.api('/databases', {'name': 'limited', 'limits': {'max_collections': 2}}, 409)
-        self.api(base + '/open', {'limits': {'max_collections': 2}}, 409)
+        self.api(base + '/open', {'limits': {'max_collections': 2}}, 429)
         self.assertEqual(self.api(base + '/close', {})['limits'], limits)
         self.stop()
         self.start()
@@ -115,7 +115,7 @@ class DatabaseLimits(unittest.TestCase):
         self.collection(base, 'one')
         self.collection(base, 'two')
         self.api(base + '/close', {})
-        self.api(base + '/open', {'limits': {'max_collections': 1}}, 500)
+        self.api(base + '/open', {'limits': {'max_collections': 1}}, 400)
         failed = self.api(base)
         self.assertEqual(failed['state'], 'error')
         self.assertEqual(failed['limits']['max_collections'], 1)
@@ -127,27 +127,18 @@ class DatabaseLimits(unittest.TestCase):
         self.api(base + '/open', {'limits': {'max_collections': 2}})
         self.assertEqual(len(self.api(base + '/collections')['items']), 2)
 
-    def test_version_one_registry_migrates_defaults_without_losing_database(self):
-        database = self.api('/databases', {'name': 'legacy'})
+    def test_new_registry_has_complete_schema_without_migration(self):
+        database = self.api('/databases', {'name': 'complete'})
         base = '/databases/' + database['database_id']
-        collection = self.collection(base, 'preserved')
         self.api(base + '/close', {})
         self.stop()
         with sqlite3.connect(Path(self.directory) / 'registry.sqlite') as registry:
-            registry.execute('ALTER TABLE databases RENAME TO newer_databases')
-            registry.execute('CREATE TABLE databases(id TEXT PRIMARY KEY NOT NULL, name TEXT UNIQUE NOT NULL, '
-                             'initialized INTEGER NOT NULL CHECK(initialized IN (0,1)), '
-                             'auto_open INTEGER NOT NULL CHECK(auto_open IN (0,1))) STRICT')
-            registry.execute('INSERT INTO databases SELECT id,name,initialized,auto_open FROM newer_databases')
-            registry.execute('DROP TABLE newer_databases')
-            registry.execute('PRAGMA user_version=1')
-        self.start()
-        self.assertEqual(self.api(base)['limits'], DEFAULTS)
-        self.assertEqual(self.api(base)['state'], 'closed')
-        self.api(base + '/open', {})
-        self.assertEqual(self.api(base + '/collections')['items'][0]['collection_id'], collection['collection_id'])
-        with sqlite3.connect(Path(self.directory) / 'registry.sqlite') as registry:
             self.assertEqual(registry.execute('PRAGMA user_version').fetchone()[0], 2)
+            limits = registry.execute('SELECT limits FROM databases').fetchone()[0]
+            self.assertEqual(json.loads(limits), DEFAULTS)
+        self.start()
+        self.assertEqual(self.api(base)['state'], 'closed')
+        self.assertEqual(self.api(base)['limits'], DEFAULTS)
 
 
 if __name__ == '__main__':

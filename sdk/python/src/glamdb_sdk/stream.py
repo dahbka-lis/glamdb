@@ -132,6 +132,7 @@ class ScanStream:
         self._reader = None
         self._source = None
         self._closed = False
+        self._failure = None
         self.integrity = "not_complete"
         self.checksum_verified = False
         self.schema: pa.Schema
@@ -214,6 +215,12 @@ class ScanStream:
                 if maximum is not None and maximum > (1024 if field.name == "key" else 1024**2):
                     raise ProtocolError("Arrow string exceeds UTF-8 value byte limit")
 
+    def __del__(self):
+        try:
+            self.close()
+        except BaseException:
+            pass
+
     @property
     def closed(self) -> bool:
         return self._closed
@@ -237,6 +244,8 @@ class ScanStream:
         return self
 
     def __next__(self) -> pa.RecordBatch:
+        if self._failure is not None:
+            raise self._failure
         if self._closed:
             raise StopIteration
         try:
@@ -256,12 +265,14 @@ class ScanStream:
             raise
         except BaseException as exc:
             failure = self._source.failure
-            self._close_preserving_error()
             if failure is not None:
-                raise failure
-            if isinstance(exc, (pa.ArrowException, OSError)):
-                raise IntegrityError("could not decode complete Arrow IPC batch", collection_id=self._budget.collection_id) from exc
-            raise
+                self._failure = failure
+            elif isinstance(exc, (pa.ArrowException, OSError)):
+                self._failure = IntegrityError("could not decode complete Arrow IPC batch", collection_id=self._budget.collection_id)
+            else:
+                self._failure = exc
+            self._close_preserving_error()
+            raise self._failure
 
     def _close_preserving_error(self) -> None:
         try:
@@ -297,6 +308,7 @@ class PagedScanStream:
         self._cancel = cancel
         self._on_close = on_close
         self._closed = False
+        self._failure = None
         self._bytes = 0
         self._verified = True
         self.schema = first.schema
@@ -304,6 +316,12 @@ class PagedScanStream:
         self.integrity = 'not_complete'
         self.checksum_verified = False
         self._cursor = first._response.headers.get('x-glamdb-next-cursor')
+
+    def __del__(self):
+        try:
+            self.close()
+        except BaseException:
+            pass
 
     @property
     def closed(self):
@@ -325,6 +343,8 @@ class PagedScanStream:
         return self
 
     def __next__(self):
+        if self._failure is not None:
+            raise self._failure
         if self.closed:
             raise StopIteration
         try:
@@ -354,8 +374,12 @@ class PagedScanStream:
                     self._cursor = cursor
         except StopIteration:
             raise
-        except BaseException:
-            self.close()
+        except BaseException as exc:
+            self._failure = exc
+            try:
+                self.close()
+            except BaseException:
+                pass
             raise
 
     def close(self):

@@ -14,6 +14,94 @@
 namespace glamdb::NServer {
 using namespace NTransport;
 namespace {
+std::string Normalized(std::string_view text)
+{
+    const auto first = text.find_first_not_of(" \t");
+    if (first == std::string_view::npos) {
+        return {};
+    }
+    std::string result(text.substr(first, text.find_last_not_of(" \t") - first + 1));
+    for (auto& c : result) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c + ('a' - 'A'));
+        }
+    }
+    return result;
+}
+bool IsJsonContentType(std::string_view text)
+{
+    const auto semi = text.find(';');
+    if (Normalized(text.substr(0, semi)) != "application/json") {
+        return false;
+    }
+    if (semi == std::string_view::npos) {
+        return true;
+    }
+    const auto parameter = text.substr(semi + 1);
+    const auto equals = parameter.find('=');
+    if (equals == std::string_view::npos || Normalized(parameter.substr(0, equals)) != "charset") {
+        return false;
+    }
+    const auto value = Normalized(parameter.substr(equals + 1));
+    return value == "utf-8" || value == "\"utf-8\"";
+}
+std::optional<bool> ArrowAccepted(std::string_view text)
+{
+    struct TChoice
+    {
+        int Specificity = -1;
+        int Quality = 0;
+    };
+    TChoice json, arrow;
+    while (!text.empty()) {
+        const auto comma = text.find(',');
+        auto item = text.substr(0, comma);
+        const auto semi = item.find(';');
+        const auto media = Normalized(item.substr(0, semi));
+        int quality = 1000;
+        if (semi != std::string_view::npos) {
+            const auto parameter = item.substr(semi + 1);
+            const auto equals = parameter.find('=');
+            Require(equals != std::string_view::npos && Normalized(parameter.substr(0, equals)) == "q",
+                "invalid Accept parameter");
+            const auto value = Normalized(parameter.substr(equals + 1));
+            Require(!value.empty() && (value[0] == '0' || value[0] == '1') &&
+                    (value.size() == 1 || (value.size() <= 5 && value[1] == '.')),
+                "invalid Accept quality");
+            quality = value[0] == '1' ? 1000 : 0;
+            int scale = 100;
+            for (size_t i = 2; i < value.size(); ++i) {
+                Require(value[i] >= '0' && value[i] <= '9' && (value[0] != '1' || value[i] == '0'),
+                    "invalid Accept quality");
+                quality += (value[i] - '0') * scale;
+                scale /= 10;
+            }
+        }
+        const auto match = [&](std::string_view type, TChoice& choice) {
+            const int specificity = media == type ? 2 : media == "application/*" ? 1 : media == "*/*" ? 0 : -1;
+            if (specificity > choice.Specificity || (specificity == choice.Specificity && quality > choice.Quality)) {
+                choice = {specificity, quality};
+            }
+        };
+        match("application/json", json);
+        match("application/vnd.apache.arrow.stream", arrow);
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        text.remove_prefix(comma + 1);
+    }
+    if (json.Specificity < 0) {
+        json.Quality = 0;
+    }
+    if (arrow.Specificity < 0) {
+        arrow.Quality = 0;
+    }
+    if (json.Quality == 0 && arrow.Quality == 0) {
+        return {};
+    }
+    return arrow.Quality > json.Quality;
+}
+
 bool IsApiPath(std::string_view path)
 {
     return path == "/databases" || path.starts_with("/databases/") || path == "/capabilities" ||
@@ -108,15 +196,37 @@ TResponse TRoutes::Handle(const TRequest& request) const
     } catch (const std::bad_alloc&) {
         return ErrorResponse(503,
             "RESOURCE_EXHAUSTED",
-            "request allocation failed; resolve write outcome by original ID");
+            "request allocation failed; resolve write outcome by original ID",
+            RetryHint::SameIdAfterReconcile);
     } catch (const std::exception&) {
-        return ErrorResponse(500, "INTERNAL", "request failed; resolve write outcome by original ID");
+        return ErrorResponse(500,
+            "INTERNAL",
+            "request failed; resolve write outcome by original ID",
+            RetryHint::SameIdAfterReconcile);
     }
 }
 
 TResponse TRoutes::Route(const TRequest& request) const
 {
     const auto [path, query] = ParseTarget(request.Target);
+    TJson body;
+    if (request.Method == "POST") {
+        const auto type = request.Headers.find("content-type");
+        if (type == request.Headers.end() || !IsJsonContentType(type->second)) {
+            return ErrorResponse(415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json");
+        }
+        Require(query.empty(), "POST query parameters are unsupported");
+        body = ParseJson(request.Body);
+        Require(body.is_object(), "request body must be an object");
+    }
+    return RoutePrepared(request, path, query, body);
+}
+
+TResponse TRoutes::RoutePrepared(const TRequest& request,
+    const std::string& path,
+    const std::map<std::string, std::string>& query,
+    const TJson& body) const
+{
     if (request.Method != "GET" && request.Method != "POST") {
         return ErrorResponse(405, "METHOD_NOT_ALLOWED", "use GET or POST");
     }
@@ -153,21 +263,12 @@ TResponse TRoutes::Route(const TRequest& request) const
                     {"response_bytes", MaxResponseBytes},
                     {"append_rows", 10000},
                     {"scan_page_rows", 10000},
-                    {"scan_sessions", 8},
+                    {"scan_sessions", 64},
+                    {"scan_sessions_per_database", 8},
+                    {"scan_lifetime_seconds", 300},
+                    {"scan_replay_bytes", 128ULL * 1024 * 1024},
                     {"scan_idle_seconds", 60},
                     {"batch_rows", 65536}}}});
-    }
-    TJson body;
-    if (request.Method == "POST") {
-        const auto type = request.Headers.find("content-type");
-        if (type == request.Headers.end() ||
-            (type->second != "application/json" && type->second != "application/json; charset=utf-8"))
-        {
-            return ErrorResponse(415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json");
-        }
-        Require(query.empty(), "POST query parameters are unsupported");
-        body = ParseJson(request.Body);
-        Require(body.is_object(), "request body must be an object");
     }
     if (path == "/databases" || path.starts_with("/databases/")) {
         Require(static_cast<bool>(Databases_), "database management requires --data-dir", "UNSUPPORTED_OPERATION");
@@ -188,21 +289,21 @@ TResponse TRoutes::Route(const TRequest& request) const
         Require(parts.size() >= 3 &&
                 (parts[2] == "collections" || parts[2] == "collections:resolve" || parts[2] == "capabilities"),
             "route not found",
-            "NOT_FOUND");
-        // Dispatch using the raw suffix: percent decoding must happen exactly once.
-        const auto rawPath = request.Target.substr(0, request.Target.find('?'));
-        const auto first = rawPath.find('/', 1);
-        const auto second = first == std::string::npos ? first : rawPath.find('/', first + 1);
-        Require(second != std::string::npos, "invalid database route");
-        auto scoped = request;
-        scoped.Target = request.Target.substr(second);
-        return Databases_->Use(parts[1], [&](const auto& engine) {
-            auto routes = *this;
-            routes.Engine_ = engine;
-            routes.Databases_.reset();
-            routes.DatabaseID_ = parts[1];
-            return routes.Handle(scoped);
-        });
+            "ROUTE_NOT_FOUND");
+        // Validation and dispatch use the same once-decoded path and parsed body.
+        const auto suffix = path.substr(path.find('/', std::string("/databases/").size()));
+        const bool recoveryOnly = (request.Method == "GET" && parts.size() == 6 && parts[4] == "operations") ||
+            (request.Method == "POST" && parts.size() == 6 && parts[4] == "scan" && parts[5] == "cancel");
+        return Databases_->Use(
+            parts[1],
+            [&](const auto& engine) {
+                auto routes = *this;
+                routes.Engine_ = engine;
+                routes.Databases_.reset();
+                routes.DatabaseID_ = parts[1];
+                return routes.RoutePrepared(request, suffix, query, body);
+            },
+            recoveryOnly);
     }
     Require(static_cast<bool>(Engine_), "select a database using /databases/{id}", "DATABASE_REQUIRED");
     if (request.Method == "GET" && path == "/collections:resolve") {
@@ -241,13 +342,13 @@ TResponse TRoutes::Route(const TRequest& request) const
                 ParseSchema(body.at("schema"))})));
     }
     const auto parts = Split(path);
-    Require(parts.size() >= 2 && parts[0] == "collections", "route not found", "NOT_FOUND");
+    Require(parts.size() >= 2 && parts[0] == "collections", "route not found", "ROUTE_NOT_FOUND");
     const auto& id = parts[1];
     if (request.Method == "GET" && parts.size() == 4 && parts[2] == "operations") {
         Require(query.empty(), "unknown query parameter");
         auto outcome = Unwrap(Engine_->FindAppendOutcome(id, parts[3]));
         if (!outcome.has_value()) {
-            throw TFailure({"NOT_FOUND", "operation not found"});
+            throw TFailure({"OPERATION_NOT_FOUND", "operation not found"});
         }
         return OutcomeResponse(json_adapter::ToJson(*outcome));
     }
@@ -258,7 +359,19 @@ TResponse TRoutes::Route(const TRequest& request) const
         Require(query.empty(), "unknown query parameter");
         return Scans_->Cancel(DatabaseID_, id, body);
     }
-    const auto info = Unwrap(Engine_->GetCollection(id));
+    auto collection = Engine_->GetCollection(id);
+    if (!collection && collection.error().code == "RECOVERY_REQUIRED" && request.Method == "POST" &&
+        parts.size() == 3 && action == "append")
+    {
+        CheckKeys(body, {"operation_id", "rows", "expected_snapshot"});
+        auto known = Unwrap(Engine_->FindAppendOutcome(id, body.at("operation_id").get<std::string>()));
+        // Report uncertainty with the original recovery identity. Never return a
+        // terminal receipt without validating the retry payload against schema.
+        if (known && known->disposition == CommitDisposition::CommitUnknown) {
+            return OutcomeResponse(json_adapter::ToJson(*known));
+        }
+    }
+    const auto info = Unwrap(std::move(collection));
     if ((action == "stats" || action == "snapshots" || action == "files" || action == "explain")) {
         throw TFailure({"UNSUPPORTED_OPERATION", "native metadata/explain API is not available; inspect capabilities"});
     }
@@ -286,21 +399,17 @@ TResponse TRoutes::Route(const TRequest& request) const
             return OutcomeResponse(json_adapter::ToJson(Engine_->AppendDurable(append)));
         }
         if (action == "scan") {
-            Require(parts.size() == 3 || parts[3] == "open", "route not found", "NOT_FOUND");
+            Require(parts.size() == 3 || parts[3] == "open", "route not found", "ROUTE_NOT_FOUND");
             const auto accept = request.Headers.find("accept");
             const auto media = accept == request.Headers.end() ? "application/json" : accept->second;
-            if (media != "application/json" && media != "*/*" && media != "application/vnd.apache.arrow.stream") {
+            const auto arrow = ArrowAccepted(media);
+            if (!arrow.has_value()) {
                 return ErrorResponse(406, "NOT_ACCEPTABLE", "use JSON or Arrow stream");
             }
-            return Scans_->Open(Engine_,
-                DatabaseID_,
-                id,
-                body,
-                media == "application/vnd.apache.arrow.stream",
-                parts.size() == 4);
+            return Scans_->Open(Engine_, DatabaseID_, id, body, *arrow, parts.size() == 4);
         }
     }
-    return ErrorResponse(404, "NOT_FOUND", "route not found");
+    return ErrorResponse(404, "ROUTE_NOT_FOUND", "route not found");
 }
 
 void TRoutes::CancelScans() const

@@ -38,7 +38,9 @@ are implemented. They can use the native Asio HTTP server over the public Engine
 `--data-dir` starts with no databases; authenticated API/UI operations create,
 list, open, close and reconcile databases. A separate SQLite service registry
 stores identities, persisted engine limits and open intent; collection/data writes remain in core.
-Scans use bounded fixed-view pages with replay, expiry and explicit cancellation.
+Scans use bounded fixed-view pages with per-database quotas, finite replay retention,
+expiry and explicit cancellation. Separate HTTP data, lifecycle and control workers
+keep healthy databases and descriptors available during long operations.
 The network CLI also builds independently with OpenSSL; optional offline commands
 are in `apps/admin` and never required for server initialization.
 Collection routes are scoped by `/databases/{id}`; optional legacy
@@ -212,7 +214,8 @@ ctest --preset local
 
 The application links the pinned SQLite, Arrow and Iceberg installation. Tests
 also require GoogleTest. Applications use pinned header-only CLI11, Asio and nlohmann/json submodules;
-The independent network client also uses system OpenSSL for verified TLS.
+The network client uses system OpenSSL for verified TLS; the server uses its Crypto
+component for Arrow page checksums.
 These dependencies are not part of the public engine API or dependency installation. Use `release`
 or `asan-ubsan` in place of `local` for the corresponding configure, build, and
 test presets. `GLAMDB_BUILD_STORAGE` defaults to `ON` (unless `GLAMDB_IO_ONLY=ON`)
@@ -346,7 +349,9 @@ and separation from privileged release credentials. For vulnerabilities, follow
 Keep `.github/allowed-actions.json` and GitHub's selected Actions setting in sync;
 an unlisted Action prevents the entire workflow from starting.
 
-Native HTTP verification: configure `Python3_EXECUTABLE` with SDK, PyArrow and
+Native HTTP verification includes `glamdb.http_review` for framing/admission and
+`glamdb.native_http_fault` for registry, publication and listener recovery faults.
+Configure `Python3_EXECUTABLE` with SDK, PyArrow and
 JSON Schema dependencies (`requirements-native-ci.txt` for the CI Python/platform),
 then run `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 ctest --preset local -R 'glamdb\.(native_http|transport\.|cli)'`.
 The server requires `GLAMDB_BUILD_STORAGE=ON`; storage-disabled builds retain

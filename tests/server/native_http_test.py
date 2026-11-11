@@ -162,9 +162,9 @@ class NativeHTTP(unittest.TestCase):
         base = '/databases/' + self.store_id
         self.api(base + '/close', {})
         Path(self.root).rename(self.root + '.saved')
-        self.api(base + '/open', {}, status=500)
+        self.api(base + '/open', {}, status=409)
         self.assertEqual(self.api(base)['state'], 'error')
-        self.api('/databases', {'name': 'test_database'}, status=500)
+        self.api('/databases', {'name': 'test_database'}, status=409)
         self.assertFalse(Path(self.root).exists())
         Path(self.root + '.saved').rename(self.root)
         self.assertEqual(self.api(base + '/open', {})['state'], 'open')
@@ -229,7 +229,7 @@ class NativeHTTP(unittest.TestCase):
         with socket.create_connection(('127.0.0.1', self.port)) as slow:
             slow.settimeout(4)
             slow.sendall(b'GET /healthz HTTP/1.1\r\n')
-            self.assertEqual(slow.recv(4096), b'')
+            self.assertIn(b' 408 ', slow.recv(4096))
         self.assertEqual(self.request('/healthz')[0], 200)
 
     def test_validation_capabilities_and_arrow(self):
@@ -403,7 +403,16 @@ class NativeHTTP(unittest.TestCase):
         path = self.collection()
         requests = [{'operation_id': str(uuid.uuid4()), 'rows': [{'key': str(i)}]} for i in range(8)]
         with ThreadPoolExecutor(max_workers=8) as workers:
-            outcomes = list(workers.map(lambda body: self.api(path + '/append', body), requests))
+            responses = list(workers.map(lambda body: self.request(path + '/append', body), requests))
+        outcomes = []
+        for body, (status, _, data) in zip(requests, responses):
+            if status == 503:
+                self.assertEqual(json.loads(data)['error']['code'], 'SERVER_BUSY')
+                # Explicitly retry admission backpressure with the original ID.
+                outcomes.append(self.api(path + '/append', body))
+            else:
+                self.assertEqual(status, 200, data)
+                outcomes.append(json.loads(data))
         self.assertEqual(len({item['result']['snapshot_id'] for item in outcomes}), 8)
         rows = self.api(path + '/scan', {})['rows']
         self.assertEqual(sorted(row['key'] for row in rows), list(map(str, range(8))))

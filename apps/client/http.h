@@ -1,6 +1,8 @@
 #pragma once
 #include <map>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace glamdb::NClient {
 struct TRequest
@@ -16,8 +18,13 @@ struct TRequest
 struct TResponse
 {
     int Status = 0;
-    std::map<std::string, std::string> Headers;
+    std::map<std::string, std::vector<std::string>> Headers;
     std::string Body;
+};
+class TOutcomeUnknown : public std::runtime_error
+{
+public:
+    using std::runtime_error::runtime_error;
 };
 TResponse SendRequest(const TRequest& request);
 }

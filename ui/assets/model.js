@@ -41,6 +41,24 @@ export function resetConnection(state) {
         creation: null,
     };
 }
+// Keep frozen write identities only within this authenticated connection.
+// A disconnect still uses resetConnection and discards every database draft.
+export function switchDatabase(state, database) {
+    const drafts = new Map(state.databaseDrafts ?? []);
+    if (state.database) {
+        drafts.set(state.database.database_id, {
+            operations: state.operations,
+            mutation: state.mutation,
+            creation: state.creation,
+        });
+    }
+    return {
+        ...resetConnection(state),
+        databaseDrafts: drafts,
+        database,
+        ...(drafts.get(database?.database_id) ?? {}),
+    };
+}
 export function selectView(state, collectionId, snapshotId = null) {
     return {
         ...state,

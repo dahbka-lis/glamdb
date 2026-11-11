@@ -121,11 +121,56 @@ TEST(Transport, PreservesJsonDepthAndEventBoundaries)
     EXPECT_THROW(ParseJson(std::string(34, '[') + std::string(34, ']')), TFailure);
     // Container start/end each count once, exactly like the original callback.
     std::string input = "[0";
-    for (size_t i = 1; i < 999998; ++i) {
+    for (size_t i = 1; i < MaxJsonEvents - 2; ++i) {
         input += ",0";
     }
-    EXPECT_EQ(ParseJson(input + "]").size(), 999998U);
+    EXPECT_EQ(ParseJson(input + "]").size(), MaxJsonEvents - 2);
     EXPECT_THROW(ParseJson(input + ",0]"), TFailure);
+}
+TEST(Transport, AcceptsAdvertisedWideAppendAndTypedValues)
+{
+    TJson row = TJson::object();
+    SchemaSpec schema;
+    for (int i = 0; i < 49; ++i) {
+        const auto name = "field" + std::to_string(i);
+        schema.fields.push_back({name, FieldType::Int64, false});
+        row[name] = "1";
+    }
+    auto rows = TJson::array();
+    for (int i = 0; i < 10000; ++i) {
+        rows.push_back(row);
+    }
+    auto parsed = ParseJson(TJson({{"rows", rows}}).dump());
+    const auto batch = ParseRows(schema, parsed["rows"]);
+    EXPECT_EQ(batch->num_rows(), 10000);
+    EXPECT_EQ(batch->num_columns(), 49);
+    const SchemaSpec types{
+        {{"flag", FieldType::Bool, false}, {"f", FieldType::Float64, true}, {"ts", FieldType::TimestampUsUtc, false}}};
+    const auto typed = ParseRows(types, ParseJson(R"([{"flag":true,"f":1.25,"ts":"2026-01-01T01:30:00.123+01:30"}])"));
+    EXPECT_EQ(EncodeRows(*typed)[0]["ts"], "2026-01-01T00:00:00.123000Z");
+    EXPECT_EQ(EncodeRows(*typed)[0]["flag"], true);
+    EXPECT_THROW(ParseRows(types, ParseJson(R"([{"flag":1,"ts":"2026-01-01T00:00:00Z"}])")), TFailure);
+}
+TEST(Transport, ErrorPolicyPreservesOperationalRecovery)
+{
+    EXPECT_EQ(ErrorStatus("STALE_BASE"), 409);
+    EXPECT_EQ(ErrorStatus("OPERATION_IN_PROGRESS"), 503);
+    EXPECT_EQ(ErrorStatus("CAPACITY_EXCEEDED"), 507);
+    EXPECT_EQ(ErrorStatus("UNSUPPORTED_TABLE_FEATURE"), 501);
+    EXPECT_EQ(ErrorStatus("DEADLINE_EXCEEDED"), 504);
+    for (const auto* code : {"DATABASE_BUSY", "RECOVERY_REQUIRED", "SERVER_BUSY"}) {
+        try {
+            Require(false, "blocked", code);
+            FAIL();
+        } catch (const TFailure& error) {
+            EXPECT_EQ(error.Detail.retry_hint, RetryHint::SameIdAfterReconcile);
+        }
+    }
+    EXPECT_EQ(
+        ParseJson(
+            ErrorResponse(503, "INTERNAL", "unknown", RetryHint::SameIdAfterReconcile).Body)["error"]["retry_hint"],
+        "SameIdAfterReconcile");
+    EXPECT_THROW(ParseTarget("/databases/id%2Fcollections/healthz"), TFailure);
 }
 TEST(Transport, RejectsInvalidUtf8AndMalformedJsonTokens)
 {

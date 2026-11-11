@@ -32,6 +32,17 @@ export class WorkbenchAPI {
         this.fetch = fetchImpl;
         this.maxBytes = maxBytes;
     }
+    async selectDatabase(id, signal) {
+        const path = `/databases/${encodeURIComponent(id)}`;
+        const database = await this.json(path, { signal });
+        if (!['open', 'closed'].includes(database.state))
+            throw new Error(
+                `Database is ${database.state}; refresh or reconcile before selecting it`,
+            );
+        return database.state === 'closed'
+            ? this.json(`${path}/open`, { method: 'POST', body: {}, signal })
+            : database;
+    }
     async request(path, { method = 'GET', body, signal, headers = {} } = {}) {
         const options = {
             method,
@@ -102,6 +113,8 @@ export class WorkbenchAPI {
             )
         )
             throw new APIError(response.status, payload);
+        if (path === '/capabilities')
+            this.scanPagination = payload.features?.scan_pagination ?? payload.scan_pagination;
         return payload;
     }
     async cancelScan(path, cursor) {
@@ -115,37 +128,72 @@ export class WorkbenchAPI {
             /* Server expiry releases cursors if cleanup cannot reach it. */
         }
     }
+    async openScan(path, body, signal, accept = 'application/json') {
+        if (this.scanPagination === false) return null;
+        try {
+            const opened = await this.json(`${path}/open`, {
+                method: 'POST',
+                body,
+                signal,
+                headers: { Accept: accept },
+            });
+            if (typeof opened.cursor !== 'string' || !opened.cursor)
+                throw new Error('Server did not return a scan cursor');
+            return opened.cursor;
+        } catch (error) {
+            // Only the legacy mock's missing route permits the single-response
+            // protocol; database/collection errors and lost responses do not.
+            if (error.status === 404 && error.code === 'ROUTE_NOT_FOUND') return null;
+            throw error;
+        }
+    }
     async scanPreview(path, options) {
-        const result = await this.json(path, options);
-        if (result.next_cursor) await this.cancelScan(path, result.next_cursor);
-        return result;
+        const cursor = await this.openScan(path, options.body, options.signal);
+        let cleanup = cursor;
+        try {
+            const result = await this.json(path, {
+                ...options,
+                body: cursor ? { cursor } : options.body,
+            });
+            cleanup = cursor ?? result.next_cursor;
+            return result;
+        } finally {
+            if (cleanup) await this.cancelScan(path, cleanup);
+        }
     }
     async arrow(path, body, { signal } = {}) {
-        const response = await this.request(path, {
-            method: 'POST',
-            body,
-            signal,
-            headers: { Accept: 'application/vnd.apache.arrow.stream' },
-        });
-        if (!response.ok) throw new APIError(response.status, await response.json());
-        const cursor = response.headers.get('X-GlamDB-Next-Cursor');
-        if (cursor) {
-            await response.body?.cancel();
-            await this.cancelScan(path, cursor);
-            throw new Error(
-                'This export requires multiple pages. Reduce the preview limit or use the Python SDK for a full Arrow scan.',
-            );
+        const accept = 'application/vnd.apache.arrow.stream';
+        const cursor = await this.openScan(path, body, signal, accept);
+        let cleanup = cursor;
+        try {
+            const response = await this.request(path, {
+                method: 'POST',
+                body: cursor ? { cursor } : body,
+                signal,
+                headers: { Accept: accept },
+            });
+            if (!response.ok) throw new APIError(response.status, await response.json());
+            const next = response.headers.get('X-GlamDB-Next-Cursor');
+            cleanup = cursor ?? next;
+            if (next) {
+                await response.body?.cancel();
+                throw new Error(
+                    'This export requires multiple pages. Reduce the preview limit or use the Python SDK for a full Arrow scan.',
+                );
+            }
+            const bytes = await this.readBytes(response);
+            const expected = response.headers.get('X-Content-SHA256');
+            if (expected) {
+                const digest = await crypto.subtle.digest('SHA-256', bytes);
+                const actual = Array.from(new Uint8Array(digest), (byte) =>
+                    byte.toString(16).padStart(2, '0'),
+                ).join('');
+                if (actual !== expected.toLowerCase())
+                    throw new Error('Arrow download checksum mismatch');
+            }
+            return bytes;
+        } finally {
+            if (cleanup) await this.cancelScan(path, cleanup);
         }
-        const bytes = await this.readBytes(response);
-        const expected = response.headers.get('X-Content-SHA256');
-        if (expected) {
-            const digest = await crypto.subtle.digest('SHA-256', bytes);
-            const actual = Array.from(new Uint8Array(digest), (byte) =>
-                byte.toString(16).padStart(2, '0'),
-            ).join('');
-            if (actual !== expected.toLowerCase())
-                throw new Error('Arrow download checksum mismatch');
-        }
-        return bytes;
     }
 }

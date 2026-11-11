@@ -8,7 +8,9 @@ import http.server
 import json
 import os
 from pathlib import Path
+import resource
 import select
+import signal
 import socket
 import ssl
 import subprocess
@@ -27,7 +29,7 @@ ENV = dict(os.environ, GLAMDB_TOKEN=TOKEN)
 
 
 @contextlib.contextmanager
-def raw_server(reply, delay=0):
+def raw_server(reply, delay=0, requests=None):
     with socket.socket() as listener:
         listener.bind(('127.0.0.1', 0))
         listener.listen()
@@ -40,7 +42,12 @@ def raw_server(reply, delay=0):
                     conn.settimeout(5)
                     data = b''
                     while b'\r\n\r\n' not in data:
-                        data += conn.recv(4096)
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            return
+                        data += chunk
+                    if requests is not None:
+                        requests.append(data)
                     time.sleep(delay)
                     conn.sendall(reply)
             except (BrokenPipeError, ConnectionResetError):
@@ -62,6 +69,84 @@ def raw_server(reply, delay=0):
 class Client(unittest.TestCase):
     def run_cli(self, *args, **kwargs):
         return subprocess.run([CLI, *args], env=ENV, capture_output=True, timeout=12, **kwargs)
+
+    def test_proxy_headers_preserve_repeated_values(self):
+        reply = (b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n'
+                 b'Cache-Control: no-store\r\nCache-Control: private\r\n'
+                 b'X-Content-Type-Options: nosniff\r\nX-Content-Type-Options: nosniff\r\n'
+                 b'Referrer-Policy: no-referrer\r\nReferrer-Policy: same-origin\r\n'
+                 b'Set-Cookie: a=1\r\nSet-Cookie: b=2\r\n'
+                 b"X_!#$%&'*+-.^`|~: one\ttwo\xff\r\n\r\n{}")
+        with tempfile.TemporaryDirectory(dir='/tmp') as tmp, raw_server(reply) as port:
+            headers = Path(tmp) / 'headers.json'
+            result = self.run_cli('request', '--url', f'http://localhost:{port}/', '--method', 'POST', '--headers', str(headers))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, b'{}')
+            metadata = json.loads(headers.read_text())['headers']
+            self.assertEqual(metadata['cache-control'], ['no-store', 'private'])
+            self.assertEqual(metadata['set-cookie'], ['a=1', 'b=2'])
+            self.assertEqual(metadata["x_!#$%&'*+-.^`|~"], 'one\ttwo\u00ff')
+
+    def test_duplicate_integrity_headers_fail_with_unknown_write_exit(self):
+        for name in ('Content-Length', 'Transfer-Encoding', 'X-Content-SHA256', 'X-GlamDB-Next-Cursor'):
+            fields = b'' if name == 'Content-Length' else b'Content-Length: 0\r\n'
+            reply = b'HTTP/1.1 200 OK\r\n' + fields + (name + ': 0\r\n' + name + ': 0\r\n\r\n').encode()
+            with self.subTest(name=name), raw_server(reply) as port:
+                result = self.run_cli('request', '--url', f'http://localhost:{port}/', '--method', 'POST')
+                self.assertEqual(result.returncode, 3, result.stderr)
+                self.assertIn(b'write outcome may be unknown', result.stderr)
+
+    def test_invalid_url_port_and_base_query_are_local_errors(self):
+        for url in ('http://localhost:abc/', 'http://localhost:0/', 'http://localhost:65536/'):
+            with self.subTest(url=url):
+                result = self.run_cli('request', '--url', url)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b'invalid URL port', result.stderr)
+                self.assertNotIn(b'outcome may be unknown', result.stderr)
+        result = self.run_cli('request', '--url', 'http://localhost:1/?query=yes', '--path', '/databases')
+        self.assertIn(b'base URL cannot contain a query or fragment', result.stderr)
+        result = self.run_cli('request', '--url', 'http://localhost:1/', '--method', 'DELETE')
+        self.assertIn(b'unsupported method', result.stderr)
+        self.assertNotIn(b'outcome may be unknown', result.stderr)
+
+    def test_query_only_url_preserves_request_target(self):
+        seen = []
+        with raw_server(b'HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n', requests=seen) as port:
+            result = self.run_cli('request', '--url', f'http://localhost:{port}?value=one')
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(seen[0].startswith(b'GET /?value=one HTTP/1.1\r\n'))
+
+    def test_failed_atomic_output_preserves_existing_file(self):
+        body = b'x' * 8192
+        reply = f'HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n\r\n'.encode() + body
+        def limit_output():
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            resource.setrlimit(resource.RLIMIT_FSIZE, (1024, 1024))
+        with tempfile.TemporaryDirectory(dir='/tmp') as tmp:
+            output = Path(tmp) / 'result.arrow'
+            output.write_bytes(b'previous complete output')
+            with raw_server(reply) as port:
+                result = self.run_cli('request', '--url', f'http://localhost:{port}/', '--method', 'POST', '--output', str(output), preexec_fn=limit_output)
+                self.assertEqual(result.returncode, 4, result.stderr)
+                self.assertIn(b'HTTP 200', result.stderr)
+                self.assertEqual(output.read_bytes(), b'previous complete output')
+                self.assertEqual(list(Path(tmp).iterdir()), [output])
+            with raw_server(reply) as port:
+                result = self.run_cli('request', '--url', f'http://localhost:{port}/', '--output', str(output))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output.read_bytes(), body)
+
+    def test_output_does_not_follow_or_replace_symlink(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as tmp:
+            target = Path(tmp) / 'original'
+            target.write_bytes(b'original')
+            link = Path(tmp) / 'output'
+            link.symlink_to(target)
+            with raw_server(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}') as port:
+                result = self.run_cli('request', '--url', f'http://localhost:{port}/', '--output', str(link))
+                self.assertEqual(result.returncode, 4, result.stderr)
+                self.assertTrue(link.is_symlink())
+                self.assertEqual(target.read_bytes(), b'original')
 
     def test_binary_headers_dns_and_stdout_failure(self):
         body = b'\x00\xff\n\r\x00arrow\xff\xff\xff\xff\x00\x00\x00\x00'
@@ -86,7 +171,7 @@ class Client(unittest.TestCase):
             result = self.run_cli('request', '--url', f'http://localhost:{port}/', '--headers', '/dev/full')
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, b'')
-            self.assertIn(b'may already have committed', result.stderr)
+            self.assertIn(b'complete HTTP 200', result.stderr)
 
     def test_invalid_and_interrupted_responses(self):
         for reply in (
@@ -119,9 +204,16 @@ class Client(unittest.TestCase):
             self.assertEqual(result.stdout, b'')
 
     def test_remote_http_rejected(self):
-        result = self.run_cli('request', '--url', 'http://192.0.2.1:80/')
-        self.assertNotEqual(result.returncode, 0)
+        result = self.run_cli('request', '--url', 'http://192.0.2.1:80/', '--method', 'POST')
+        self.assertEqual(result.returncode, 1)
         self.assertIn(b'require HTTPS', result.stderr)
+        self.assertNotIn(b'outcome may be unknown', result.stderr)
+
+    def test_interrupted_get_does_not_report_unknown_write(self):
+        with raw_server(b'HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nshort') as port:
+            result = self.run_cli('request', '--url', f'http://localhost:{port}/')
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn(b'outcome may be unknown', result.stderr)
 
     def test_tls_identity_and_ca(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as tmp:
@@ -143,6 +235,8 @@ class Client(unittest.TestCase):
                     pass
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(cert, key)
+            server_names = []
+            context.set_servername_callback(lambda _sock, name, _context: server_names.append(name))
             server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
             server.socket = context.wrap_socket(server.socket, server_side=True)
             thread = threading.Thread(target=server.serve_forever)
@@ -151,9 +245,11 @@ class Client(unittest.TestCase):
                 port = server.server_address[1]
                 for host, ca, expected in [('localhost', cert, 0), ('localhost', wrong, 1), ('127.0.0.1', cert, 1)]:
                     with self.subTest(host=host, ca=ca):
-                        result = self.run_cli('request', '--url', f'https://{host}:{port}/', '--ca-file', str(ca))
+                        result = self.run_cli('request', '--url', f'https://{host}:{port}/', '--ca-file', str(ca), '--method', 'GET' if expected == 0 else 'POST')
                         self.assertEqual(result.returncode, expected, result.stderr)
+                        self.assertNotIn(b'outcome may be unknown', result.stderr)
                 self.assertEqual(seen, ['Bearer ' + TOKEN])
+                self.assertEqual(server_names, ['localhost', 'localhost', None])
             finally:
                 server.shutdown()
                 server.server_close()

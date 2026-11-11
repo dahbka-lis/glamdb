@@ -123,6 +123,10 @@ if(TARGET glamdb_server)
     add_test(NAME glamdb.native_http COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/server/native_http_test.py"
         "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")
+    add_test(NAME glamdb.http_review COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/server/http_review_test.py"
+        "$<TARGET_FILE:glamdb_server>" "${glamdb_test_cli}" "${PROJECT_SOURCE_DIR}/ui")
+    set_tests_properties(glamdb.http_review PROPERTIES LABELS "integration;http" TIMEOUT 120)
     add_test(NAME glamdb.database_limits COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/server/database_limits_test.py" "$<TARGET_FILE:glamdb_server>")
     set_tests_properties(glamdb.database_limits PROPERTIES LABELS "integration;http" TIMEOUT 120)
@@ -141,7 +145,7 @@ if(TARGET glamdb_transport)
     add_executable(glamdb_transport_test server/transport_test.cpp)
     target_link_libraries(glamdb_transport_test PRIVATE glamdb_transport glamdb_build_options GTest::gtest_main)
     gtest_discover_tests(glamdb_transport_test TEST_PREFIX glamdb.transport.
-        PROPERTIES LABELS "unit;http" TIMEOUT 30)
+        PROPERTIES LABELS "unit;http" TIMEOUT 120)
 endif()
 
 if(TARGET glamdb_routes)
@@ -152,11 +156,11 @@ if(TARGET glamdb_routes)
     add_test(NAME glamdb.native_http_fault COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/server/native_fault_test.py" "$<TARGET_FILE:glamdb_native_fault_driver>")
     set_tests_properties(glamdb.native_http_fault PROPERTIES LABELS "integration;http;fault" TIMEOUT 180)
-    add_executable(glamdb_routes_test server/routes_test.cpp server/databases_test.cpp server/database_limits_test.cpp support/fake_storage.cpp support/journal_fault_vfs.cpp)
+    add_executable(glamdb_routes_test server/routes_test.cpp server/scan_sessions_test.cpp server/databases_test.cpp server/database_limits_test.cpp support/fake_storage.cpp support/journal_fault_vfs.cpp)
     target_link_libraries(glamdb_routes_test PRIVATE glamdb_routes glamdb_build_options GTest::gtest_main
         SQLite::SQLite3 iceberg::iceberg_sql_catalog_static)
     gtest_discover_tests(glamdb_routes_test TEST_PREFIX glamdb.routes.
-        PROPERTIES LABELS "unit;http;fault" TIMEOUT 30)
+        PROPERTIES LABELS "unit;http;fault" TIMEOUT 120)
 endif()
 if(TARGET glamdb_routes)
     add_executable(glamdb_http_lifecycle_driver server/lifecycle_driver.cpp

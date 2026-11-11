@@ -4,6 +4,7 @@ import hmac
 import math
 import re
 import ssl
+import weakref
 from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 from uuid import UUID
@@ -11,7 +12,7 @@ from uuid import UUID
 import httpx
 
 from .codec import Schema, decode_rows, int64, timestamp_us
-from .errors import (AuthenticationError, ErrorDetail, HTTPError, ProtocolError,
+from .errors import (AuthenticationError, ErrorDetail, HTTPError, OutcomeUnknownError, ProtocolError,
                      TransportError, ValidationError)
 from .models import ANY, AppendOutcome, CreateOutcome, OperationInProgress, Page, ScanResult
 from .predicates import Predicate
@@ -22,18 +23,42 @@ from .transport import Deadline, read_json, translate_transport
 class _ScanPages:
     def __init__(self, iterator, on_close):
         self._iterator, self._on_close = iterator, on_close
+        self._failure = None
+        self._closed = False
+        self.integrity = "not_complete"
+
+    def __del__(self):
+        try:
+            self.close()
+        except BaseException:
+            pass
 
     def __iter__(self):
         return self
 
     def __next__(self):
+        if self._failure is not None:
+            raise self._failure
+        if self._closed:
+            raise StopIteration
         try:
             return next(self._iterator)
-        except BaseException:
+        except StopIteration:
+            self.integrity = "complete"
             self.close()
+            raise
+        except BaseException as exc:
+            self._failure = exc
+            try:
+                self.close()
+            except BaseException:
+                pass
             raise
 
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
         try:
             self._iterator.close()
         finally:
@@ -76,7 +101,7 @@ class Client:
         self._max_json_bytes = max_json_bytes
         self._max_arrow_read_bytes = max_arrow_read_bytes
         self._schemas: dict[str, Schema] = {}
-        self._streams: set[Any] = set()
+        self._streams = weakref.WeakSet()
         self._closed = False
         self._http = httpx.Client(base_url=str(url).rstrip("/") + "/", headers={"Authorization": f"Bearer {token}"},
                                   verify=verify, timeout=timeout, transport=transport, follow_redirects=False)
@@ -139,11 +164,18 @@ class Client:
             raise translate_transport(exc, budget) from exc
 
     def _json(self, method: str, path: str, budget: Deadline, *, params: Mapping[str, Any] | None = None,
-              body: bytes | None = None) -> tuple[int, dict[str, Any]]:
+              body: bytes | None = None, write: bool = False) -> tuple[int, dict[str, Any]]:
         try:
             response = self._send(method, path, budget, params=params, body=body)
             status = response.status_code
-            value = read_json(response, budget, self._max_json_bytes)
+            try:
+                value = read_json(response, budget, self._max_json_bytes)
+            except ProtocolError:
+                if write and status >= 500:
+                    self._unknown_write(status, {}, budget)
+                raise
+            if write and status >= 500 and "outcome" not in value:
+                self._unknown_write(status, value, budget)
             if status in (401, 403):
                 self._http_error(status, value, budget)
             return status, value
@@ -151,6 +183,18 @@ class Client:
             exc.operation_id = budget.operation_id
             exc.collection_id = budget.collection_id
             raise
+
+    @staticmethod
+    def _unknown_write(status, value, budget):
+        detail = {"code": "OUTCOME_UNKNOWN", "message": "Server write outcome is unknown; reconcile using the original identity"}
+        supplied = value.get("error")
+        if isinstance(supplied, dict) and isinstance(supplied.get("code"), str) and isinstance(supplied.get("message"), str):
+            detail = dict(supplied)
+        # Preserve server diagnostics in detail and the untouched raw envelope,
+        # but never propagate a FixInput hint for an unconfirmed publication.
+        detail["retry_hint"] = "SameIdAfterReconcile"
+        raise OutcomeUnknownError(status, ErrorDetail.from_dict(detail), raw=value,
+                                  operation_id=budget.operation_id, collection_id=budget.collection_id)
 
     @staticmethod
     def _http_error(status: int, value: dict[str, Any], budget: Deadline) -> None:
@@ -295,7 +339,7 @@ class Client:
             raise ValidationError("exact collection name is required")
         budget = Deadline(deadline, collection_id=cid)
         status, value = self._json("POST", "collections", budget,
-                                   body=json_bytes({"collection_id": cid, "name": name, "schema": schema.to_dict()}))
+                                   body=json_bytes({"collection_id": cid, "name": name, "schema": schema.to_dict()}), write=True)
         try:
             kind = value.get("outcome")
             if kind is None and status in (200, 201):
@@ -373,7 +417,7 @@ class Client:
                 raise ValidationError("append rows are required")
             request = self.prepare_append(cid, rows, operation_id=op, schema=schema,
                                           expected_snapshot=expected_snapshot, deadline=remaining)
-        status, value = self._json("POST", f"collections/{request.collection_id}/append", budget, body=request.body)
+        status, value = self._json("POST", f"collections/{request.collection_id}/append", budget, body=request.body, write=True)
         return self._append_outcome(status, value, budget, expected_payload_hash=request.payload_hash)
 
     @staticmethod
@@ -456,7 +500,7 @@ class Client:
         status, value = self._json("GET", path, budget)
         if status == 404:
             error = value.get("error")
-            if not isinstance(error, dict) or error.get("code") != "NOT_FOUND":
+            if not isinstance(error, dict) or error.get("code") != "OPERATION_NOT_FOUND":
                 self._http_error(status, value, budget)
             return None
         if status == 200 and value.get("state") == "in_progress" and "outcome" not in value:
@@ -502,15 +546,18 @@ class Client:
                   limit: int | None = None, deadline: float | None = None) -> ScanResult:
         cid, path = self._path(collection_id, "scan")
         budget = Deadline(deadline, collection_id=cid)
-        status, value = self._json("POST", path, budget, body=self._scan_body(projection, predicate, snapshot_id, limit))
-        if status != 200:
-            self._http_error(status, value, budget)
-        # Own an advertised cursor before validating the first page. A schema
-        # or value error must not strand the server session until its TTL.
-        cursor = value.get("next_cursor")
-        if not isinstance(cursor, str) or not cursor:
-            cursor = None
+        body = self._scan_body(projection, predicate, snapshot_id, limit)
+        opened = self._open_scan(path, body, budget)
+        cursor = opened["cursor"] if opened is not None else None
         try:
+            status, value = (self._cursor_page(path, cursor, budget) if cursor is not None
+                             else self._json("POST", path, budget, body=body))
+            if status != 200:
+                self._http_error(status, value, budget)
+            # Legacy single-response servers may still advertise a continuation.
+            advertised = value.get("next_cursor")
+            if isinstance(advertised, str) and advertised:
+                cursor = advertised
             first = self._scan_result(value, cid)
             rows = list(first.rows)
             wire_rows = list(first.raw["rows"])
@@ -557,6 +604,22 @@ class Client:
         if (first.schema != following.schema or first.snapshot_id != following.snapshot_id
                 or first.identity != following.identity):
             raise ProtocolError("scan view changed between pages")
+
+    def _open_scan(self, path, body, budget, accept="application/json"):
+        response = self._send("POST", path + "/open", budget, body=body, accept=accept)
+        status = response.status_code
+        value = read_json(response, budget, self._max_json_bytes)
+        # Older, single-response mock adapters have no cursor endpoint. Never
+        # confuse an unknown database/collection or a generic 404 with absence
+        # of this route, and never restart a lost open/first-page response.
+        if (status == 404 and isinstance(value.get("error"), dict)
+                and value["error"].get("code") == "ROUTE_NOT_FOUND"):
+            return None
+        if status != 200:
+            self._http_error(status, value, budget)
+        if not isinstance(value.get("cursor"), str) or not value["cursor"]:
+            raise ProtocolError("scan open requires a cursor", raw=value, collection_id=budget.collection_id)
+        return value
 
     def _cursor_page(self, path, cursor, budget):
         body = json_bytes({"cursor": cursor})
@@ -628,26 +691,36 @@ class Client:
 
         cid, path = self._path(collection_id, "scan")
         budget = Deadline(deadline, collection_id=cid)
-        response = self._send("POST", path, budget, body=self._scan_body(projection, predicate, snapshot_id, limit),
-                              accept="application/vnd.apache.arrow.stream")
-        if response.status_code != 200:
-            status = response.status_code
-            value = read_json(response, budget, self._max_json_bytes)
-            self._http_error(status, value, budget)
-        def next_page(cursor):
-            body = json_bytes({"cursor": cursor})
+        body = self._scan_body(projection, predicate, snapshot_id, limit)
+        opened = self._open_scan(path, body, budget, "application/vnd.apache.arrow.stream")
+        initial_cursor = opened["cursor"] if opened is not None else None
+        def send_page(cursor):
+            page_body = json_bytes({"cursor": cursor})
             try:
-                following = self._send("POST", path, budget, body=body,
+                following = self._send("POST", path, budget, body=page_body,
                                        accept="application/vnd.apache.arrow.stream")
             except TransportError:
-                following = self._send("POST", path, budget, body=body,
+                following = self._send("POST", path, budget, body=page_body,
                                        accept="application/vnd.apache.arrow.stream")
             if following.status_code != 200:
                 status = following.status_code
                 value = read_json(following, budget, self._max_json_bytes)
                 self._http_error(status, value, budget)
-            return ScanStream(following, budget, max_read_bytes=self._max_arrow_read_bytes,
+            return following
+        def next_page(cursor):
+            return ScanStream(send_page(cursor), budget, max_read_bytes=self._max_arrow_read_bytes,
                               on_close=lambda stream: None)
+        try:
+            response = (send_page(initial_cursor) if initial_cursor is not None else
+                        self._send("POST", path, budget, body=body, accept="application/vnd.apache.arrow.stream"))
+            if response.status_code != 200:
+                status = response.status_code
+                value = read_json(response, budget, self._max_json_bytes)
+                self._http_error(status, value, budget)
+        except BaseException:
+            if initial_cursor is not None:
+                self._cancel_scan_quietly(cid, initial_cursor)
+            raise
         cursor = response.headers.get("x-glamdb-next-cursor")
         paged = cursor is not None
         try:
@@ -657,8 +730,8 @@ class Client:
             # ScanStream closes HTTP/Arrow owners on construction failure, but
             # no public iterator exists yet to release the server-side cursor.
             try:
-                if cursor:
-                    self._cancel_scan_quietly(cid, cursor)
+                if cursor or initial_cursor:
+                    self._cancel_scan_quietly(cid, cursor or initial_cursor)
             except BaseException:
                 pass  # Preserve the original schema/transport/allocation error.
             raise

@@ -76,6 +76,8 @@ test('the latest database selection wins when opens finish out of order', async 
     const b = await (
         await page.request.post('/databases', { headers, data: { name: 'race_b' } })
     ).json();
+    for (const db of [a, b])
+        await page.request.post(`/databases/${db.database_id}/close`, { headers, data: {} });
     await page.goto('/');
     await page.getByLabel('Access token').fill('e2e-only-local-token');
     await page.getByRole('button', { name: 'Open my workspace' }).click();
@@ -116,13 +118,13 @@ test('the latest database selection wins when opens finish out of order', async 
         await page
             .getByRole('row')
             .filter({ hasText: 'race_a' })
-            .getByRole('button', { name: 'Use database' })
+            .getByRole('button', { name: 'Open database' })
             .click();
         await capturedA;
         await page
             .getByRole('row')
             .filter({ hasText: 'race_b' })
-            .getByRole('button', { name: 'Use database' })
+            .getByRole('button', { name: 'Open database' })
             .click();
         await capturedB;
         releaseA();
@@ -136,4 +138,70 @@ test('the latest database selection wins when opens finish out of order', async 
         releaseB();
         await page.unrouteAll({ behavior: 'wait' });
     }
+});
+
+test('unknown append survives database switching and reconciliation with its original identity', async ({
+    page,
+}) => {
+    await page.goto('/');
+    await page.getByLabel('Access token').fill('e2e-only-local-token');
+    await page.getByRole('button', { name: 'Open my workspace' }).click();
+    await page.getByLabel('Database name').fill('pending_database');
+    await page.getByRole('button', { name: 'Create database', exact: true }).click();
+    await page.getByRole('button', { name: 'New collection', exact: true }).first().click();
+    await page.getByLabel('Collection name').fill('pending_collection');
+    await page.getByRole('button', { name: 'Create collection' }).click();
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+    await page.locator('nav').getByRole('button', { name: 'Data studio', exact: true }).click();
+    let operationId,
+        writes = 0;
+    await page.route('**/databases/*/collections/*/append', async (route) => {
+        writes++;
+        operationId = route.request().postDataJSON().operation_id;
+        await route.fetch();
+        await route.fulfill({
+            status: 503,
+            contentType: 'application/json',
+            body: JSON.stringify({
+                outcome: 'commit_unknown',
+                recovery_required: true,
+                error: { code: 'OUTCOME_UNKNOWN', message: 'Receipt lost after commit' },
+            }),
+        });
+    });
+    await page.getByRole('button', { name: 'Append rows', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog
+        .getByLabel('Rows · JSON array')
+        .fill('[{"key":"exactly-once","label":"retained","amount":"1"}]');
+    await dialog.getByRole('button', { name: 'Append rows', exact: true }).click();
+    await expect(dialog.getByText('Outcome unresolved · keep this operation ID')).toBeVisible();
+    await dialog.getByRole('button', { name: 'Close dialog' }).click();
+    await page.getByRole('button', { name: 'Databases', exact: true }).click();
+    await page.getByLabel('Database name').fill('another_pending_workspace');
+    await page.getByRole('button', { name: 'Create database', exact: true }).click();
+    await page.getByRole('button', { name: 'Databases', exact: true }).click();
+    const row = page.getByRole('row').filter({ hasText: 'pending_database' });
+    let opens = 0;
+    page.on('request', (request) => {
+        if (new URL(request.url()).pathname.endsWith('/open')) opens++;
+    });
+    await row.getByRole('button', { name: 'Use database' }).click();
+    await page.locator('nav').getByRole('button', { name: 'Operations', exact: true }).click();
+    await expect(page.getByText(operationId, { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Reconcile database', exact: true }).click();
+    await page.getByRole('button', { name: 'Check outcome', exact: true }).click();
+    await expect(page.locator('.operations-card strong')).toHaveText('committed');
+    await expect(page.getByText(operationId, { exact: true })).toBeVisible();
+    expect(writes).toBe(1);
+    expect(opens).toBe(0);
+    await page.getByLabel('Operation ID').fill(operationId);
+    await page.getByRole('button', { name: 'Look up operation', exact: true }).click();
+    const lookup = page.getByRole('dialog');
+    await expect(lookup.getByRole('heading', { name: 'Operation outcome' })).toBeVisible();
+    await expect(lookup.locator('pre')).toContainText('"outcome": "committed"');
+    await lookup.getByRole('button', { name: 'Close dialog' }).click();
+    await page.locator('nav').getByRole('button', { name: 'Data studio', exact: true }).click();
+    await page.locator('#run-query').click();
+    await expect(page.getByText('exactly-once', { exact: true })).toBeVisible();
 });
