@@ -203,8 +203,8 @@ of reader, writer, metadata and recovery reservations.
 | Check | Status |
 | --- | --- |
 | `cmake --build --preset local`, `format-check`, `quality-negative-check`; dependency pin verification | PASS |
-| `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 ctest --preset local --parallel 6` | PASS: 619 passed, two child-process helper skips, one pre-existing disabled benchmark |
-| `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ctest --preset asan-ubsan --parallel 6` | PASS: 618 passed, the same skips and disabled benchmark; ordinary pinned dependencies |
+| `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 ctest --preset local --parallel 6` | PASS: 635 passed, two child-process helper skips, one pre-existing disabled benchmark |
+| `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ctest --preset asan-ubsan --parallel 6` | PASS: 634 passed, the same skips and disabled benchmark; ordinary pinned dependencies |
 | `TScanLifetimeTest` (real files and production backend) | PASS in normal and ASan/UBSan builds: batch/array/buffer/slice/C Data retention, final-release reopen, deterministic cancel/shutdown barriers before batch/EOS, empty and zero-limit views |
 | `ScanMockTest` (in-memory FileIO, real Arrow/Parquet) | PASS in both builds: extracted-buffer FileIO/owner retention, decoded/filtered Arrow pool accounting and compound predicates |
 | Separate `GLAMDB_BUILD_STORAGE=OFF` build and CTest | PASS: 309 passed, one pre-existing disabled benchmark |
