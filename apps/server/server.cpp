@@ -607,6 +607,7 @@ void RunServer(TRoutes& routes,
         acceptor.close(ignored);
         retry.cancel();
         state.Readers.Stopping = state.Writers.Stopping = state.Control.Stopping = state.Lifecycle.Stopping = true;
+        routes.CancelScans();
         // StopIdle can erase itself; advancing before it avoids allocating a copy.
         for (auto it = state.Sessions.begin(); it != state.Sessions.end();) {
             (*it++)->StopIdle();
