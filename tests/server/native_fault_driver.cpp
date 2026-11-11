@@ -2,6 +2,7 @@
 #include "apps/server/server.h"
 #include "tests/support/journal_fault_vfs.h"
 
+#include <cstdio>
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -20,7 +21,14 @@ try {
     }
     auto databases = std::make_shared<glamdb::NServer::TDatabases>(argv[1], registry.Name());
     glamdb::NServer::TRoutes routes(databases, {}, "fault-test-token");
+    // RunServer owns cout's formatting state. Control replies use synchronized
+    // stdio, and reading commands must not implicitly flush cout on this thread.
+    std::cin.tie(nullptr);
     std::thread controls([&] {
+        const auto reply = [](const char* text) {
+            std::fputs(text, stdout);
+            std::fflush(stdout);
+        };
         std::string line;
         while (std::getline(std::cin, line)) {
             std::istringstream command(line);
@@ -29,16 +37,16 @@ try {
             command >> target >> commit >> after;
             if (target == "pause") {
                 core.PauseBeforeDelete(commit);
-                std::cout << "armed\n" << std::flush;
+                reply("armed\n");
                 continue;
             }
             if (target == "wait") {
-                std::cout << (core.WaitUntilPaused(std::chrono::seconds(10)) ? "paused\n" : "timeout\n") << std::flush;
+                reply(core.WaitUntilPaused(std::chrono::seconds(10)) ? "paused\n" : "timeout\n");
                 continue;
             }
             if (target == "release") {
                 core.Release();
-                std::cout << "armed\n" << std::flush;
+                reply("armed\n");
                 continue;
             }
             auto& vfs = target == "registry" ? registry : core;
@@ -47,7 +55,7 @@ try {
             } else {
                 vfs.Arm(commit, after != 0);
             }
-            std::cout << "armed\n" << std::flush;
+            reply("armed\n");
         }
         core.Release();
     });

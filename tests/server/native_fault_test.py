@@ -73,6 +73,16 @@ class NativeFaultHTTP(unittest.TestCase):
         self.api(self.base + '/collections', body)
         return self.base + '/collections/' + cid
 
+    def test_control_acknowledgements_after_startup(self):
+        # The readiness record and control replies come from different threads.
+        # TSan must see no shared stream-state race during this handshake.
+        for _ in range(4):
+            self.arm('core', 0, False)
+            self.arm('registry', 0, False)
+            self.arm('pause', 1, False)
+            self.arm('release', 0, False)
+        self.assertEqual(self.api(self.base + '/collections')['items'], [])
+
     def test_uncertain_create_commit_recovers_identity_without_duplicate_collection(self):
         for after in (False, True):
             with self.subTest(after_unlink=after):
