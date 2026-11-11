@@ -26,8 +26,8 @@ recovery coordinator, canonical Arrow input, public C++ facade, outcome JSON,
 and network CLI. Independent durable I/O and Arrow/Parquet/Iceberg
 storage primitives provide file production, staging, publication validation,
 recovery verification, and capacity checks. `core/backend/` connects them to the
-coordinator StorageBackend and `core/scan/` implements a minimal `Engine::Scan`
-(fixed snapshot, one-comparison predicate, projection, limit; no pruning). See
+coordinator StorageBackend and `core/scan/` implements `Engine::Scan`
+(fixed snapshot, SQL three-valued compound predicates `True`/`Compare`/`In`/`IsNull`/`IsNotNull`/`And`/`Or`/`Not`, projection, limit; no pruning). See
 [the scanner guide](docs/development/SCANNER.md) for their contract and
 validation status, [the coordinator guide](docs/development/COORDINATOR.md)
 for the integration contract, and [the storage guide](docs/development/STORAGE_MODULE.md)
@@ -75,7 +75,8 @@ key uniqueness nor replacement semantics.
 
 Key-value upserts and deletes are a subsequent extension using copy-on-write
 and an explicit KV collection mode. Native capabilities, receipt-backed snapshot
-history, selected-view statistics, explain and cursor profiles use the public
+history, selected-view statistics, snapshot-bound file/row-group details,
+explain and cursor profiles use the public
 facade; see [the metadata guide](docs/development/METADATA.md). Their HTTP/SDK/UI
 adapters and object storage remain later extensions. Compaction, snapshot expiration,
 garbage collection, asynchronous admission, replication, multiple writers, and

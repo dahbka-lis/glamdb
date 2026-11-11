@@ -37,6 +37,21 @@ void Check(bool condition, std::string_view message)
     }
 }
 
+glamdb::Predicate CompoundDupPredicate()
+{
+    const auto predicate = glamdb::Predicate::And({
+        glamdb::Predicate::Compare("key", glamdb::CompareOp::Eq, std::string("dup")),
+        glamdb::Predicate::Or({
+            glamdb::Predicate::In("n", {int64_t{1}, std::nullopt}),
+            glamdb::Predicate::Not(glamdb::Predicate::IsNotNull("n")),
+            glamdb::Predicate::CompareNull("n", glamdb::CompareOp::Eq),
+        }),
+    });
+    Check(predicate.kind() == glamdb::Predicate::Kind::And && predicate.children().size() == 2U,
+        "compound predicate AST accessors");
+    return predicate;
+}
+
 template <class T>
 T Take(glamdb::Result<T> result, std::string_view context)
 {
@@ -129,6 +144,12 @@ void CheckViews(glamdb::Engine& engine, int64_t snapshotA, int64_t snapshotB)
     CheckScan(engine, glamdb::SnapshotSelector::Latest(), RowsAB, glamdb::SnapshotSelector::Id(snapshotB));
     CheckScan(engine, glamdb::SnapshotSelector::Id(snapshotA), RowsA, glamdb::SnapshotSelector::Id(snapshotA));
     CheckScan(engine, glamdb::SnapshotSelector::InitialEmpty(), {}, glamdb::SnapshotSelector::InitialEmpty());
+    auto filtered = Take(engine.Scan({.collection_id = CollectionId,
+                             .selector = glamdb::SnapshotSelector::Id(snapshotB),
+                             .predicate = CompoundDupPredicate(),
+                             .batch_rows = 1}),
+        "compound filtered scan");
+    CheckRows(*filtered, {{"dup", 1}, {"dup", 1}}, glamdb::SnapshotSelector::Id(snapshotB));
     const auto capabilities = engine.GetCapabilities();
     Check(capabilities.backend == glamdb::BackendKind::LocalStorage && capabilities.metadata && capabilities.scan &&
             capabilities.append && !capabilities.file_pruning && !capabilities.row_group_pruning &&
@@ -151,6 +172,26 @@ void CheckViews(glamdb::Engine& engine, int64_t snapshotA, int64_t snapshotB)
         Check(stats.rows.value == rows && stats.data_files.value == files && !stats.logical_bytes.value &&
                 stats.rows.kind == glamdb::MetricKind::Metadata && stats.identity == history.identity,
             "view-specific metadata with unavailable logical size");
+        const auto listing = Take(engine.ListFiles(CollectionId, selector), "selected files");
+        Check(listing.Identity == stats.identity && listing.SelectorResolved == stats.selector_resolved &&
+                static_cast<int64_t>(listing.Files.size()) == files,
+            "manifest file membership uses the selected view");
+        int64_t fileRows = 0;
+        for (const auto& file : listing.Files) {
+            const auto details = Take(engine.GetFileDetails(CollectionId, file.FileID, selector), "file details");
+            Check(details.File == file && details.SelectorResolved == listing.SelectorResolved &&
+                    !details.RowGroups.empty() && file.FileID.size() == 64,
+                "opaque file IDs resolve only through manifest membership");
+            int64_t groupRows = 0;
+            for (const auto& group : details.RowGroups) {
+                groupRows += group.RecordCount;
+                Check(!group.Columns.empty() && group.Columns.front().FieldID == 1,
+                    "Parquet row groups retain stable field IDs");
+            }
+            Check(groupRows == file.RecordCount, "row-group counts match the manifest");
+            fileRows += file.RecordCount;
+        }
+        Check(fileRows == rows, "listed files match selected rows");
         const auto explanation =
             Take(engine.ExplainScan({.collection_id = CollectionId, .selector = selector}), "explain");
         Check(explanation.info.selector_resolved == stats.selector_resolved &&
@@ -231,9 +272,13 @@ void CheckUnavailable(glamdb::Engine& engine)
     const auto stats = engine.GetStatistics(CollectionId);
     const auto history = engine.ListSnapshots(CollectionId);
     const auto explain = engine.ExplainScan({.collection_id = CollectionId});
+    const auto files = engine.ListFiles(CollectionId);
+    const auto details = engine.GetFileDetails(CollectionId, std::string(64, '0'));
     Check(!stats && stats.error().code == "DEPENDENCY_UNAVAILABLE" && !history &&
             history.error().code == "DEPENDENCY_UNAVAILABLE" && !explain &&
-            explain.error().code == "DEPENDENCY_UNAVAILABLE",
+            explain.error().code == "DEPENDENCY_UNAVAILABLE" && !files &&
+            files.error().code == "DEPENDENCY_UNAVAILABLE" && !details &&
+            details.error().code == "DEPENDENCY_UNAVAILABLE",
         "storage-disabled metadata reports dependency errors");
     const auto created = engine.CreateCollection({CollectionId, "events", Schema});
     Check(created.disposition == glamdb::CommitDisposition::DefinitelyNotCommitted && !created.info && created.error &&
@@ -244,7 +289,7 @@ void CheckUnavailable(glamdb::Engine& engine)
             appended.phase == glamdb::CommitPhase::Validation && !appended.result && !appended.recovery &&
             appended.error && appended.error->code == "DEPENDENCY_UNAVAILABLE",
         "storage-disabled append must report DEPENDENCY_UNAVAILABLE before binding");
-    const auto scan = engine.Scan({.collection_id = CollectionId});
+    const auto scan = engine.Scan({.collection_id = CollectionId, .predicate = CompoundDupPredicate()});
     Check(!scan && scan.error().code == "DEPENDENCY_UNAVAILABLE", "storage-disabled scan dependency error");
     Check(Take(engine.ListCollections(), "list storage-disabled collections").empty(), "no fabricated collection");
     const auto outcome = engine.FindAppendOutcome(CollectionId, OperationA);

@@ -5,6 +5,7 @@
 
 #include "apps/transport/outcome_json.h"
 #include "core/api/canonical.h"
+#include "core/scan/predicate.h"
 
 #include <arrow/io/memory.h>
 #include <arrow/ipc/api.h>
@@ -324,7 +325,8 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
                     {"explain", false},
                     {"pagination", false},
                     {"zero_column_projection", false}}},
-            {"predicate_ops", {"true", "eq", "ne", "lt", "le", "gt", "ge"}},
+            {"predicate_ops",
+                {"true", "eq", "ne", "lt", "le", "gt", "ge", "in", "is_null", "is_not_null", "and", "or", "not"}},
             {"limits",
                 {{"request_bytes", MaxRequestBytes},
                     {"response_bytes", MaxResponseBytes},
@@ -335,7 +337,10 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
                     {"scan_lifetime_seconds", TScans::LifetimeSeconds},
                     {"scan_replay_bytes", TScans::ReplayBytes},
                     {"scan_idle_seconds", TScans::IdleSeconds},
-                    {"batch_rows", 65536}}}});
+                    {"batch_rows", 65536},
+                    {"predicate_depth", detail::MaxPredicateDepth},
+                    {"predicate_nodes", detail::MaxPredicateNodes},
+                    {"predicate_literals", detail::MaxPredicateLiterals}}}});
     }
     if (path == "/databases" || path.starts_with("/databases/")) {
         Require(static_cast<bool>(Databases_), "database management requires --data-dir", "UNSUPPORTED_OPERATION");

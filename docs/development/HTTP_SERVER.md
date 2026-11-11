@@ -260,10 +260,16 @@ fractional digits, normalized to UTC with six digits, years 0001–9999.
 Scan: `{projection?,predicate?,snapshot_id?,limit?,batch_rows?}`. Omission selects
 latest once; null or `"initial"` selects the initial empty view. Historical IDs
 are decimal strings. Omitted/null projection defaults to all columns; zero-column projection
-is unavailable. Predicates are null/`{op:"true"}` or one comparison
-`{op:"eq|ne|lt|le|gt|ge",field,value}` with a correctly typed literal. Other
-operators return 501. Limit is a nonnegative int64 integer; batch_rows is 1..65536.
-Only TRUE survives NULL filtering. No SQL parser is implied.
+is unavailable. Predicates are `null`/`{op:"true"}`, comparisons
+`{op:"eq|ne|lt|le|gt|ge",field,value}` (where `value` is a correctly typed
+literal or `null`), `{op:"in",field,values:[...]}` (typed literals and/or
+`null`), `{op:"is_null|is_not_null",field}`, or recursive boolean trees
+`{op:"and|or",args:[...]}` (non-empty `args`) and `{op:"not",arg:{...}}` within
+`predicate_depth <= 64`, `predicate_nodes <= 1024`, and `predicate_literals <=
+4096` (exceeding limits or malformed shapes/types returns 400; unknown operators
+within the depth limit return 501). Limit is a nonnegative int64 integer;
+batch_rows is 1..65536. SQL three-valued NULL logic applies across the tree and
+only TRUE at the root survives. No SQL parser is implied.
 
 JSON scan returns `{schema,snapshot_id,rows,identity,profile,next_cursor}`. The
 snapshot is the resolved selected view, including null for the initial empty
@@ -366,10 +372,10 @@ the original write identity. Headers and bodies share `--request-timeout-ms`
 their reply and drain at most 32 MiB for at most two seconds to preserve responses
 to eager senders. Read deadlines never cancel admitted core work.
 Transient accept failures retry with backoff. Header limit: 16 KiB; request/response:
-16 MiB; append: 10000 rows. JSON depth and event limits bound a single-pass parser
-and accommodate 10,000 rows of the full 64-field append schema (1,300,100 parser
-events). These transport bounds are not
-a qualified process-memory or storage budget.
+16 MiB; append: 10000 rows. JSON parsing allows 160 nesting levels for compound
+predicates. Event limits bound the single-pass parser and accommodate 10,000 rows
+of the full 64-field append schema (1,300,100 parser events). These transport
+bounds are not a qualified process-memory or storage budget.
 
 The [shared resource budget matrix](RESOURCE_BUDGETS.md) specifies which limits
 are per request, store or service, who reserves/releases them and which aggregate
