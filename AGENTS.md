@@ -26,8 +26,8 @@ recovery coordinator, canonical Arrow input, public C++ facade, outcome JSON,
 and network CLI. Independent durable I/O and Arrow/Parquet/Iceberg
 storage primitives provide file production, staging, publication validation,
 recovery verification, and capacity checks. `core/backend/` connects them to the
-coordinator StorageBackend and `core/scan/` implements a minimal `Engine::Scan`
-(fixed snapshot, one-comparison predicate, projection, limit; no pruning). See
+coordinator StorageBackend and `core/scan/` implements `Engine::Scan`
+(fixed snapshot, SQL three-valued compound predicates `True`/`Compare`/`In`/`IsNull`/`IsNotNull`/`And`/`Or`/`Not`, projection, limit; no pruning). See
 [the scanner guide](docs/development/SCANNER.md) for their contract and
 validation status, [the coordinator guide](docs/development/COORDINATOR.md)
 for the integration contract, and [the storage guide](docs/development/STORAGE_MODULE.md)
@@ -44,14 +44,14 @@ are implemented. They can use the native Asio HTTP server over the public Engine
 list, open, close and reconcile databases. A separate SQLite service registry
 stores identities, persisted engine limits and open intent; collection/data writes remain in core.
 Scans use bounded fixed-view pages with per-database quotas, finite replay retention,
-expiry and explicit cancellation. Separate HTTP data, lifecycle and control workers
-keep healthy databases and descriptors available during long operations.
-Outcome lookup refuses catalog contention without blocking control workers.
-HTTP body admission reserves four of sixteen slots from ordinary uploads for
+idle expiry and explicit cancellation. Each admitted cursor reserves its maximum
+replay page before consuming rows. Separate HTTP reader, publisher, lifecycle and
+control pools use bounded fair per-database queues with deadlines and cancellation.
+Outcome lookups refuse tentative catalog reads without waiting on publication.
+HTTP body admission reserves four of sixteen readers from ordinary uploads for
 authenticated database lifecycle and scan cancellation, including through a TLS
-proxy; public/static POSTs cannot spend that reserve.
-Scan pages reserve replay capacity before consumption; admission refusal preserves
-the existing cursor and its last replay. Other page failures invalidate it.
+proxy; public/static POSTs cannot spend that reserve. Excess bodies wait within
+the connection ceiling and their original read deadline.
 The network CLI also builds independently with OpenSSL; optional offline commands
 are in `apps/admin` and never required for server initialization.
 Collection routes are scoped by `/databases/{id}`; optional legacy
