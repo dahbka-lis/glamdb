@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <fstream>
 #include <future>
 #include <thread>
 
@@ -391,6 +392,123 @@ TEST(Databases, StartupRegistrationFaultDoesNotHideOtherInitializedDatabases)
         true));
     EXPECT_EQ(databases.Change(first, "close").at("state"), "closed");
     databases.Shutdown();
+}
+
+TEST(Databases, DiscardReservationPreservesFilesAndReleasesNameAndCapacity)
+{
+    test::TempDir temporary;
+    const auto directory = temporary.path / "server";
+    {
+        TDatabases databases(directory);
+    }
+    {
+        detail::Database registry;
+        registry.Open(directory / "registry.sqlite", SQLITE_OPEN_READWRITE, "");
+        registry.Execute("BEGIN IMMEDIATE");
+        for (int i = 1; i <= 64; ++i) {
+            const auto number = std::to_string(i);
+            const auto id = "00000000-0000-0000-0000-" + std::string(12 - number.size(), '0') + number;
+            registry.Execute("INSERT INTO databases(id,name,initialized,auto_open) VALUES(?,?,0,1)",
+                {id, "reserved-" + number});
+        }
+        registry.Execute("COMMIT");
+    }
+    const auto incomplete = directory / "databases" / test::store_id;
+    std::filesystem::create_directory(incomplete);
+    {
+        std::ofstream(incomplete / "evidence") << "preserve this incomplete store";
+    }
+    {
+        TDatabases databases(directory);
+        EXPECT_THROW(databases.Create({{"name", "overflow"}}), TFailure);
+        EXPECT_EQ(databases.Change(test::store_id, "discard").at("discarded"), true);
+        EXPECT_THROW(databases.Get(test::store_id), TFailure);
+        EXPECT_EQ(databases.List().at("items").size(), 63U);
+        EXPECT_FALSE(std::filesystem::exists(incomplete));
+        size_t preserved = 0;
+        for (const auto& item : std::filesystem::directory_iterator(directory / "databases")) {
+            if (item.path().filename().string().starts_with("incomplete-")) {
+                std::ifstream input(item.path() / "evidence");
+                EXPECT_EQ(std::string(std::istreambuf_iterator<char>(input), {}), "preserve this incomplete store");
+                ++preserved;
+            }
+        }
+        EXPECT_EQ(preserved, 1U);
+        EXPECT_NE(databases.Create({{"name", "reserved-1"}}).at("database_id"), test::store_id);
+        EXPECT_EQ(databases.List().at("items").size(), 64U);
+        databases.Shutdown();
+    }
+    TDatabases reopened(directory);
+    EXPECT_EQ(reopened.List().at("items").size(), 64U);
+    EXPECT_THROW(reopened.Get(test::store_id), TFailure);
+    reopened.Shutdown();
+}
+
+TEST(Databases, DiscardRefusesInitializedOrReadyStores)
+{
+    test::TempDir temporary;
+    const auto directory = temporary.path / "server";
+    {
+        TDatabases databases(directory);
+        databases.Create({{"name", "initialized"}, {"database_id", test::store_id}});
+        databases.Shutdown();
+    }
+    {
+        detail::Database registry;
+        registry.Open(directory / "registry.sqlite", SQLITE_OPEN_READWRITE, "");
+        registry.Execute("INSERT INTO databases(id,name,initialized,auto_open) VALUES(?,?,0,1)",
+            {test::table_uuid, "ready-but-unregistered"});
+    }
+    const auto ready = directory / "databases" / test::table_uuid;
+    std::filesystem::create_directory(ready);
+    {
+        std::ofstream(ready / "store.ready") << "must not be removed";
+    }
+    TDatabases databases(directory);
+    for (const auto* id : {test::store_id, test::table_uuid}) {
+        try {
+            databases.Change(id, "discard");
+            FAIL() << "discard must refuse initialized or ready stores";
+        } catch (const TFailure& error) {
+            EXPECT_EQ(error.Detail.code, "PRECONDITION_FAILED");
+        }
+    }
+    EXPECT_EQ(databases.List().at("items").size(), 2U);
+    EXPECT_TRUE(std::filesystem::exists(ready / "store.ready"));
+    EXPECT_EQ(databases.Get(test::store_id).at("state"), "open");
+    databases.Shutdown();
+}
+
+TEST(Databases, UncertainDiscardRequiresRegistryRecoveryBeforeReuse)
+{
+    for (const bool after : {false, true}) {
+        test::TempDir temporary;
+        test::JournalFaultVfs vfs;
+        const auto directory = temporary.path / "server";
+        {
+            TDatabases databases(directory);
+        }
+        {
+            detail::Database registry;
+            registry.Open(directory / "registry.sqlite", SQLITE_OPEN_READWRITE, "");
+            registry.Execute("INSERT INTO databases(id,name,initialized,auto_open) VALUES(?,?,0,1)",
+                {test::store_id, "reserved"});
+        }
+        {
+            TDatabases databases(directory, vfs.Name());
+            vfs.Arm(1, after);
+            EXPECT_THROW(databases.Change(test::store_id, "discard"), detail::Failure);
+            EXPECT_THROW(databases.Create({{"name", "reserved"}}), TFailure);
+            vfs.Disarm();
+            databases.Shutdown();
+        }
+        TDatabases reopened(directory);
+        EXPECT_EQ(reopened.List().at("items").size(), after ? 0U : 1U);
+        if (!after) {
+            EXPECT_EQ(reopened.Change(test::store_id, "discard").at("discarded"), true);
+        }
+        EXPECT_EQ(reopened.List().at("items").size(), 0U);
+    }
 }
 
 } // namespace glamdb::NServer

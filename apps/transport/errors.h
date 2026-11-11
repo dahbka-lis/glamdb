@@ -48,7 +48,7 @@ inline TErrorPolicy ErrorPolicy(std::string_view code)
     if (code == "PRECONDITION_FAILED") {
         return {412, FixInput};
     }
-    if (code == "PAYLOAD_TOO_LARGE") {
+    if (code == "PAYLOAD_TOO_LARGE" || code == "INPUT_TOO_LARGE") {
         return {413, FixInput};
     }
     if (code == "UNSUPPORTED_MEDIA_TYPE") {

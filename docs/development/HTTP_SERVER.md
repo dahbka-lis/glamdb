@@ -58,8 +58,9 @@ system OpenSSL Crypto for page SHA-256 checksums.
 | `POST /databases/{id}/open` | Open existing data and run core recovery |
 | `POST /databases/{id}/close` | Stop new calls, drain admitted calls and shut down |
 | `POST /databases/{id}/reconcile` | Run core reconciliation for an open engine |
+| `POST /databases/{id}/discard` | Remove an uninitialized reservation, preserving any incomplete files |
 
-Close/reconcile take `{}`; open accepts `{limits?:object}`. All routes require the bearer token. Collection
+Close/reconcile/discard take `{}`; open accepts `{limits?:object}`. All routes require the bearer token. Collection
 routes in the next table are relative to `/databases/{id}` in managed mode;
 `GET /capabilities` at the server root advertises `features.database_management`.
 A database response contains `{database_id,name,state,limits,store?,error?}`; states are
@@ -76,7 +77,13 @@ be resolved by listing databases or repeating the same request. There are no
 automatic client retries. An unfinished reservation without a store can be
 completed only by explicit creation. `open` never creates anything. An incomplete
 store, or a missing initialized store, remains an error and is never replaced.
-There is no drop/import/rename endpoint in this release.
+Discard returns `{database_id,discarded:true}` and releases the name, UUID and registry slot.
+It requires an uninitialized reservation with no owned engine and no `store.ready`;
+otherwise it returns 412. Any incomplete directory is preserved as an `incomplete-...`
+sibling. A registry write with an uncertain outcome requires restart before reuse;
+after restart, inspect the original ID (404 means the reservation was removed).
+Discard never removes an initialized or ready store. There is no drop/import/rename
+endpoint for initialized databases in this release.
 
 Optional `limits` configure the public engine limits. Creation merges omitted
 fields with defaults; an omitted limits object on retry preserves the existing
@@ -238,12 +245,17 @@ it does not register an operation. No implicit retry occurs in server or CLI.
 
 Errors are `{error:{code,message,retry_hint}}`, with the core retry hint unchanged.
 400 invalid request, 401 authentication, 404 authoritative absence, 409 conflict,
-412 precondition, 413 oversized body, 415 media type, 429 bounded resource admission,
+412 precondition, 413 oversized body or decoded input, 415 media type, 429 bounded resource admission,
 501 unsupported, 503 recovery/dependency/unresolved outcome, 504 deadline,
 507 storage capacity, 500 corruption/unexpected error. Database, collection and
 operation absence have distinct codes; only `OPERATION_NOT_FOUND` proves an
 operation lookup absent. Transport errors carry the shared retry policy; unexpected
 write failures preserve the original ID for outcome resolution.
+`INPUT_TOO_LARGE` with `FixInput` denotes the deterministic 2 MiB decoded row or
+16 MiB decoded batch limit; reducing the input is required. Retrying an unresolved
+append still validates its canonical payload: changed content with the same ID
+returns `OPERATION_CONFLICT` before reconciliation. The immutable schema used to
+decode that retry does not open core readiness or admit another write.
 Collections accept `page_size` 1..1000; insufficient size or any cursor returns
 501 rather than silently dropping entries or inventing an unstable cursor.
 
@@ -256,7 +268,10 @@ long data calls; health and global capabilities run on the I/O thread. Core reta
 its single serialized writer. Overload returns 503 with `Retry-After: 1` within the
 bounded response capacity. There are at most 64 header readers (32 per peer), 16
 admitted request bodies and 96 total connections, including overload responses;
-connections beyond the final ceiling are closed. Header reads have at most one
+at the final ceiling, accept pauses and checks for capacity every 100 ms. Excess
+connections wait in the kernel backlog instead of being accepted and reset. The
+OS backlog remains finite; connect/read timeouts still require clients to preserve
+the original write identity. Header reads have at most one
 second; body reads use `--request-timeout-ms` (default 10 seconds), and response
 writes have five seconds. Read deadlines never cancel admitted core work.
 Transient accept failures retry with backoff. Header limit: 16 KiB; request/response:

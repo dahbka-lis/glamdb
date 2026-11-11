@@ -282,7 +282,7 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
             return JsonResponse(Databases_->Get(parts[1]));
         }
         if (parts.size() == 3 && request.Method == "POST" &&
-            (parts[2] == "open" || parts[2] == "close" || parts[2] == "reconcile"))
+            (parts[2] == "open" || parts[2] == "close" || parts[2] == "reconcile" || parts[2] == "discard"))
         {
             return JsonResponse(Databases_->Change(parts[1], parts[2], body));
         }
@@ -359,19 +359,21 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
         Require(query.empty(), "unknown query parameter");
         return Scans_->Cancel(DatabaseID_, id, body);
     }
-    auto collection = Engine_->GetCollection(id);
-    if (!collection && collection.error().code == "RECOVERY_REQUIRED" && request.Method == "POST" &&
-        parts.size() == 3 && action == "append")
-    {
+    if (request.Method == "POST" && parts.size() == 3 && action == "append") {
+        Require(query.empty(), "unknown query parameter");
         CheckKeys(body, {"operation_id", "rows", "expected_snapshot"});
-        auto known = Unwrap(Engine_->FindAppendOutcome(id, body.at("operation_id").get<std::string>()));
-        // Report uncertainty with the original recovery identity. Never return a
-        // terminal receipt without validating the retry payload against schema.
-        if (known && known->disposition == CommitDisposition::CommitUnknown) {
-            return OutcomeResponse(json_adapter::ToJson(*known));
+        AppendRequest append;
+        append.collection_id = id;
+        append.operation_id = body.at("operation_id").get<std::string>();
+        if (body.contains("expected_snapshot")) {
+            append.expected_snapshot = body["expected_snapshot"].is_null()
+                ? SnapshotPrecondition{SnapshotPreconditionKind::NoSnapshot, 0}
+                : SnapshotPrecondition{SnapshotPreconditionKind::Equals, ParseInt64(body["expected_snapshot"])};
         }
+        append.batches.push_back(ParseRows(Unwrap(Engine_->SchemaForAppend(id)), body.at("rows")));
+        return OutcomeResponse(json_adapter::ToJson(Engine_->AppendDurable(append)));
     }
-    const auto info = Unwrap(std::move(collection));
+    const auto info = Unwrap(Engine_->GetCollection(id));
     if ((action == "stats" || action == "snapshots" || action == "files" || action == "explain")) {
         throw TFailure({"UNSUPPORTED_OPERATION", "native metadata/explain API is not available; inspect capabilities"});
     }
@@ -385,19 +387,6 @@ TResponse TRoutes::RoutePrepared(const TRequest& request,
         }
     }
     if (request.Method == "POST" && (parts.size() == 3 || (parts.size() == 4 && action == "scan"))) {
-        if (action == "append" && parts.size() == 3) {
-            CheckKeys(body, {"operation_id", "rows", "expected_snapshot"});
-            AppendRequest append;
-            append.collection_id = id;
-            append.operation_id = body.at("operation_id").get<std::string>();
-            if (body.contains("expected_snapshot")) {
-                append.expected_snapshot = body["expected_snapshot"].is_null()
-                    ? SnapshotPrecondition{SnapshotPreconditionKind::NoSnapshot, 0}
-                    : SnapshotPrecondition{SnapshotPreconditionKind::Equals, ParseInt64(body["expected_snapshot"])};
-            }
-            append.batches.push_back(ParseRows(info.schema, body.at("rows")));
-            return OutcomeResponse(json_adapter::ToJson(Engine_->AppendDurable(append)));
-        }
         if (action == "scan") {
             Require(parts.size() == 3 || parts[3] == "open", "route not found", "ROUTE_NOT_FOUND");
             const auto accept = request.Headers.find("accept");

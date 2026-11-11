@@ -29,7 +29,8 @@ build/client/glamdb-cli request --host localhost --port 8080 --path /capabilitie
 `create-store` creates a managed database over `POST /databases`; it accepts a
 server base URL and a database `--name`. The generic `request` command exposes every
 server route, including collection creation, append, operation lookup, scan, cursor
-continuation/cancellation, and database open/close/reconcile. Supply the complete
+continuation/cancellation, and database open/close/reconcile/discard. Discard only
+removes an uninitialized reservation without a ready store. Supply the complete
 route in `--url`, or append a `--path` to a base URL. Consult the
 [native HTTP contract](../../docs/development/HTTP_SERVER.md) for route bodies and
 supported features. A body file implies POST unless `--method` is explicit.

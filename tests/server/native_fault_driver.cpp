@@ -15,7 +15,7 @@
 // production managed server and storage backend. No fault route is installed.
 int main(int argc, char** argv)
 try {
-    if (argc != 2) {
+    if (argc != 2 && argc != 3) {
         return 2;
     }
     glamdb::test::JournalFaultVfs core, registry;
@@ -89,7 +89,11 @@ try {
         }
         core.Release();
     });
-    glamdb::NServer::RunServer(routes, "127.0.0.1", 0, std::chrono::seconds(10));
+    glamdb::NServer::RunServer(routes,
+        "127.0.0.1",
+        0,
+        std::chrono::seconds(10),
+        argc == 3 ? static_cast<size_t>(std::stoul(argv[2])) : 96);
     controls.join();
     databases->Shutdown();
     return 0;

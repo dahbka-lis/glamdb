@@ -79,6 +79,18 @@
     },
     {
       "method": "POST",
+      "path": "/databases/{database_id}/discard",
+      "core": "Service registry: refuse to discard initialized stores",
+      "status": 412,
+      "request": {},
+      "request_schema": "empty",
+      "response_fields": {
+        "error": "object"
+      },
+      "response_schema": "error"
+    },
+    {
+      "method": "POST",
       "path": "/databases/{database_id}/collections",
       "core": "Engine::CreateCollection",
       "status": 200,

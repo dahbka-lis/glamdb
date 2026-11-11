@@ -91,6 +91,7 @@ struct TEntry
     std::string State = "closed";
     std::optional<ErrorDetail> Error;
     bool RegistryFence = false;
+    bool Retired = false;
     std::shared_ptr<const TJson> Descriptor;
 };
 TJson Describe(const TEntry& entry)
@@ -116,7 +117,9 @@ void Publish(TEntry& entry)
 }
 TJson Current(const TEntry& entry)
 {
-    return *std::atomic_load(&entry.Descriptor);
+    const auto descriptor = std::atomic_load(&entry.Descriptor);
+    Require(descriptor->at("state") != "discarded", "database not found", "DATABASE_NOT_FOUND");
+    return *descriptor;
 }
 void ConfigureRegistry(detail::Database& registry)
 {
@@ -278,6 +281,7 @@ struct TDatabases::TImpl
     }
     void Open(TEntry& entry, bool create)
     {
+        Require(!entry.Retired, "database not found", "DATABASE_NOT_FOUND");
         Require(!create || entry.Initialized || Healthy, "registry needs restart", "RECOVERY_REQUIRED");
         Require(!entry.RegistryFence || Healthy,
             "database registry intent is uncertain; restart before reopening",
@@ -404,7 +408,10 @@ TJson TDatabases::List() const
 {
     auto items = TJson::array();
     for (const auto& entry : Impl_->Snapshot()) {
-        items.push_back(Current(*entry));
+        const auto descriptor = std::atomic_load(&entry->Descriptor);
+        if (descriptor->at("state") != "discarded") {
+            items.push_back(*descriptor);
+        }
     }
     return {{"items", items}, {"next_cursor", nullptr}};
 }
@@ -460,6 +467,7 @@ TJson TDatabases::Create(const TJson& body)
         }
     }
     std::lock_guard lifecycle(entry->Lifecycle);
+    Require(!entry->Retired, "database not found", "DATABASE_NOT_FOUND");
     if (entry->Accepting && entry->State == "open") {
         Require(!body.contains("limits") || EncodeLimits(requestedLimits) == EncodeLimits(entry->ResourceLimits),
             "database already exists with different limits",
@@ -482,7 +490,8 @@ TJson TDatabases::Create(const TJson& body)
 }
 TJson TDatabases::Change(const std::string& id, std::string_view action, const TJson& body)
 {
-    Require(action == "open" || action == "close" || action == "reconcile", "unknown database action");
+    Require(action == "open" || action == "close" || action == "reconcile" || action == "discard",
+        "unknown database action");
     if (action == "open") {
         CheckKeys(body, {"limits"});
         if (body.contains("limits")) {
@@ -508,6 +517,49 @@ TJson TDatabases::Change(const std::string& id, std::string_view action, const T
         }
     }
     std::lock_guard lifecycle(entry->Lifecycle);
+    Require(!entry->Retired, "database not found", "DATABASE_NOT_FOUND");
+    if (action == "discard") {
+        Require(!entry->Initialized && !entry->Instance && !entry->Closing,
+            "only an uninitialized, unowned reservation can be discarded",
+            "PRECONDITION_FAILED");
+        Require(Impl_->Healthy, "registry needs restart", "RECOVERY_REQUIRED");
+        std::unique_lock gate(entry->Gate);
+        const auto path = Impl_->Root / "databases" / entry->ID;
+        if (std::filesystem::exists(std::filesystem::symlink_status(path))) {
+            Require(!std::filesystem::exists(std::filesystem::symlink_status(path / "store.ready")),
+                "ready stores cannot be discarded",
+                "PRECONDITION_FAILED");
+            PreserveIncompleteStore(path);
+        }
+        TJson response{{"database_id", entry->ID}, {"discarded", true}};
+        auto descriptor = Current(*entry);
+        descriptor["state"] = "discarded";
+        auto retired = std::make_shared<const TJson>(std::move(descriptor));
+        std::lock_guard registryLock(Impl_->Mutex);
+        auto entries = std::make_shared<TImpl::TEntries>();
+        for (const auto& [registered, candidate] : Impl_->Entries) {
+            if (registered != id) {
+                entries->push_back(candidate);
+            }
+        }
+        try {
+            Impl_->Write("DELETE FROM databases WHERE id=? AND initialized=0", {id});
+        } catch (...) {
+            if (!Impl_->Healthy) {
+                entry->RegistryFence = true;
+            }
+            throw;
+        }
+        Require(Impl_->Registry.Changes() == 1, "reservation changed before discard", "PRECONDITION_FAILED");
+        // No allocation follows the confirmed registry commit. Stale callers
+        // retaining this entry must observe retirement before they can reopen it.
+        entry->Retired = true;
+        entry->Accepting = false;
+        std::atomic_store(&entry->Descriptor, std::move(retired));
+        Impl_->Entries.erase(id);
+        std::atomic_store(&Impl_->PublishedEntries, std::shared_ptr<const TImpl::TEntries>(std::move(entries)));
+        return response;
+    }
     if (action == "open" && entry->Accepting && entry->State == "open") {
         const auto limits =
             body.contains("limits") ? ParseLimits(body.at("limits"), entry->ResourceLimits) : entry->ResourceLimits;

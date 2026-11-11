@@ -27,7 +27,10 @@ class NativeFaultHTTP(unittest.TestCase):
         self.base = '/databases/' + self.database
 
     def start(self):
-        self.process = subprocess.Popen([DRIVER, str(self.directory)], stdin=subprocess.PIPE,
+        arguments = [DRIVER, str(self.directory)]
+        if hasattr(self, 'connection_limit'):
+            arguments.append(str(self.connection_limit))
+        self.process = subprocess.Popen(arguments, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
         self.assertTrue(select.select([self.process.stdout], [], [], 20)[0], 'server startup timed out')
         line = self.process.stdout.readline()
@@ -73,6 +76,103 @@ class NativeFaultHTTP(unittest.TestCase):
                 'schema': {'fields': [{'name': 'key', 'type': 'string'}]}}
         self.api(self.base + '/collections', body)
         return self.base + '/collections/' + cid
+
+    def test_discard_only_removes_uninitialized_reservations(self):
+        self.arm('core', 1, False)
+        self.api('/databases', {'name': 'abandoned'}, status=503)
+        self.arm('core', 0, False)
+        abandoned = next(item for item in self.api('/databases')['items'] if item['name'] == 'abandoned')
+        path = '/databases/' + abandoned['database_id']
+        self.assertTrue(self.api(path + '/discard', {})['discarded'])
+        self.api(path, status=404)
+        self.api(self.base + '/discard', {}, status=412)
+        self.assertEqual(len(self.api('/databases')['items']), 1)
+        self.stop()
+        self.start()
+        self.api(path, status=404)
+        replacement = self.api('/databases', {'name': 'abandoned'})
+        self.assertNotEqual(replacement['database_id'], abandoned['database_id'])
+
+    def test_connection_ceiling_waits_for_capacity_without_reset(self):
+        self.stop()
+        self.connection_limit = 2
+        self.start()
+        streams = []
+        try:
+            for _ in range(2):
+                stream = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+                streams.append(stream)
+                # Continue proves this socket was accepted and owns a body slot.
+                stream.sendall((f'POST {self.base}/open HTTP/1.1\r\nHost: local\r\n'
+                    f'Authorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\n'
+                    'Content-Length: 2\r\nExpect: 100-continue\r\n\r\n').encode())
+                response = b''
+                while not response.endswith(b'\r\n\r\n'):
+                    chunk = stream.recv(1)
+                    self.assertTrue(chunk, 'listener closed before Continue')
+                    response += chunk
+                self.assertEqual(response, b'HTTP/1.1 100 Continue\r\n\r\n')
+            pending = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+            streams.append(pending)
+            pending.sendall(b'GET /healthz HTTP/1.1\r\nHost: local\r\n\r\n')
+            self.assertFalse(select.select([pending], [], [], 0.1)[0], 'listener must wait instead of closing overflow')
+            streams[0].close()
+            response = http.client.HTTPResponse(pending)
+            response.begin()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read())['status'], 'live')
+            # A second complete body header fills the ceiling again. Shutdown
+            # must cancel the paused accept timer and close both idle bodies.
+            pending.close()
+            stream = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+            streams.append(stream)
+            stream.sendall((f'POST {self.base}/open HTTP/1.1\r\nHost: local\r\n'
+                f'Authorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\n'
+                'Content-Length: 2\r\nExpect: 100-continue\r\n\r\n').encode())
+            response = b''
+            while not response.endswith(b'\r\n\r\n'):
+                chunk = stream.recv(1)
+                self.assertTrue(chunk, 'listener closed before Continue')
+                response += chunk
+            self.assertEqual(response, b'HTTP/1.1 100 Continue\r\n\r\n')
+            self.stop()
+        finally:
+            for stream in streams:
+                stream.close()
+
+    def test_discards_waiting_on_close_do_not_starve_control_requests(self):
+        path = self.collection()
+        body = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'held'}]}
+        self.arm('pause', 1, False)
+        with ThreadPoolExecutor(max_workers=4) as workers:
+            append = workers.submit(self.api, path + '/append', body)
+            self.wait_for_publication()
+            close = workers.submit(self.api, self.base + '/close', {})
+            discards = []
+            try:
+                deadline = time.monotonic() + 5
+                while self.api(self.base)['state'] != 'closing':
+                    self.assertLess(time.monotonic(), deadline)
+                discards = [workers.submit(self.request, self.base + '/discard', {}) for _ in range(2)]
+                # Exercise controls while both discard requests have time to
+                # reach the server; they must never occupy the control workers.
+                deadline = time.monotonic() + 0.3
+                while time.monotonic() < deadline:
+                    connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=0.5)
+                    try:
+                        connection.request('GET', '/databases', headers={'Authorization': 'Bearer ' + TOKEN})
+                        response = connection.getresponse()
+                        self.assertEqual(response.status, 200, response.read())
+                    except TimeoutError:
+                        self.fail('discard requests starved database descriptors behind close')
+                    finally:
+                        connection.close()
+            finally:
+                self.arm('release', 0, False)
+            self.assertEqual(append.result(timeout=10)['outcome'], 'committed')
+            self.assertEqual(close.result(timeout=10)['state'], 'closed')
+            for discard in discards:
+                self.assertIn(discard.result(timeout=10)[0], (412, 503))
 
     def test_listener_recovers_after_descriptor_exhaustion(self):
         self.arm('exhaust-fds', 0, False)
@@ -147,6 +247,8 @@ class NativeFaultHTTP(unittest.TestCase):
                 self.assertEqual(lookup_unknown['outcome'], 'commit_unknown')
                 self.assertEqual(lookup_unknown['recovery'], unknown['recovery'])
                 self.assertEqual(self.api(path + '/append', body, status=503)['recovery'], unknown['recovery'])
+                conflict = self.api(path + '/append', dict(body, rows=[{'key': 'different'}]), status=409)
+                self.assertEqual(conflict['error']['code'], 'OPERATION_CONFLICT')
                 blocked = self.api(path + '/append', {'operation_id': str(uuid.uuid4()),
                     'rows': [{'key': 'must-not-publish'}]}, status=503)
                 self.assertEqual(blocked['error']['code'], 'RECOVERY_REQUIRED')

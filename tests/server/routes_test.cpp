@@ -41,14 +41,50 @@ TEST(NativeRoutes, OutcomeLookupRetainsUnknownRecoveryContext)
     request.Method = "POST";
     request.Target = std::string("/collections/") + test::collection_id + "/append";
     request.Headers["content-type"] = "application/json";
-    request.Body = NTransport::TJson({{"operation_id", test::operation_id}, {"rows", {{{"n", "1"}}}}}).dump();
+    request.Body = NTransport::TJson(
+        {{"operation_id", test::operation_id}, {"rows", {{{"n", "1"}}, {{"n", nullptr}}, {{"n", "1"}}}}})
+                       .dump();
     const auto retried = routes.Handle(request);
     ASSERT_EQ(retried.Status, 503);
     EXPECT_EQ(NTransport::ParseJson(retried.Body)["recovery"], value["recovery"]);
+    request.Body = NTransport::TJson({{"operation_id", test::operation_id}, {"rows", {{{"n", "2"}}}}}).dump();
+    const auto conflict = routes.Handle(request);
+    EXPECT_EQ(conflict.Status, 409) << conflict.Body;
+    EXPECT_EQ(NTransport::ParseJson(conflict.Body)["error"]["code"], "OPERATION_CONFLICT");
     request.Method = "GET";
     request.Target = std::string("/collections/") + test::collection_id + "/operations/" + test::operation_id;
     vfs.Disarm();
     ASSERT_TRUE(engine->Reconcile());
     EXPECT_EQ(NTransport::ParseJson(routes.Handle(request).Body)["outcome"], "committed");
+}
+
+TEST(NativeRoutes, DecodedInputLimitIsAnInputErrorWithoutBindingAnOperation)
+{
+    test::TempDir temporary;
+    const auto root = temporary.path / "store";
+    auto backend = std::make_shared<test::FakeStorage>(root);
+    auto engine = NTransport::Unwrap(detail::EngineFactory::Create({test::store_id, root.string()}, backend));
+    const SchemaSpec schema{
+        {{"a", FieldType::String, false}, {"b", FieldType::String, false}, {"c", FieldType::String, false}}};
+    ASSERT_EQ(engine->CreateCollection({test::collection_id, "wide", schema}).disposition,
+        CommitDisposition::Committed);
+    TRoutes routes(engine, {}, "secret");
+    NTransport::TRequest request;
+    request.Method = "POST";
+    request.Target = std::string("/collections/") + test::collection_id + "/append";
+    request.Headers = {{"authorization", "Bearer secret"}, {"content-type", "application/json"}};
+    const auto text = std::string(800000, 'x');
+    request.Body =
+        NTransport::TJson({{"operation_id", test::operation_id}, {"rows", {{{"a", text}, {"b", text}, {"c", text}}}}})
+            .dump();
+    const auto response = routes.Handle(request);
+    EXPECT_EQ(response.Status, 413) << response.Body;
+    const auto value = NTransport::ParseJson(response.Body);
+    EXPECT_EQ(value["error"]["code"], "INPUT_TOO_LARGE");
+    EXPECT_EQ(value["error"]["retry_hint"], "FixInput");
+    EXPECT_EQ(value["outcome"], "definitely_not_committed");
+    const auto outcome = engine->FindAppendOutcome(test::collection_id, test::operation_id);
+    ASSERT_TRUE(outcome);
+    EXPECT_FALSE(outcome->has_value());
 }
 } // namespace glamdb::NServer

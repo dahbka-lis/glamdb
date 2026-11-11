@@ -203,7 +203,7 @@ class NativeHTTP(unittest.TestCase):
         cid = str(uuid.uuid4())
         collection = '/collections/' + cid
         for path, body in [('/databases', {}), ('/databases/' + self.store_id, None),
-                           *[('/databases/' + self.store_id + '/' + action, {}) for action in ('open', 'close', 'reconcile')],
+                           *[('/databases/' + self.store_id + '/' + action, {}) for action in ('open', 'close', 'reconcile', 'discard')],
                            ('/collections', {}), (collection, None), (collection + '/schema', None),
                            (collection + '/append', {}), (collection + '/scan', {}),
                            (collection + '/scan/open', {}), (collection + '/scan/cancel', {}),
@@ -365,7 +365,7 @@ class NativeHTTP(unittest.TestCase):
         operation = str(uuid.uuid4())
         self.api(path + '/append', {'operation_id': operation, 'rows': [exact]})
         self.assertEqual(self.api(path + '/scan', {})['rows'], [exact])
-        for row, status in ((dict(exact, b=exact['b'] + 'b'), 429),
+        for row, status in ((dict(exact, b=exact['b'] + 'b'), 413),
                             ({'key': 'x', 'a': 'a' * 1048577}, 400)):
             rejected = str(uuid.uuid4())
             self.api(path + '/append', {'operation_id': rejected, 'rows': [row]}, status=status)

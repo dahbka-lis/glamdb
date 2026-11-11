@@ -284,7 +284,8 @@ private:
         const auto split = path.starts_with("/databases/") ? path.find('/', 11) : std::string::npos;
         const auto suffix = split == std::string::npos ? path : path.substr(split);
         const bool lifecycle = Request_.Method == "POST" &&
-            (path == "/databases" || suffix == "/open" || suffix == "/close" || suffix == "/reconcile");
+            (path == "/databases" || suffix == "/open" || suffix == "/close" || suffix == "/reconcile" ||
+                suffix == "/discard");
         const bool control = !lifecycle &&
             (path == "/databases" || (path.starts_with("/databases/") && split == std::string::npos) ||
                 !suffix.starts_with("/collections") || suffix.find("/operations/") != std::string::npos ||
@@ -351,8 +352,13 @@ private:
 };
 } // namespace
 
-void RunServer(TRoutes& routes, std::string_view address, uint16_t port, std::chrono::milliseconds timeout)
+void RunServer(TRoutes& routes,
+    std::string_view address,
+    uint16_t port,
+    std::chrono::milliseconds timeout,
+    size_t maxConnections)
 {
+    Require(maxConnections > 0 && maxConnections <= 96, "connection ceiling must be 1..96");
     TState state(routes, timeout);
     TTcp::acceptor acceptor(state.IO, TTcp::endpoint(asio::ip::make_address(address), port));
     asio::steady_timer retry(state.IO);
@@ -370,20 +376,31 @@ void RunServer(TRoutes& routes, std::string_view address, uint16_t port, std::ch
         }
     });
     std::function<void()> accept;
+    bool accepting = false, waiting = false;
     const auto backoff = [&] {
         retry.expires_after(std::chrono::milliseconds(100));
         retry.async_wait([&](const std::error_code& error) {
+            waiting = false;
             if (!error && acceptor.is_open()) {
                 accept();
             }
         });
+        waiting = true;
     };
     accept = [&] {
-        if (!acceptor.is_open()) {
+        if (!acceptor.is_open() || accepting || waiting) {
+            return;
+        }
+        // Leave excess connections in the kernel backlog until a response slot
+        // is available. Every accepted socket can then receive an HTTP response.
+        if (state.Sessions.size() >= maxConnections) {
+            backoff();
             return;
         }
         try {
+            accepting = true;
             acceptor.async_accept([&](const std::error_code& error, TTcp::socket socket) {
+                accepting = false;
                 if (!acceptor.is_open()) {
                     return;
                 }
@@ -392,15 +409,11 @@ void RunServer(TRoutes& routes, std::string_view address, uint16_t port, std::ch
                     return;
                 }
                 try {
-                    // Header sessions and admitted bodies have separate quotas;
-                    // the remaining slots bound asynchronous overload responses.
-                    if (state.Sessions.size() < 96) {
-                        auto session = std::make_shared<TSession>(std::move(socket), state);
-                        state.Sessions.insert(session);
-                        session->Guard([&] {
-                            session->Start();
-                        });
-                    }
+                    auto session = std::make_shared<TSession>(std::move(socket), state);
+                    state.Sessions.insert(session);
+                    session->Guard([&] {
+                        session->Start();
+                    });
                 } catch (...) {
                     std::error_code ignored;
                     socket.close(ignored);
@@ -410,6 +423,7 @@ void RunServer(TRoutes& routes, std::string_view address, uint16_t port, std::ch
                 accept();
             });
         } catch (...) {
+            accepting = false;
             backoff();
         }
     };
