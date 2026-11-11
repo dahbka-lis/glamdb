@@ -173,8 +173,8 @@ CompareOp Predicate::op() const noexcept
 const Literal& Predicate::value() const noexcept
 {
     static const Literal EmptyLiteral{std::string{}};
-    const auto& literal = optional_value();
-    return literal.has_value() ? *literal : EmptyLiteral;
+    const auto& value = optional_value();
+    return value.has_value() ? *value : EmptyLiteral;
 }
 
 const OptionalLiteral& Predicate::optional_value() const noexcept
@@ -477,10 +477,11 @@ void EvalInStrip(const arrow::Array& column, int64_t offset, const TBoundInSet& 
 }
 
 template <typename TArray, typename TBuilder>
-Result<std::shared_ptr<arrow::Array>> TakeTyped(const arrow::Array& column, std::span<const int64_t> rows)
+Result<std::shared_ptr<arrow::Array>>
+TakeTyped(const arrow::Array& column, std::span<const int64_t> rows, arrow::MemoryPool* pool)
 {
     const auto& array = static_cast<const TArray&>(column);
-    TBuilder builder(column.type(), arrow::default_memory_pool());
+    TBuilder builder(column.type(), pool);
     if (const auto status = builder.Reserve(static_cast<int64_t>(rows.size())); !status.ok()) {
         return std::unexpected(ArrowError(status, "cannot reserve selected rows"));
     }
@@ -558,8 +559,8 @@ Result<TBoundPredicate> BindPredicate(const Predicate& predicate, const SchemaSp
                     }
                     bound.ReferencedFields.push_back(*fieldIndex);
                     const auto& field = schema.fields[*fieldIndex];
-                    const auto& optionalValue = current.optional_value();
-                    if (!optionalValue.has_value()) {
+                    const auto& comparisonValue = current.optional_value();
+                    if (!comparisonValue.has_value()) {
                         bound.Ops.push_back(TBoundOp{
                             .Kind = EBoundOpKind::PushCompareNull,
                             .FieldIndex = *fieldIndex,
@@ -568,7 +569,7 @@ Result<TBoundPredicate> BindPredicate(const Predicate& predicate, const SchemaSp
                         });
                         break;
                     }
-                    auto literal = CheckLiteral(field, *optionalValue);
+                    auto literal = CheckLiteral(field, *comparisonValue);
                     if (!literal) {
                         return std::unexpected(literal.error());
                     }
@@ -858,20 +859,24 @@ Result<std::vector<int64_t>> SelectRows(const TBoundPredicate& predicate, const 
     }
 }
 
-Result<std::shared_ptr<arrow::Array>> TakeRows(const arrow::Array& column, std::span<const int64_t> rows)
+Result<std::shared_ptr<arrow::Array>>
+TakeRows(const arrow::Array& column, std::span<const int64_t> rows, arrow::MemoryPool* pool)
 {
     try {
+        if (pool == nullptr) {
+            pool = arrow::default_memory_pool();
+        }
         switch (column.type_id()) {
             case arrow::Type::STRING:
-                return TakeTyped<arrow::StringArray, arrow::StringBuilder>(column, rows);
+                return TakeTyped<arrow::StringArray, arrow::StringBuilder>(column, rows, pool);
             case arrow::Type::BOOL:
-                return TakeTyped<arrow::BooleanArray, arrow::BooleanBuilder>(column, rows);
+                return TakeTyped<arrow::BooleanArray, arrow::BooleanBuilder>(column, rows, pool);
             case arrow::Type::INT64:
-                return TakeTyped<arrow::Int64Array, arrow::Int64Builder>(column, rows);
+                return TakeTyped<arrow::Int64Array, arrow::Int64Builder>(column, rows, pool);
             case arrow::Type::DOUBLE:
-                return TakeTyped<arrow::DoubleArray, arrow::DoubleBuilder>(column, rows);
+                return TakeTyped<arrow::DoubleArray, arrow::DoubleBuilder>(column, rows, pool);
             case arrow::Type::TIMESTAMP:
-                return TakeTyped<arrow::TimestampArray, arrow::TimestampBuilder>(column, rows);
+                return TakeTyped<arrow::TimestampArray, arrow::TimestampBuilder>(column, rows, pool);
             default:
                 return std::unexpected(Internal("unsupported column type for row selection"));
         }
