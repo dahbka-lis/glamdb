@@ -12,6 +12,11 @@ try {
     glamdb::NTransport::Require(argc == 2 || argc == 3, "expected service directory and optional saturation mode");
     glamdb::ResourceLimits limits;
     limits.memory_bytes[1] = 8ULL << 30;
+    if (argc == 3 && std::string_view(argv[2]) == "many-readers") {
+        limits.memory_bytes[0] = 4ULL << 30;
+        limits.memory_bytes[1] = 16ULL << 30;
+        limits.memory_bytes[4] = 8ULL << 30;
+    }
     auto owner = std::make_shared<glamdb::ResourceOwner>(limits);
     {
         auto databases = std::make_shared<glamdb::NServer::TDatabases>(argv[1], "", owner);

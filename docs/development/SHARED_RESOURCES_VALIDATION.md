@@ -5,17 +5,18 @@ Checks updated on 2026-11-12 after integration with official main.
 Environment: Ubuntu 24.04.4, Linux x86-64, Clang 18.1.3, Debug builds,
 pinned libc++ 18 and repository dependencies. The test filesystem reports
 `ext2/ext3` through `stat -f`; this is not the dedicated G4 qualification volume.
-The final tree includes official main through `133a626`.
+The final tree includes official main through `1f48601`.
 
 ## Checks
 
 | Check | Result |
 | --- | --- |
-| Storage-enabled build and full native CTest suite | PASS: 629 passed, three skipped, one disabled; 633 discovered |
-| Resource owner/pool, shared-store, compound predicate, native route, file metadata, workspace recovery and HTTP profile tests under ASan/UBSan/LSan | PASS: 58 tests, leak detection enabled |
-| Storage-disabled resource, predicate, transport, bootstrap and installed public consumer checks | PASS: 45 tests |
-| LLVM 18 formatting | PASS: 204 project files |
-| LLVM 18 static analysis with configured warnings as errors | PASS: 24 original changed translation units; 14 merged/updated units rechecked, including project headers |
+| Storage-enabled build and full native CTest suite | PASS: 645 passed, three skipped, one disabled; 649 discovered |
+| Resource owner/pool, shared-store, compound predicate, native route, file metadata, workspace recovery, HTTP admission/lifecycle and profile tests under ASan/UBSan/LSan | PASS: 95 tests, leak detection enabled |
+| Storage-disabled full CTest suite | PASS: 324 passed, one existing disabled test |
+| Affected Python SDK outcome, scan-page and cleanup tests | PASS: 97 tests |
+| LLVM 18 formatting | PASS: 206 project files |
+| LLVM 18 static analysis with configured warnings as errors | PASS: 24 original changed translation units; 21 integration units checked, including project headers |
 | Quality negative checks and `git diff --check` | PASS |
 
 The skipped cases are the standalone `CapacityRecoveryChild.RejectsOverBudgetStore`,
@@ -40,9 +41,8 @@ GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 \
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
   UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 ARROW_DEFAULT_MEMORY_POOL=system \
   ctest --test-dir build/issue-43-asan --output-on-failure -V --parallel 2 \
-  -R 'ResourceOwner|ResourcePool|MetadataResources|SharedResources|SharedPressure|TFileMetadataTest|RecoveryWorkspaces|ScanPredicate|ScanMockTest|Compound|glamdb.resource_profile'
-ctest --test-dir build/nostorage --output-on-failure \
-  --parallel 2 -R 'ResourceOwner|ResourcePool|MetadataResources|ScanPredicate|Transport|EngineBootstrap|^glamdb.installed_consumer$'
+  -R 'ResourceOwner|ResourcePool|MetadataResources|SharedResources|SharedPressure|TFileMetadataTest|RecoveryWorkspaces|ScanPredicate|ScanMockTest|Compound|Admission|ScanSessionsTest|ReplayAdmissionTest|glamdb\.(native_http|http_review|native_http_fault|scan_http|http_lifecycle|resource_profile)$'
+ctest --test-dir build/nostorage --output-on-failure --parallel 2
 cmake --build build/local --target format-check quality-negative-check
 ctest --test-dir build/local --output-on-failure -V -R '^glamdb.resource_profile$'
 ```
@@ -119,6 +119,18 @@ nested literals, unused vector capacity, extracted subtree lifetime and a
 refusal without leaked reservations and an explanation subtree surviving engine
 close. The scoped independent review finished with no remaining findings.
 
+The later HTTP admission merge preserves queued body leases and separate
+replay/outgoing leases. Shared-parent refusal precedes row consumption and does
+not invalidate an existing cursor; both first-page and next-page cases fill the
+Data class and check the original replay and fixed view after release.
+
+Logical quota tests use explicit finite profiles. Thirty-three retained Parquet
+readers require more than the default 8 GiB Metadata envelope, so their dedicated
+fixture uses 16 GiB Metadata. The eight-store, 64-session HTTP quota cases use
+4 GiB Data, 16 GiB Metadata and 8 GiB Recovery. These cases first refused under
+the smaller default profile. Production defaults and the three-database measured
+profile remain 2 GiB Data, 8 GiB Metadata and 4 GiB Recovery.
+
 ## Measured HTTP profile
 
 `glamdb.resource_profile` creates three managed databases with one collection
@@ -133,8 +145,8 @@ One normal run recorded these reservation high-water marks, in bytes:
 
 | Process phase | Data | Metadata | Control | Completion | Recovery |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Concurrent load | 1,380,233,782 | 2,126,693,376 | 81,920 | 4,588,556 | 2,432,696,320 |
-| Fresh-process reopen | 404,468,630 | 1,053,038,336 | 49,152 | 262,144 | 2,432,696,320 |
+| Concurrent load | 1,446,772,098 | 2,651,070,720 | 98,304 | 4,588,556 | 2,432,696,320 |
+| Fresh-process reopen | 404,468,630 | 1,057,240,832 | 49,152 | 262,144 | 2,432,696,320 |
 | Ordinary classes full | 2,147,483,648 | 8,589,934,592 | 16,777,216 | 4,588,670 | 2,432,696,320 |
 
 Actual Arrow allocator peaks and process RSS are measured separately from those
@@ -142,12 +154,12 @@ conservative reservations:
 
 | Process phase | Arrow peak bytes | Peak RSS bytes | Pending device bytes peak | Pending inodes peak |
 | --- | ---: | ---: | ---: | ---: |
-| Concurrent load | 1,238,016 | 89,026,560 | 3,012,558,848 | 240 |
-| Fresh-process reopen | 417,792 | 76,124,160 | 2,475,687,936 | 112 |
-| Ordinary classes full | 32,832 | 33,972,224 | 2,475,687,936 | 112 |
+| Concurrent load | 1,729,984 | 130,867,200 | 3,280,994,304 | 304 |
+| Fresh-process reopen | 417,792 | 85,348,352 | 2,475,687,936 | 112 |
+| Ordinary classes full | 32,832 | 36,433,920 | 2,475,687,936 | 112 |
 
-The load returned nine retryable `SERVER_BUSY` admissions and completed after
-retrying them. A 5 ms sampler observed physical tree peaks of 401,408 bytes and
+The load completed without `SERVER_BUSY` refusals under the separate reader
+and publisher pools. A 5 ms sampler observed physical tree peaks of 401,408 bytes and
 49 entries, including an 8,192-byte recovery workspace. Sampling may miss shorter
 peaks; it is not a physical upper bound. The Arrow metric is the default upstream
 pool's high-water allocation count; RSS includes non-Arrow memory and allocator
@@ -155,7 +167,7 @@ retention. Every process reported zero remaining memory/device/inode reservation
 after shutdown.
 
 The same profile passed under ASan/UBSan/LSan. That run recorded peak RSS of
-346,550,272 bytes during load, 193,404,928 during reopen and 136,794,112 with
+396,693,504 bytes during load, 215,920,640 during reopen and 144,576,512 with
 ordinary classes full. Sanitizer overhead makes these separate measurements.
 Scheduling changes reservation peaks and retry counts between runs.
 
