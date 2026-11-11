@@ -25,6 +25,13 @@ ErrorDetail Internal(std::string_view message)
     return {"INTERNAL", BoundedDiagnostic(message), RetryHint::OperatorAction};
 }
 
+ErrorDetail AllocationError(const arrow::Status& status, std::string_view context)
+{
+    return {status.IsOutOfMemory() ? "RESOURCE_EXHAUSTED" : "INTERNAL",
+        BoundedDiagnostic(std::string(context) + ": " + status.ToString()),
+        RetryHint::OperatorAction};
+}
+
 Result<Literal> CheckLiteral(const FieldSpec& field, const Literal& value)
 {
     switch (field.type) {
@@ -98,12 +105,13 @@ std::vector<int64_t> SelectTyped(const arrow::Array& column, CompareOp op, const
 }
 
 template <class TArray, class TBuilder>
-Result<std::shared_ptr<arrow::Array>> TakeTyped(const arrow::Array& column, std::span<const int64_t> rows)
+Result<std::shared_ptr<arrow::Array>>
+TakeTyped(const arrow::Array& column, std::span<const int64_t> rows, arrow::MemoryPool* pool)
 {
     const auto& array = static_cast<const TArray&>(column);
-    TBuilder builder(column.type(), arrow::default_memory_pool());
+    TBuilder builder(column.type(), pool ? pool : arrow::default_memory_pool());
     if (const auto status = builder.Reserve(static_cast<int64_t>(rows.size())); !status.ok()) {
-        return std::unexpected(Internal("cannot reserve selected rows: " + status.ToString()));
+        return std::unexpected(AllocationError(status, "cannot reserve selected rows"));
     }
     for (const auto row : rows) {
         if (row < 0 || row >= array.length()) {
@@ -111,12 +119,12 @@ Result<std::shared_ptr<arrow::Array>> TakeTyped(const arrow::Array& column, std:
         }
         const auto status = array.IsNull(row) ? builder.AppendNull() : builder.Append(array.GetView(row));
         if (!status.ok()) {
-            return std::unexpected(Internal("cannot copy selected row: " + status.ToString()));
+            return std::unexpected(AllocationError(status, "cannot copy selected row"));
         }
     }
     std::shared_ptr<arrow::Array> result;
     if (const auto status = builder.Finish(&result); !status.ok()) {
-        return std::unexpected(Internal("cannot finish selected rows: " + status.ToString()));
+        return std::unexpected(AllocationError(status, "cannot finish selected rows"));
     }
     return result;
 }
@@ -176,19 +184,20 @@ Result<std::vector<int64_t>> SelectRows(const TBoundPredicate& predicate, const 
     return std::unexpected(Internal("unsupported predicate type"));
 }
 
-Result<std::shared_ptr<arrow::Array>> TakeRows(const arrow::Array& column, std::span<const int64_t> rows)
+Result<std::shared_ptr<arrow::Array>>
+TakeRows(const arrow::Array& column, std::span<const int64_t> rows, arrow::MemoryPool* pool)
 {
     switch (column.type_id()) {
         case arrow::Type::STRING:
-            return TakeTyped<arrow::StringArray, arrow::StringBuilder>(column, rows);
+            return TakeTyped<arrow::StringArray, arrow::StringBuilder>(column, rows, pool);
         case arrow::Type::BOOL:
-            return TakeTyped<arrow::BooleanArray, arrow::BooleanBuilder>(column, rows);
+            return TakeTyped<arrow::BooleanArray, arrow::BooleanBuilder>(column, rows, pool);
         case arrow::Type::INT64:
-            return TakeTyped<arrow::Int64Array, arrow::Int64Builder>(column, rows);
+            return TakeTyped<arrow::Int64Array, arrow::Int64Builder>(column, rows, pool);
         case arrow::Type::DOUBLE:
-            return TakeTyped<arrow::DoubleArray, arrow::DoubleBuilder>(column, rows);
+            return TakeTyped<arrow::DoubleArray, arrow::DoubleBuilder>(column, rows, pool);
         case arrow::Type::TIMESTAMP:
-            return TakeTyped<arrow::TimestampArray, arrow::TimestampBuilder>(column, rows);
+            return TakeTyped<arrow::TimestampArray, arrow::TimestampBuilder>(column, rows, pool);
         default:
             return std::unexpected(Internal("unsupported column type for row selection"));
     }

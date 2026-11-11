@@ -65,7 +65,7 @@ SnapshotHistory ReadHistory(const TScanContext& context, std::span<const AppendR
                 "multiple receipts identify one snapshot");
         }
     }
-    SnapshotHistory history{context.Base, {}};
+    SnapshotHistory history{.identity = context.Base};
     auto snapshots = root->snapshots;
     for (const auto& snapshot : snapshots) {
         Require(snapshot != nullptr, "CORRUPTION", "retained snapshot is null");

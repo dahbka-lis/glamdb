@@ -175,3 +175,12 @@ if(TARGET glamdb_routes)
         "${CMAKE_CURRENT_SOURCE_DIR}/server/lifecycle_test.py" "$<TARGET_FILE:glamdb_http_lifecycle_driver>")
     set_tests_properties(glamdb.http_lifecycle PROPERTIES LABELS "integration;http;fault" TIMEOUT 30)
 endif()
+
+if(TARGET glamdb_routes)
+    add_executable(glamdb_resource_profile_driver server/resource_profile_driver.cpp
+        "${PROJECT_SOURCE_DIR}/apps/server/server.cpp")
+    target_link_libraries(glamdb_resource_profile_driver PRIVATE glamdb_routes glamdb_build_options)
+    add_test(NAME glamdb.resource_profile COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/server/resource_profile_test.py" "$<TARGET_FILE:glamdb_resource_profile_driver>")
+    set_tests_properties(glamdb.resource_profile PROPERTIES LABELS "integration;http;resources" TIMEOUT 240)
+endif()

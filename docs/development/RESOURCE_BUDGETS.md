@@ -12,8 +12,9 @@ final head `ee480ec9a10ab3d6baabf9b5296accf57a82adba`, merge
 against the subsequent health/API baseline `4e53c89`. **Current** means an
 implemented local check, not a qualified simultaneous resource guarantee.
 **Required** identifies enforcement still needed before a profile can claim a
-bounded process. This document does not add configuration fields or runtime
-quotas. Full-engine memory, capacity and durability qualification remain open.
+bounded process. [The shared owner](SHARED_RESOURCES.md) now implements finite
+reservation classes and device admission through public `ResourceLimits`.
+Full-engine RSS, capacity and durability qualification remain open.
 
 ## Accounting units
 
@@ -42,24 +43,23 @@ must budget those buffers separately.
 
 A bounded deployment must have a process owner (the embedding host or HTTP
 service) whose budgets cover every open store and every surviving lease. Store
-sub-budgets cannot each independently spend the full process allowance. The
-symbols below describe the required accounting contract, not existing public
-`Limits` members. Finite numeric data/metadata/control envelopes need measured
-profiles; the current implementation has no aggregate caps for these classes.
+sub-budgets cannot each independently spend the full process allowance. The symbols below describe accounting classes, separate from per-engine `Limits`.
+`ResourceLimits` configures finite shared envelopes; their conservative upstream
+estimates still need workload-specific calibration and RSS measurements.
 
 | Budget / unit | Scope and owner | Reservation, enforcement and release | Status |
 | --- | --- | --- | --- |
-| Data memory `D`, allocated bytes | Process parent; engine writer and scanner children; transport decode/encode children | Reserve before allocation for input copies, Parquet buffers, decompression, filtering, output batches and IPC/JSON assembly. Keep simultaneous copies charged. Transfer accounting with ownership; release only when the last owning buffer is freed. | Required; Arrow default pools and the owned-input estimate do not enforce `D`. |
-| Metadata memory `M`, allocated bytes | Process parent; catalog, backend, planner and recovery children | Charge materialized roots/history, manifest lists/entries, schemas, metrics, footer parsing, caches and SQLite memory before loading or growing them. Retain charges with plans/caches; lazy file iteration alone is insufficient. | Required; file/count caps below bound persisted inputs, not decoder expansion or combined metadata RAM. |
-| Control memory `C`, allocated bytes | Process parent; engine coordinator and service admission children | Charge operation/recovery contexts, pending-call descriptors, tasks, timers and error/receipt serialization. Partition ordinary admission, completion and recovery capacity; ordinary requests cannot borrow the protected partitions. Release with the last descriptor/context. | Required; worker and call counts are current checks, not a byte budget. |
-| Completion reserve, bytes and slots within `C` plus execution memory/disk | Coordinator owns an admitted attempt; catalog and backend consume its child reservations | Before durable binding, reserve enough to finish or durably record failure, retain an unknown context, perform checked close and emit a bounded outcome. Keep it through publication/failure recording or transfer it to reconciliation. Disconnect never releases an executing attempt's reserve. | Current catalog headroom check: 24,576 reusable/growable page bytes before binding/creation. General memory/slot reservations are required. |
-| Recovery reserve, memory bytes, workspace disk bytes and control slots | Process parent grants an engine recovery child before open/reconciliation | Protect root/catalog validation, retained-history traversal, durability fence and resolution of unfinished bindings from normal data admission. Retain through recovery, including uncertainty; release temporary workspace after its last handle closes. | Current workspace: temporary SQLite database at most 256 MiB with eight 4 KiB cache pages. Shared recovery memory, filesystem reservations and process-wide recovery concurrency are required. |
+| Data memory `D`, allocated bytes | Process parent; engine writer and scanner children; transport decode/encode children | Reserve before allocation for input copies, Parquet buffers, decompression, filtering, output batches and IPC/JSON assembly. Keep simultaneous copies charged. Transfer accounting with ownership; release only when the last owning buffer is freed. | Current tracked Arrow pools, owned-input and writer/transport envelopes share the parent. RSS qualification remains open. |
+| Metadata memory `M`, allocated bytes | Process parent; catalog, backend, planner and recovery children | Charge materialized roots/history, manifest lists/entries, schemas, metrics, footer parsing, caches and SQLite memory before loading or growing them. Retain charges with plans/caches; lazy file iteration alone is insufficient. | Current cached-root charges and catalog/planner/footer/recovery envelopes share the parent. Upstream expansion estimates remain conservative. |
+| Control memory `C`, allocated bytes | Process parent; engine coordinator and service admission children | Charge operation/recovery contexts, pending-call descriptors, tasks, timers and error/receipt serialization. Partition ordinary admission, completion and recovery capacity; ordinary requests cannot borrow the protected partitions. Release with the last descriptor/context. | Current descriptor envelopes and protected completion/recovery classes complement the worker/call counts. |
+| Completion reserve, bytes and slots within `C` plus execution memory/disk | Coordinator owns an admitted attempt; catalog and backend consume its child reservations | Before durable binding, reserve enough to finish or durably record failure, retain an unknown context, perform checked close and emit a bounded outcome. Keep it through publication/failure recording or transfer it to reconciliation. Disconnect never releases an executing attempt's reserve. | Current 64 KiB completion reservation plus execution/device envelopes before binding; uncertainty retains them. The existing 24,576-byte catalog headroom check also applies. |
+| Recovery reserve, memory bytes, workspace disk bytes and control slots | Process parent grants an engine recovery child before open/reconciliation | Protect root/catalog validation, retained-history traversal, durability fence and resolution of unfinished bindings from normal data admission. Retain through recovery, including uncertainty; release temporary workspace after its last handle closes. | Current 768 MiB protected memory per engine plus a reserved 256 MiB workspace on the store device; the workspace uses eight 4 KiB cache pages. |
 | Shared pending calls `P`, count | Process admission owner with per-store children and separate control/recovery slots | Reserve before posting or entering work; include queued and executing calls across every API/store. Hold until the underlying call finishes, even if its caller disconnects. Data calls cannot spend protected lookup/recovery slots. | Required across independent embedded engines; current HTTP dispatch counts are listed below. |
 | Owned input, estimated bytes | Per store, shared across collections; `Engine::Impl` | `max_owned_input_bytes` defaults to 128 MiB. Reserve under the state mutex after writer acquisition and original-outcome lookup, before normalization; the append admission guard releases it when the synchronous call exits. | Current; only new operations consume this reservation. |
 | Pending append calls, count | Per store, shared across collections; coordinator | `max_pending_calls` defaults to 16, including the writer and queued calls. Admission guard decrements on exit, including failures. Fingerprinting precedes this admission and is not process-wide concurrency control. | Current; shared admission for other embedded calls and across stores is required. |
 | Writer wait / append deadline, milliseconds | Per store configuration; coordinator | Defaults/maxima: 5,000 / 60,000. Bound writer waiting and check the append deadline before execution/publication. Neither forcibly interrupts OS I/O nor proves rollback. | Current. |
-| Returned buffers and active scans, allocated bytes / cursor count | Scanner and caller share a lease; process/store data and metadata children | Charge retained results, slices and C Data exports even after cursor cancellation, engine shutdown or release of the engine object. Charge backing allocations once; charge copies separately. Release buffer charges only on final buffer destruction. | Current store-ownership leases; runtime memory leases, embedded scan-count quotas and byte quotas are required. |
-| Public metadata calls/results, allocated bytes | Engine read call and caller-owned DTOs; process/store metadata children | History materializes catalog operations, receipts and a root; statistics/explain/file APIs materialize the selected root/list and one manifest at a time. File listing retains descriptor DTOs; details retain one verified bounded Parquet footer and row-group DTOs. Release temporary structures when the call ends and DTO allocations when their caller releases them. The confirmed-root lease lasts through the call. | Current file/history/footer caps and allocation-error reporting; shared metadata reservations, concurrent-call quotas and DTO memory accounting are required. |
+| Returned buffers and active scans, allocated bytes / cursor count | Scanner and caller share a lease; process/store data and metadata children | Charge retained results, slices and C Data exports even after cursor cancellation, engine shutdown or release of the engine object. Charge backing allocations once; charge copies separately. Release buffer charges only on final buffer destruction. | Current pool and metadata leases survive cancellation/close through buffers, slices and C Data exports. Parent bytes bound concurrent scans; no separate embedded count quota. |
+| Public metadata calls/results, allocated bytes | Engine read call and caller-owned DTOs; process/store metadata children | History materializes catalog operations, receipts and a root; statistics/explain/file APIs materialize the selected root/list and one manifest at a time. File listing retains descriptor DTOs; details retain one verified bounded Parquet footer and row-group DTOs. Release temporary structures when the call ends and DTO allocations when their caller releases them. The confirmed-root lease lasts through the call. | Current file/history caps, shared metadata working envelopes and capacity-sized leases for original returned results. Independently copied caller DTOs belong to the host budget. |
 
 [`Limits`](../../public/storage/types.h),
 [`Engine::AppendDurable`](../../core/engine/engine.cpp),
@@ -73,14 +73,14 @@ Reservations must be atomic at the shared parent, overflow checked and released
 on every refusal/exception path. Use one class owner per allocation; transfers
 must not create an uncharged interval or double-credit the parent. Conservatively
 reserve an upper bound when an upstream allocator cannot be charged directly,
-and refuse before starting that work if the bound is unavailable. A future
-process-memory limit must include simultaneous data, metadata, control and
+and refuse before starting that work if the bound is unavailable. A qualified
+process-memory profile must include simultaneous data, metadata, control and
 untracked runtime overhead; `max_owned_input_bytes` alone is not that limit.
 
 ## Input and transport matrix
 
-All rows below are **Current** local checks. Their owners must become children
-of the shared budgets above to bound combined usage. CLI, SDK and UI requests
+All rows below are **Current** local checks. Their native owners also use
+the shared reservation envelopes above. CLI, SDK and UI requests
 use these same server checks; their own client memory belongs to their process.
 
 | Limit / unit | Bound and scope | Owner and enforcement / release |
@@ -91,7 +91,7 @@ use these same server checks; their own client memory belongs to their process.
 | HTTP header / body, bytes | 16 KiB header; 16 MiB request body | Session header parsing, Content-Length validation and bounded body read. Release buffers when the session and outstanding worker references finish. JSON parsing adds up to 32 nesting levels and 5,200,000 parser events, not a DOM-memory quota. |
 | HTTP response / page, bytes and rows | 16 MiB body; scan page at most 10,000 rows, soft target 4 MiB | Route serializers and bounded IPC output prepare the complete body before success headers. A single row may exceed the soft target if the complete envelope fits. Hold outgoing copies through write completion/timeout. |
 | HTTP connections / header readers / bodies, counts | Per service: 96 connections by default, including overload replies; 64 header readers, at most 32 per peer; 16 admitted nonempty bodies | `TState`/`TSession`; release reader count after headers, body count at session finish, connection at final release. Accept pauses at the connection ceiling. Counts exclude kernel backlog/buffer accounting. |
-| HTTP admitted calls, counts | Per service: 4 data calls, at most 2 per database; 8 control calls on 2 workers; 2 lifecycle calls on 2 workers | Dispatch increments before posting; completion/finish decrements. Separate pools protect control progress but do not reserve completion memory. Health/capabilities observations run on the I/O thread. |
+| HTTP admitted calls, counts | Per service: 4 data calls, at most 2 per database; 8 control calls on 2 workers; 2 lifecycle calls on 2 workers | Dispatch increments before posting; completion/finish decrements. Separate pools and protected memory reservations preserve control progress. Health/capabilities observations run on the I/O thread. |
 | HTTP scan sessions, count / time | 64 per service, at most 8 per database; 60 s idle / 300 s lifetime | `TScans`; release on cancellation, expiry, failed page, database lifecycle drain or shutdown. Replay does not refresh idle expiry. Returned/in-flight resources can outlive session removal. |
 | Replay bodies and page reservations, serialized bytes | Shared 128 MiB per service | Before page consumption, `TScans::Charge` atomically reserves a full 16 MiB response alongside the previous replay body. Refusal leaves an existing cursor and replay unchanged. Successful encoding replaces both charges with the retained body size; failure/cancel/expiry releases the reservation. Completed replays may be evicted. Does not account for pending Arrow batches, response copies, headers, schema/JSON objects or allocator capacity. |
 | Database descriptors, count | 64 per managed service | `TDatabases::Create` under its shared mutex; persisted registry entries include closed/error databases. This is not a cap on the total memory or disk of their stores. |
@@ -109,7 +109,7 @@ The replay cap cannot be used as a bound on total scan or process memory.
 ## Persistent capacity and disk matrix
 
 These are **Current** development defaults, shared across collections where
-marked store-wide, except the device-wide reservation row marked **Required**.
+marked store-wide; the final row describes shared device admission.
 Only public `Limits` fields are configurable through the
 HTTP database `limits` object; private storage/FileIO/attempt limits are not
 additional HTTP settings. Persistent charges do not disappear when a call ends.
@@ -126,8 +126,8 @@ additional HTTP settings. Persistent charges do not disappear when a call ends.
 | Attempt new-file / I/O volume, bytes | 256 MiB new files; 512 MiB requested reads plus writes per attempt, including retries | `TIOAttempt` reserves requested writes before I/O and settles new-file usage to accepted bytes, refunding unused file capacity. Requested I/O stays charged even on failure. Handles retain their originating attempt. Attempt completion does not refund physical files left behind. Not a process memory or device-space reservation. |
 | Warehouse, physical bytes | 1 TiB per store, including orphans; admit only if another 256 MiB attempt fits | Backend preflight measures warehouse before binding and reuses that measurement for the same append, rechecking identity/free space before production. The publication guard remeasures after production; recovery checks retained physical usage without requiring a future attempt reserve. Successful removal of an eligible superseded root releases its disk use; no general orphan cleanup. |
 | Filesystem headroom / attempt / journal, available bytes | `max(1 GiB, ceil(filesystem_capacity / 20)) + 256 MiB + 256 MiB` | `CheckDiskReserve` compares against available space. This is a preflight check, not filesystem preallocation or a shared reservation across databases/processes. Preserve journal/recovery room when rejecting new writes. |
-| Recovery workspace, page bytes | Temporary SQLite database at most 256 MiB per verifier | Recovery owns it outside catalog/warehouse accounting. Its temporary filesystem needs space independently of the store volume; workspace exhaustion fails recovery. Close removes the temporary database. |
-| Shared device capacity, allocated bytes and inodes | **Required** finite device-wide profile covering stores, catalog/journals, service registry and temporary workspaces on that device | Process/device admission owner must atomically reserve concurrent attempt and recovery growth before work, convert successful writes to retained usage, and release only unused reservations or successfully removed files. Current independent free-space checks do not provide this shared reservation. |
+| Recovery workspace, page bytes | Temporary SQLite database at most 256 MiB per verifier | Native recovery creates it in the store root on the reserved device; isolated storage callers may retain the temporary-filesystem default. Close removes it; interrupted workspaces remain physical usage. Workspace exhaustion fails recovery. |
+| Shared device capacity, allocated bytes and inodes | Finite process/device reservation profile covering stores, catalog/journals, service registry and recovery workspaces | The shared owner atomically subtracts outstanding byte/inode reservations from current filesystem availability. Open engines protect catalog/journal/workspace growth; attempts reserve growth before binding. Retained files remain charged by filesystem allocation after reservations end. |
 
 Sources: [catalog limits](../../core/catalog/durable_sqlite_catalog.cpp),
 [storage limits and usage](../../core/storage/capacity.h),
@@ -135,10 +135,9 @@ Sources: [catalog limits](../../core/catalog/durable_sqlite_catalog.cpp),
 [FileIO limits](../../core/storage/durable_local_file_io.h),
 [attempt reservations](../../core/io/io_attempt.cpp) and
 [storage validation](STORAGE_MODULE.md).
-Shared per-device byte/inode reservations across stores, attempts and recovery
-workspaces are **Required**. The service registry, catalog/journal growth and
-temporary volume need their own charges in that parent. Independent `statfs`
-checks cannot prevent stores on the same volume from spending the same space;
+Shared per-device byte/inode reservations now cover stores, attempts, catalog
+and journals, the service registry and recovery workspaces. The owner samples
+filesystem availability again after restart and atomically accounts for pending growth;
 external ENOSPC/EIO must still propagate through the durable outcome protocol.
 
 ## Admission, release and errors
@@ -186,15 +185,16 @@ The managed service persists public engine limits in its registry and reuses
 them on restart. It changes limits only while a database is closed. Embedded
 callers must supply the same limits on `OpenExisting`; the profile ID alone
 does not persist their custom `Limits` values. Lower limits may reject open,
-but must preserve the original state and identity. Future global governors
-must also reserve recovery capacity before opening stores, not admit data
-until recovery fits, and retain parents for buffers surviving close.
+but must preserve the original state and identity. The shared owner reserves
+recovery capacity before opening stores, admits data only after recovery, and
+retains parents for buffers surviving close.
 
 ## Validation boundaries
 
 Documentation checks should verify source constants, ownership and local links.
-Existing focused executable coverage is separated below; it does not establish
-the required aggregate memory/device reservations or peak-RSS guarantees.
+Existing component coverage is separated below. Shared-owner tests and measured
+HTTP/cold-reopen evidence are in [the resource validation report](SHARED_RESOURCES_VALIDATION.md).
+Neither logical counters nor these samples establish a universal peak-RSS bound.
 
 | Evidence layer | Existing checks |
 | --- | --- |
@@ -212,7 +212,7 @@ ctest --preset local --output-on-failure --no-tests=error \
     -R 'Coordinator|PendingBudget|StorageCapacity|WriteCapacity|IoAttempt|BackendRecoveryLimits|EngineVerticalTest|glamdb\.(database_limits|http_review|scan_http)$'
 ```
 
-Future governor acceptance also needs deterministic combined-load tests across
+Shared-owner acceptance includes deterministic combined-load tests across
 stores and collections: simultaneous writer/reader/transport allocations,
 retained slices after shutdown, ordinary admission exhausted while completion
 and recovery succeed, and colliding disk/workspace reservations on one device.

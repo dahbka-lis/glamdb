@@ -31,7 +31,11 @@ coordinator StorageBackend and `core/scan/` implements a minimal `Engine::Scan`
 [the scanner guide](docs/development/SCANNER.md) for their contract and
 validation status, [the coordinator guide](docs/development/COORDINATOR.md)
 for the integration contract, and [the storage guide](docs/development/STORAGE_MODULE.md)
-for the file-layer contract. Full engine durability remains unqualified. `Engine::GetHealth()` exposes
+for the file-layer contract. A shared `ResourceOwner` now admits engines,
+transport copies and tracked Arrow allocations under finite class and device
+reservations; see [the resource owner](docs/development/SHARED_RESOURCES.md)
+for conservative envelopes, retained-buffer lifetime and measured validation.
+Full engine durability remains unqualified. `Engine::GetHealth()` exposes
 nonblocking read/write admission and recovery/shutdown state; HTTP
 `GET /databases/{id}/readyz` (or legacy `/readyz`) maps write readiness to
 200/503. A latched durable-I/O failure permits reads but requires reopen for
@@ -102,7 +106,7 @@ recovery, scan semantics, or resource ownership.
 For resource limits, read [the shared budget contract](docs/development/RESOURCE_BUDGETS.md):
 it names accounting units, owners, enforcement and release points across the
 engine and transport. Preserve its distinction between current local checks and
-required aggregate memory/device reservations; update the matrix when either changes.
+shared reservation envelopes and remaining RSS/DTO qualification; update the matrix when either changes.
 
 Preserve these boundaries when adding or changing engine behavior:
 

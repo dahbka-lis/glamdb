@@ -175,12 +175,14 @@ joins a writer attempt or holds a SQLite read transaction.
 
 Not implemented: file/row-group pruning, compound predicates (`And`, `Or`,
 `Not`, `In`, `IsNull`), reuse of the backend's parsed root by scans,
-runtime memory leases and quotas,
-page CRC verification, per-device physical/inode budgets and in-flight
-reservations, and measured attempt-volume/capacity qualification.
-The [shared resource budget contract](RESOURCE_BUDGETS.md) defines the required
-memory accounting lifetime for retained buffers and the process/store ownership
-of reader, writer, metadata and recovery reservations.
+page CRC verification and qualification-scale attempt-volume/capacity measurements.
+The [process resource owner](SHARED_RESOURCES.md) now supplies scan working
+reservations, tracked Arrow allocation capacity and leases retained through
+slices and C Data exports. Reader, writer, metadata, recovery and device
+reservations share the same parent; their ownership is listed in the
+[budget contract](RESOURCE_BUDGETS.md). The
+[validation report](SHARED_RESOURCES_VALIDATION.md) records saturation, lifetime
+sanitizers and a small multi-database HTTP/reopen campaign.
 
 ## Validation status
 
@@ -191,7 +193,8 @@ of reader, writer, metadata and recovery reservations.
 | `glamdb_vertical` (`engine_vertical_test.cpp`, `engine_integrity_test.cpp`) | PASS: commit-gate boundaries, layout violations, retry verification, crafted same-length Parquet corruption, quotas, write latch |
 | `glamdb_mock` (label `mock`, in-memory FileIO) | PASS, also from a read-only working/temporary directory |
 | Separate `GLAMDB_BUILD_STORAGE=OFF` build and CTest | PASS |
-| Full-repo `tidy-check`, sanitizer presets, TSan, power-loss qualification | NOT RUN in this change |
+| Shared resource tests under ASan/UBSan/LSan | PASS; see the [resource validation report](SHARED_RESOURCES_VALIDATION.md) |
+| Full-repo `tidy-check`, full sanitizer presets, TSan, power-loss qualification | NOT RUN in this change |
 
 Value validation reads only decoded columns of the projection and predicate;
 latent corruption in unread columns or unread data pages is not detected by

@@ -58,9 +58,13 @@ does not imply scan pruning. These are stored metadata observations, not a
 verification of every data page. Corrupt/missing committed files close readiness;
 environmental read/close failures retain `IO_ERROR` without closing readiness.
 
-File listings and details materialize caller-owned DTOs under existing local
-file/footer limits. Shared metadata reservations and fixed-view pagination are
-separate work; these APIs do not provide a process-wide memory bound.
+File listings and details materialize DTOs under existing local file/footer
+limits and shared metadata working reservations. Original results retain
+capacity-sized leases for file descriptors, bounds and row-group/column data
+until their final owner releases them, including after engine close. Independently
+copied caller DTOs belong to the host budget. Fixed-view pagination remains
+separate work; conservative working envelopes are not an RSS guarantee. See
+[shared resources](SHARED_RESOURCES.md) for the accounting contract.
 
 Every `Metric` contains an optional integer and a `MetricKind`:
 

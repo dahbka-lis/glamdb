@@ -14,6 +14,7 @@ namespace glamdb::detail {
 
 struct TScanContext
 {
+    std::shared_ptr<ResourceOwner> Resources{};
     CollectionInfo Collection;
     // The committed view resolved once by the engine.
     BaseIdentity Base;

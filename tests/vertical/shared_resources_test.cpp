@@ -1,0 +1,240 @@
+#include "tests/support/checked.h"
+#include "tests/support/journal_fault_vfs.h"
+#include "tests/vertical/vertical_support.h"
+
+#include "core/resources/envelopes.h"
+#include "storage/resources.h"
+
+#include <arrow/c/bridge.h>
+
+#include <chrono>
+
+namespace glamdb {
+namespace {
+using namespace vertical;
+using namespace std::chrono_literals;
+
+TEST(SharedResources, TwoStoresRefuseNewWritesButKeepOriginalReceiptsAndRecovery)
+{
+    test::TempDir temporary;
+    auto owner = std::make_shared<ResourceOwner>();
+    auto first = CreateStore(
+        {.store_id = test::store_id, .absolute_root = (temporary.path / "first").string(), .resources = owner});
+    auto second = CreateStore(
+        {.store_id = test::table_uuid, .absolute_root = (temporary.path / "second").string(), .resources = owner});
+    ASSERT_TRUE(first) << first.error().message;
+    ASSERT_TRUE(second) << second.error().message;
+    for (const auto& engine : {*first, *second}) {
+        ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", Schema}).disposition,
+            CommitDisposition::Committed);
+    }
+    AppendRequest request{test::collection_id, FirstOperation, {}, {Batch(FirstRows)}};
+    const auto committed = (*first)->AppendDurable(request);
+    ASSERT_EQ(committed.disposition, CommitDisposition::Committed);
+    auto saturated = owner->Reserve(ResourceClass::Data, owner->GetLimits().memory_bytes[0]);
+    ASSERT_TRUE(saturated);
+    EXPECT_EQ((*first)->AppendDurable(request), committed);
+    request.operation_id = SecondOperation;
+    for (const auto& engine : {*first, *second}) {
+        auto refused = engine->AppendDurable(request);
+        ASSERT_TRUE(refused.error);
+        EXPECT_EQ(refused.disposition, CommitDisposition::DefinitelyNotCommitted);
+        EXPECT_EQ(test::Present(refused.error).code, "RESOURCE_EXHAUSTED");
+        const auto lookup = engine->FindAppendOutcome(test::collection_id, SecondOperation);
+        ASSERT_TRUE(lookup);
+        EXPECT_FALSE(lookup->has_value());
+        EXPECT_TRUE(engine->GetHealth().write_ready);
+        EXPECT_TRUE(engine->Reconcile());
+    }
+    saturated->reset();
+    EXPECT_EQ((*second)->AppendDurable(request).disposition, CommitDisposition::Committed);
+}
+
+TEST(SharedResources, RetainedSliceAndExportKeepAllocationChargesAfterClose)
+{
+    test::TempDir temporary;
+    auto owner = std::make_shared<ResourceOwner>();
+    auto created = CreateStore(
+        {.store_id = test::store_id, .absolute_root = (temporary.path / "store").string(), .resources = owner});
+    ASSERT_TRUE(created) << created.error().message;
+    auto engine = std::move(*created);
+    ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", Schema}).disposition,
+        CommitDisposition::Committed);
+    ASSERT_EQ(engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}}).disposition,
+        CommitDisposition::Committed);
+    auto opened = engine->Scan({.collection_id = test::collection_id,
+        .predicate = Predicate::Compare("key", CompareOp::Eq, std::string("duplicate"))});
+    ASSERT_TRUE(opened) << opened.error().message;
+    auto next = (*opened)->Next();
+    ASSERT_TRUE(next) << next.error().message;
+    ASSERT_NE(*next, nullptr);
+    auto slice = (*next)->Slice(0, 1);
+    ArrowArray exported{};
+    ASSERT_TRUE(arrow::ExportRecordBatch(*slice, &exported).ok());
+    next->reset();
+    opened->reset();
+    ASSERT_TRUE(engine->Shutdown(1000ms));
+    engine.reset();
+    EXPECT_GT(owner->GetUsage().memory_bytes[0], 0);
+    slice.reset();
+    EXPECT_GT(owner->GetUsage().memory_bytes[0], 0);
+    exported.release(&exported);
+    EXPECT_EQ(owner->GetUsage().memory_bytes[0], 0);
+    EXPECT_EQ(owner->GetUsage().device_reserved_bytes, 0);
+    EXPECT_EQ(owner->GetUsage().memory_bytes[4], 0);
+}
+
+TEST(SharedResources, UnknownRetainsCompletionAndDiskUntilReconciliation)
+{
+    test::TempDir temporary;
+    test::JournalFaultVfs vfs;
+    auto owner = std::make_shared<ResourceOwner>();
+    std::shared_ptr<THookBackend> hooks;
+    auto created = detail::EngineFactory::CreateWith(
+        {.store_id = test::store_id, .absolute_root = (temporary.path / "store").string(), .resources = owner},
+        THookBackend::Factory(hooks, {.Resources = owner}),
+        vfs.Name());
+    ASSERT_TRUE(created) << created.error().message;
+    auto engine = *created;
+    ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", Schema}).disposition,
+        CommitDisposition::Committed);
+    const auto baseline = owner->GetUsage();
+    vfs.Arm(2, true);
+    const auto unknown = engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
+    ASSERT_EQ(unknown.disposition, CommitDisposition::CommitUnknown);
+    EXPECT_GT(owner->GetUsage().memory_bytes[3], 0);
+    EXPECT_GT(owner->GetUsage().device_reserved_bytes, baseline.device_reserved_bytes);
+    vfs.Disarm();
+    const auto used = owner->GetUsage().memory_bytes[0];
+    auto saturated = owner->Reserve(ResourceClass::Data, owner->GetLimits().memory_bytes[0] - used);
+    ASSERT_TRUE(saturated);
+    const auto lookup = engine->FindAppendOutcome(test::collection_id, FirstOperation);
+    ASSERT_TRUE(lookup);
+    ASSERT_TRUE(lookup->has_value());
+    EXPECT_EQ(test::Present(*lookup).disposition, CommitDisposition::CommitUnknown);
+    const auto metadataUsed = owner->GetUsage().memory_bytes[1];
+    auto metadataFull = owner->Reserve(ResourceClass::Metadata, owner->GetLimits().memory_bytes[1] - metadataUsed);
+    ASSERT_TRUE(metadataFull);
+    auto controlFull =
+        owner->Reserve(ResourceClass::Control, owner->GetLimits().memory_bytes[2] - owner->GetUsage().memory_bytes[2]);
+    ASSERT_TRUE(controlFull);
+    ASSERT_TRUE(engine->Reconcile());
+    EXPECT_EQ(owner->GetUsage().memory_bytes[3], 0);
+    EXPECT_EQ(owner->GetUsage().device_reserved_bytes, baseline.device_reserved_bytes);
+    const auto resolved = engine->FindAppendOutcome(test::collection_id, FirstOperation);
+    ASSERT_TRUE(resolved);
+    ASSERT_TRUE(resolved->has_value());
+    EXPECT_EQ(test::Present(*resolved).disposition, CommitDisposition::Committed);
+}
+
+TEST(SharedResources, UncertainCreationKeepsItsRootReservationUntilRecovery)
+{
+    test::TempDir temporary;
+    test::JournalFaultVfs vfs;
+    auto owner = std::make_shared<ResourceOwner>();
+    std::shared_ptr<THookBackend> hooks;
+    auto created = detail::EngineFactory::CreateWith(
+        {.store_id = test::store_id, .absolute_root = (temporary.path / "store").string(), .resources = owner},
+        THookBackend::Factory(hooks, {.Resources = owner}),
+        vfs.Name());
+    ASSERT_TRUE(created) << created.error().message;
+    vfs.Arm(1, true);
+    const auto unknown = (*created)->CreateCollection({test::collection_id, "events", Schema});
+    ASSERT_EQ(unknown.disposition, CommitDisposition::CommitUnknown);
+    vfs.Disarm();
+    auto full =
+        owner->Reserve(ResourceClass::Metadata, owner->GetLimits().memory_bytes[1] - owner->GetUsage().memory_bytes[1]);
+    ASSERT_TRUE(full);
+    ASSERT_TRUE((*created)->Reconcile());
+    EXPECT_TRUE((*created)->GetCollection(test::collection_id));
+}
+
+TEST(SharedResources, OriginalMetadataResultsKeepChargesAfterTheEngineCloses)
+{
+    test::TempDir temporary;
+    auto owner = std::make_shared<ResourceOwner>();
+    auto created = CreateStore(
+        {.store_id = test::store_id, .absolute_root = (temporary.path / "store").string(), .resources = owner});
+    ASSERT_TRUE(created) << created.error().message;
+    ASSERT_EQ((*created)->CreateCollection({test::collection_id, "events", Schema}).disposition,
+        CommitDisposition::Committed);
+    ASSERT_EQ((*created)->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}}).disposition,
+        CommitDisposition::Committed);
+    const auto baseline = owner->GetUsage().memory_bytes[1];
+    auto pressure = owner->Reserve(ResourceClass::Metadata,
+        owner->GetLimits().memory_bytes[1] - baseline - detail::MetadataWorkBytes - (32ULL << 10));
+    ASSERT_TRUE(pressure);
+    std::vector<SnapshotHistory> retained;
+    bool refused = false;
+    for (size_t count = 0; count < 64; ++count) {
+        auto history = (*created)->ListSnapshots(test::collection_id);
+        if (!history) {
+            EXPECT_EQ(history.error().code, "RESOURCE_EXHAUSTED");
+            refused = true;
+            break;
+        }
+        ASSERT_EQ(history->snapshots.size(), 1);
+        EXPECT_EQ(history->snapshots[0].receipt.rows_appended, 3);
+        retained.push_back(std::move(*history));
+    }
+    EXPECT_TRUE(refused);
+    EXPECT_GT(owner->GetUsage().memory_bytes[1], baseline + (*pressure)->GetBytes());
+    ASSERT_TRUE((*created)->Shutdown(1000ms));
+    created->reset();
+    pressure->reset();
+    EXPECT_GT(owner->GetUsage().memory_bytes[1], 0);
+    retained.clear();
+    EXPECT_EQ(owner->GetUsage().memory_bytes[1], 0);
+}
+
+TEST(SharedResources, ReopenUsesTheSameFiniteParent)
+{
+    test::TempDir temporary;
+    auto owner = std::make_shared<ResourceOwner>();
+    const auto root = (temporary.path / "store").string();
+    auto created = CreateStore({.store_id = test::store_id, .absolute_root = root, .resources = owner});
+    ASSERT_TRUE(created) << created.error().message;
+    ASSERT_EQ((*created)->CreateCollection({test::collection_id, "events", Schema}).disposition,
+        CommitDisposition::Committed);
+    AppendRequest request{test::collection_id, FirstOperation, {}, {Batch(FirstRows)}};
+    const auto committed = (*created)->AppendDurable(request);
+    ASSERT_EQ(committed.disposition, CommitDisposition::Committed);
+    ASSERT_TRUE((*created)->Shutdown(1000ms));
+    created->reset();
+    EXPECT_EQ(owner->GetUsage().device_reserved_bytes, 0);
+    auto opened = OpenExisting({.absolute_root = root, .expected_store_id = test::store_id, .resources = owner});
+    ASSERT_TRUE(opened) << opened.error().message;
+    EXPECT_EQ((*opened)->AppendDurable(request), committed);
+}
+
+TEST(SharedResources, FileMetadataResultsKeepSeparateChargesAfterClose)
+{
+    test::TempDir temporary;
+    auto owner = std::make_shared<ResourceOwner>();
+    auto created = CreateStore(
+        {.store_id = test::store_id, .absolute_root = (temporary.path / "store").string(), .resources = owner});
+    ASSERT_TRUE(created) << created.error().message;
+    ASSERT_EQ((*created)->CreateCollection({test::collection_id, "events", Schema}).disposition,
+        CommitDisposition::Committed);
+    ASSERT_EQ((*created)->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}}).disposition,
+        CommitDisposition::Committed);
+    auto listing = (*created)->ListFiles(test::collection_id);
+    ASSERT_TRUE(listing) << listing.error().message;
+    ASSERT_EQ(listing->Files.size(), 1);
+    EXPECT_EQ(listing->Files.front().RecordCount, 3);
+    auto details = (*created)->GetFileDetails(test::collection_id, listing->Files.front().FileID);
+    ASSERT_TRUE(details) << details.error().message;
+    ASSERT_EQ(details->RowGroups.size(), 1);
+    EXPECT_EQ(details->RowGroups.front().RecordCount, 3);
+    ASSERT_TRUE((*created)->Shutdown(1000ms));
+    created->reset();
+    const auto both = owner->GetUsage().memory_bytes[1];
+    EXPECT_GT(both, 0);
+    listing = TFileListing{};
+    EXPECT_LT(owner->GetUsage().memory_bytes[1], both);
+    EXPECT_GT(owner->GetUsage().memory_bytes[1], 0);
+    details = TFileDetails{};
+    EXPECT_EQ(owner->GetUsage().memory_bytes[1], 0);
+}
+} // namespace
+} // namespace glamdb
