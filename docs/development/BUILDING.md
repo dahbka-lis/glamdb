@@ -24,7 +24,7 @@ cmake --build --preset deps-local --parallel 2
 cmake --preset local -DCMAKE_PREFIX_PATH="$PWD/.deps/install"
 cmake --build --preset local
 ctest --preset local --no-tests=error
-./build/local/apps/glamdb/glamdb --help
+./build/local/apps/cli/glamdb-cli --help
 ```
 
 The default full build provides the catalog/coordinator and public C++ facade.
@@ -48,7 +48,7 @@ For a build without tests or GoogleTest, use a separate directory:
 cmake -S . -B build/no-tests -G Ninja -DBUILD_TESTING=OFF -DCMAKE_PREFIX_PATH="$PWD/.deps/install"
 cmake --build build/no-tests
 cmake --install build/local
-./build/install/local/bin/glamdb --help
+./build/install/local/bin/glamdb-cli --help
 ```
 
 The install contains the executable, `storage/*.h`, the `glamdb::core` static

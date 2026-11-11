@@ -34,8 +34,8 @@ for the integration contract, and [the storage guide](docs/development/STORAGE_M
 for the file-layer contract. Full engine durability remains unqualified.
 
 Independent verification tools, a Python network SDK and a browser workbench
-are implemented. They integrate through a separate, explicitly disposable
-in-memory mock adapter, not a production storage writer. The architecture and
+are implemented. They can use the native Asio HTTP server over the public Engine facade. A
+separate, explicitly disposable in-memory mock remains a development profile. The architecture and
 invariants below describe the intended engine, not qualified guarantees.
 
 The same UI can publish as a static browser-only demo on GitHub Pages. It has
@@ -50,7 +50,7 @@ Append preserves every input row, including duplicate keys. It provides neither
 key uniqueness nor replacement semantics.
 
 Key-value upserts and deletes are a subsequent extension using copy-on-write
-and an explicit KV collection mode. Production HTTP/core integration and
+and an explicit KV collection mode. Additional native metadata/explain APIs and
 object storage remain later extensions. Compaction, snapshot expiration,
 garbage collection, asynchronous admission, replication, multiple writers, and
 schema evolution are outside the initial append scope. Consult
@@ -127,7 +127,8 @@ Preserve these boundaries when adding or changing engine behavior:
 | `core/scan/` | Predicate evaluation, snapshot planning and Parquet scan cursor. |
 | `core/io/` | Independent local filesystem, attempts, receipts, durable files and copying (`glamdb_io`). |
 | `core/storage/` | FileIO, Parquet writer, Iceberg staging, publication/recovery and capacity checks (`glamdb_storage`). |
-| `apps/glamdb/` | Store-management CLI using CLI11 and transport-only outcome serialization. |
+| `apps/cli/` | `glamdb-cli`: offline store management and loopback HTTP requests. |
+| `apps/server/`, `apps/transport/` | `glamdb`: Asio HTTP server, shared precise codecs and native outcome serialization. |
 | `cmake/` | Build options, sanitizers, quality targets, and dependency recipes. |
 | `tests/` | Native unit/recovery/SqlCatalog/VFS/consumer suites, `vertical/` public-API storage tests, `mock/` in-memory scan tests, verification and actual SDK HTTP/HTTPS tests. |
 | `apps/mock_server/` | Disposable Python mock, real HTTP/Arrow, no warehouse/catalog access. |
@@ -139,8 +140,9 @@ Preserve these boundaries when adding or changing engine behavior:
 
 Read [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) when placing new
 components. Read [the workbench guide](docs/development/WORKBENCH.md) for
-installation, runtime theme changes and testing. Its HTTP shapes are provisional
-mock adapter contracts; do not change the public C++ API to match them silently.
+installation, runtime theme changes and testing. The [native HTTP contract](docs/development/HTTP_SERVER.md) and executable
+`fixtures/http/v0.json` inventory supported routes and explicit gaps. Keep
+transport dependencies outside the public API; do not invent missing metadata.
 For branding/static hosting read [PUBLIC_DEMO.md](docs/development/PUBLIC_DEMO.md).
 Preserve the supplied PNGs unchanged. Brand paths must be local assets; sizes
 belong in theme.json. Asset URLs must support both / and /glamdb/.
@@ -196,8 +198,8 @@ ctest --preset local
 ```
 
 The application links the pinned SQLite, Arrow and Iceberg installation. Tests
-also require GoogleTest. The CLI uses the pinned, header-only CLI11 submodule;
-it is not part of the public engine API or dependency installation. Use `release`
+also require GoogleTest. Applications use pinned header-only CLI11, Asio and nlohmann/json submodules;
+they are not part of the public engine API or dependency installation. Use `release`
 or `asan-ubsan` in place of `local` for the corresponding configure, build, and
 test presets. `GLAMDB_BUILD_STORAGE` defaults to `ON` (unless `GLAMDB_IO_ONLY=ON`)
 and adds `glamdb_storage`, the production backend, the scanner, `glamdb_vertical`
@@ -327,3 +329,9 @@ describe behavior, validation, and any storage compatibility impact.
 When changing workflows, preserve SHA-pinned Actions, read-only PR permissions,
 and separation from privileged release credentials. For vulnerabilities, follow
 [SECURITY.md](SECURITY.md) and report privately rather than in public issues.
+
+Native HTTP verification: `ctest --preset local -R 'glamdb\.(native_http|transport\.|cli)'`.
+The server requires `GLAMDB_BUILD_STORAGE=ON`; storage-disabled builds retain
+the offline CLI and codecs. Run native browser checks with `GLAMDB_NATIVE_SERVER`
+and `GLAMDB_NATIVE_CLI` pointing to built binaries; `GLAMDB_E2E_PYTHON` can select
+the workbench Python environment. See the native HTTP guide for exact commands.

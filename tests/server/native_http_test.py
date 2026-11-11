@@ -1,0 +1,269 @@
+"""Real sockets, native storage and fresh-process recovery; no mock backend."""
+import hashlib
+import http.client
+import json
+import os
+from pathlib import Path
+import select
+import socket
+import subprocess
+import sys
+import tempfile
+import unittest
+import uuid
+
+SERVER, CLI, UI = sys.argv[1:4]
+del sys.argv[1:]
+TOKEN = 'native-test-secret'
+
+
+class NativeHTTP(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir='/tmp')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = str(Path(self.tmp.name) / 'store')
+        self.store_id = str(uuid.uuid4())
+        self.env = dict(os.environ, GLAMDB_TOKEN=TOKEN)
+        self.assertTrue(Path(SERVER).is_file(), 'native server executable is missing')
+        subprocess.run([CLI, 'create-store', '--root', self.root, '--store-id', self.store_id], check=True, capture_output=True)
+        self.start()
+        self.addCleanup(self.stop)
+
+    def start(self):
+        self.proc = subprocess.Popen([SERVER, '--root', self.root, '--store-id', self.store_id,
+                                      '--port', '0', '--ui-root', UI, '--request-timeout-ms', '1000'],
+                                     env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        readable, _, _ = select.select([self.proc.stdout], [], [], 15)
+        self.assertTrue(readable, 'server did not report listening address')
+        line = self.proc.stdout.readline()
+        if not line:
+            self.fail(self.proc.stderr.read())
+        self.port = json.loads(line)['port']
+
+    def stop(self):
+        if self.proc.poll() is None:
+            self.proc.terminate()
+        out, err = self.proc.communicate(timeout=20)
+        self.assertEqual(self.proc.returncode, 0, out + err)
+
+    def request(self, path, body=None, token=TOKEN, accept='application/json', method=None):
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+        headers = {'Authorization': 'Bearer ' + token, 'Accept': accept}
+        if body is not None:
+            headers['Content-Type'] = 'application/json'
+        conn.request(method or ('POST' if body is not None else 'GET'), path,
+                     None if body is None else json.dumps(body), headers)
+        response = conn.getresponse()
+        data = response.read()
+        status, received = response.status, dict(response.getheaders())
+        conn.close()
+        return status, received, data
+
+    def api(self, path, body=None, status=200):
+        code, _, data = self.request(path, body)
+        self.assertEqual(code, status, data)
+        return json.loads(data)
+
+    def collection(self):
+        cid = str(uuid.uuid4())
+        body = {'collection_id': cid, 'name': 'events', 'schema': {'fields': [
+            {'name': 'key', 'type': 'string', 'nullable': False},
+            {'name': 'n', 'type': 'int64', 'nullable': True},
+            {'name': 'ts', 'type': 'timestamp_us_utc', 'nullable': True}]}}
+        info = self.api('/v0/collections', body)
+        self.assertEqual(info['collection_id'], cid)
+        self.assertEqual(self.api('/v0/collections', body), info)
+        return '/v0/collections/' + cid
+
+    def test_append_scan_retry_restart_and_cli(self):
+        path = self.collection()
+        body = {'operation_id': str(uuid.uuid4()), 'rows': [
+            {'key': 'same', 'n': '9223372036854775807', 'ts': '2026-01-01T03:00:00.123456+03:00'},
+            {'key': 'same', 'n': '-9223372036854775808', 'ts': None}]}
+        receipt = self.api(path + '/append', body)
+        self.assertEqual(receipt['outcome'], 'committed')
+        self.assertEqual(receipt['result']['rows_appended'], '2')
+        snap = receipt['result']['snapshot_id']
+        self.assertEqual(self.api(path + '/append', body), receipt)
+        result = self.api(path + '/scan', {})
+        self.assertEqual(result['rows'], [dict(body['rows'][0], ts='2026-01-01T00:00:00.123456Z'), body['rows'][1]])
+        self.assertEqual(result['snapshot_id'], snap)
+        self.assertEqual(self.api(path + '/scan', {'snapshot_id': 'initial'})['rows'], [])
+        self.assertEqual(self.api(path + '/scan', {'limit': 0})['rows'], [])
+        filtered = self.api(path + '/scan', {'projection': ['key'], 'predicate': {'op': 'gt', 'field': 'n', 'value': '0'}})
+        self.assertEqual(filtered['rows'], [{'key': 'same'}])
+        self.api(path + '/append', dict(body, rows=[{'key': 'changed'}]), status=409)
+        self.stop()
+        self.start()
+        self.assertEqual(self.api(path + '/operations/' + body['operation_id']), receipt)
+        self.assertEqual(self.api(path + '/scan', {'snapshot_id': snap})['rows'], result['rows'])
+        self.assertTrue(list(Path(self.root).rglob('*.parquet')))
+        cli = subprocess.run([CLI, 'request', '--port', str(self.port), '--path', path + '/schema'],
+                             env=self.env, check=True, capture_output=True, text=True)
+        self.assertEqual(json.loads(cli.stdout)['fields'][1]['type'], 'int64')
+
+    def test_auth_limits_framing_and_static(self):
+        self.assertEqual(self.request('/v0/collections', token='wrong')[0], 401)
+        self.assertEqual(self.request('/')[0], 200)
+        self.assertEqual(self.request('/workbench/config')[0], 200)
+        self.assertEqual(self.request('/../store.identity')[0], 404)
+        self.assertEqual(self.request('/config/demo-data.json')[0], 404)
+        for headers, status in [
+            ('Content-Length: 2\r\nContent-Length: 2\r\n', 400),
+            ('Content-Length: 2\r\nTransfer-Encoding: chunked\r\n', 400),
+            ('Content-Length: 999999999\r\n', 413),
+            ('Content-Length: -1\r\n', 400),
+        ]:
+            with self.subTest(headers=headers), socket.create_connection(('127.0.0.1', self.port)) as sock:
+                sock.sendall(('POST /v0/collections HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ' + TOKEN + '\r\n' + headers + '\r\n').encode())
+                self.assertIn(f' {status} '.encode(), sock.recv(4096))
+        with socket.create_connection(('127.0.0.1', self.port)) as slow:
+            slow.settimeout(4)
+            slow.sendall(b'GET /healthz HTTP/1.1\r\n')
+            self.assertEqual(slow.recv(4096), b'')
+        self.assertEqual(self.request('/healthz')[0], 200)
+
+    def test_validation_capabilities_and_arrow(self):
+        caps = self.api('/v0/capabilities')
+        self.assertFalse(caps['mock'])
+        self.assertEqual(caps['backend'], 'local')
+        path = self.collection()
+        for value in [1, True, '9223372036854775808']:
+            self.api(path + '/append', {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'a', 'n': value}]}, status=400)
+        self.api(path + '/scan', {'predicate': {'op': 'is_null', 'field': 'n'}}, status=501)
+        self.api(path + '/snapshots', status=501)
+        self.api(path + '/files', status=501)
+        self.api(path + '/stats', status=501)
+        self.api(path + '/explain', {}, status=501)
+        status, headers, data = self.request(path + '/scan', {}, accept='application/vnd.apache.arrow.stream')
+        self.assertEqual(status, 200, data)
+        self.assertEqual(headers['X-Content-SHA256'], hashlib.sha256(data).hexdigest())
+        self.assertEqual(headers['X-GlamDB-Snapshot-Id'], 'initial')
+        self.assertTrue(data.endswith(b'\xff\xff\xff\xff\x00\x00\x00\x00'))
+        self.api(path + '/operations/' + str(uuid.uuid4()), status=404)
+
+    def test_concurrent_appends_and_idle_shutdown(self):
+        from concurrent.futures import ThreadPoolExecutor
+        path = self.collection()
+        requests = [{'operation_id': str(uuid.uuid4()), 'rows': [{'key': str(i)}]} for i in range(8)]
+        with ThreadPoolExecutor(max_workers=8) as workers:
+            outcomes = list(workers.map(lambda body: self.api(path + '/append', body), requests))
+        self.assertEqual(len({item['result']['snapshot_id'] for item in outcomes}), 8)
+        rows = self.api(path + '/scan', {})['rows']
+        self.assertEqual(sorted(row['key'] for row in rows), list(map(str, range(8))))
+        with socket.create_connection(('127.0.0.1', self.port)) as idle:
+            idle.settimeout(5)
+            idle.sendall(b'GET /healthz HTTP/1.1\r\n')
+            self.stop()
+            self.assertEqual(idle.recv(4096), b'')
+        self.start()
+        for request, outcome in zip(requests, outcomes):
+            self.assertEqual(self.api(path + '/operations/' + request['operation_id']), outcome)
+
+    def test_route_schema_fixtures(self):
+        fixture = json.loads((Path(__file__).resolve().parents[2] / 'fixtures/http/v0.json').read_text())
+        kinds = {'object': dict, 'array': list, 'string': str, 'boolean': bool, 'integer': int, 'null': type(None)}
+        wire_schema = json.loads((Path(__file__).resolve().parents[2] / 'fixtures/http/v0.schema.json').read_text())
+        validator = None
+        if os.environ.get('GLAMDB_VALIDATE_SCHEMAS') == '1':
+            from jsonschema import Draft202012Validator
+            Draft202012Validator.check_schema(wire_schema)
+            validator = Draft202012Validator
+            error = {'code': 'IO_ERROR', 'message': 'lost commit', 'retry_hint': 'SameIdAfterReconcile'}
+            create_validator = validator(dict(wire_schema, **{'$ref': '#/$defs/createOutcome'}))
+            definite = {'outcome': 'definitely_not_committed', 'phase': 'validation', 'error': error}
+            create_validator.validate(definite)
+            for invalid in (
+                {'outcome': 'commit_unknown', 'phase': 'catalog_commit', 'error': error},
+                dict(definite, phase='complete'),
+                dict(definite, recovery_required=True),
+            ):
+                self.assertFalse(create_validator.is_valid(invalid), invalid)
+            identifier = fixture['collection_id']
+            recovery = {
+                'store_id': self.store_id, 'collection_id': identifier,
+                'operation_id': fixture['operation_id'], 'payload_hash': '0' * 64,
+                'hash_version': 1, 'attempt_id': identifier,
+                'base': {'store_id': self.store_id, 'collection_id': identifier,
+                         'table_uuid': identifier, 'metadata_location': 'store://metadata',
+                         'current_snapshot_id': None, 'schema_id': 0, 'spec_id': 0},
+                'candidate_snapshot_id': None, 'candidate_metadata_location': None,
+                'first_error': error, 'publication_started': True, 'lookup_blocked': False,
+            }
+            unknown = {'outcome': 'commit_unknown', 'phase': 'catalog_commit', 'error': error,
+                       'operation_id': fixture['operation_id'], 'recovery_required': True, 'recovery': recovery}
+            append_validator = validator(dict(wire_schema, **{'$ref': '#/$defs/appendOutcome'}))
+            append_validator.validate(unknown)
+            for required in ('error', 'recovery', 'recovery_required'):
+                invalid = dict(unknown)
+                del invalid[required]
+                self.assertFalse(append_validator.is_valid(invalid), invalid)
+            create_unknown = {key: value for key, value in unknown.items() if key != 'operation_id'}
+            create_unknown['recovery'] = {
+                'store_id': self.store_id, 'collection_id': identifier, 'exact_name': 'events',
+                'schema_hash': '0' * 64, 'attempt_id': identifier, 'candidate_table_uuid': identifier,
+                'candidate_metadata_location': None, 'publication_started': True,
+            }
+            create_validator.validate(create_unknown)
+            for required in ('error', 'recovery', 'recovery_required'):
+                invalid = dict(create_unknown)
+                del invalid[required]
+                self.assertFalse(create_validator.is_valid(invalid), invalid)
+
+        for route in fixture['routes']:
+            path = route['path'].format(**fixture)
+            with self.subTest(path=path, method=route['method']):
+                if validator and 'request_schema' in route:
+                    validator(dict(wire_schema, **{'$ref': '#/$defs/' + route['request_schema']})).validate(route['request'])
+                status, headers, data = self.request(path, route.get('request'), method=route['method'], accept=route.get('accept', 'application/json'))
+                self.assertEqual(status, route['status'], data)
+                if route.get('accept'):
+                    self.assertEqual(headers['Content-Type'], route['accept'])
+                    self.assertEqual(headers['X-Content-SHA256'], hashlib.sha256(data).hexdigest())
+                    continue
+                value = json.loads(data)
+                if validator:
+                    validator(dict(wire_schema, **{'$ref': '#/$defs/' + route['response_schema']})).validate(value)
+                for name, kind in route['response_fields'].items():
+                    self.assertIn(name, value)
+                    self.assertIn(type(value[name]), tuple(kinds[item] for item in kind.split('|')))
+
+    def test_sdk_json_and_arrow(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'sdk/python/src'))
+        try:
+            from glamdb_sdk import Client
+        except ImportError:
+            self.skipTest('SDK dependencies are tested in the workbench environment')
+        path = self.collection()
+        cid = path.rsplit('/', 1)[1]
+        with Client(f'http://127.0.0.1:{self.port}', TOKEN) as client:
+            self.assertEqual(client.get_schema(cid).fields[1].type, 'int64')
+            outcome = client.append(cid, [{'key': 'sdk', 'n': 9223372036854775807}], operation_id=str(uuid.uuid4()))
+            self.assertEqual(outcome.outcome, 'committed')
+            self.assertEqual(client.scan_json(cid).rows[0]['n'], 9223372036854775807)
+            with client.scan_batches(cid) as stream:
+                import pyarrow as pa
+                table = pa.Table.from_batches(list(stream), schema=stream.schema)
+                self.assertEqual(table.to_pylist()[0]['n'], 9223372036854775807)
+
+    def test_owner_invalid_json_disconnect_and_shutdown(self):
+        second = subprocess.run([CLI, 'inspect-store', '--root', self.root, '--store-id', self.store_id], capture_output=True, text=True)
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn('STATE_IN_USE', second.stderr)
+        self.assertEqual(self.request('/%76%30/collections', token='wrong')[0], 401)
+        path = self.collection()
+        body = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'lost-response'}]}
+        wire = json.dumps(body).encode()
+        with socket.create_connection(('127.0.0.1', self.port)) as sock:
+            sock.sendall((f'POST {path}/append HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {len(wire)}\r\n\r\n').encode() + wire)
+            # Receiving the response headers proves dispatch before discarding it.
+            self.assertIn(b'200', sock.recv(16))
+        self.stop()
+        self.start()
+        outcome = self.api(path + '/operations/' + body['operation_id'])
+        self.assertEqual(outcome['outcome'], 'committed')
+        self.assertEqual(self.api(path + '/append', body), outcome)
+
+
+if __name__ == '__main__':
+    unittest.main()

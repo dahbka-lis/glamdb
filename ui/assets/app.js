@@ -8,6 +8,8 @@ import {
     buildPredicate,
     wireRows,
     prepareMutation,
+    supportsFeature,
+    validateQueryCapabilities,
 } from './model.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -183,8 +185,18 @@ function overview() {
     <section class="metrics" aria-label="Collection statistics">${[
         ['Rows', s.rows, 'table'],
         ['Columns', fields().length, 'columns'],
-        ['Snapshots', s.retained_snapshots ?? state.snapshots.length, 'clock'],
-        ['Data files', s.data_files ?? state.files.length, 'database'],
+        [
+            'Snapshots',
+            s.retained_snapshots ??
+                (supportsFeature(state.capabilities, 'snapshots') ? state.snapshots.length : null),
+            'clock',
+        ],
+        [
+            'Data files',
+            s.data_files ??
+                (supportsFeature(state.capabilities, 'files') ? state.files.length : null),
+            'database',
+        ],
     ]
         .map(
             ([label, value, symbol]) =>
@@ -206,6 +218,8 @@ function overview() {
     }`;
 }
 function snapshotList(max = 100) {
+    if (!supportsFeature(state.capabilities, 'snapshots'))
+        return '<p class="muted small">Snapshot history is unavailable on this server.</p>';
     return state.snapshots.length
         ? state.snapshots
               .slice()
@@ -242,6 +256,7 @@ function readQuery() {
         limit: state.limit,
     };
     if (state.snapshotId !== null) body.snapshot_id = state.snapshotId;
+    validateQueryCapabilities(state.capabilities, body);
     return body;
 }
 function dataView() {
@@ -283,7 +298,7 @@ function dataView() {
                     )}</select><input name="value" aria-label="Filter value ${i + 1}" value="${e(c.value)}" placeholder="A value, in its original type"><button type="button" class="icon-button" data-action="remove-condition" data-index="${i}" aria-label="Remove condition ${i + 1}">${icon('close')}</button></div>`,
         )
         .join('')}
-    <button type="button" class="text-button" data-action="add-condition">+ Add a condition</button></div><div class="query-footer"><label>Result limit<input name="limit" type="number" min="0" max="1000" value="${state.limit}"></label><div class="button-row"><button type="button" class="button" data-action="explain-query">${icon('sparkle')}Explain</button><button type="submit" class="button primary" id="run-query">${icon('arrow')}<span data-label="run_query">${e(labels('run_query'))}</span></button></div></div></form></div></section>
+    <button type="button" class="text-button" data-action="add-condition">+ Add a condition</button></div><div class="query-footer"><label>Result limit<input name="limit" type="number" min="0" max="1000" value="${state.limit}"></label><div class="button-row"><button type="button" class="button" data-action="explain-query" ${supportsFeature(state.capabilities, 'explain') ? '' : 'disabled title="Unavailable on this server"'}>${icon('sparkle')}Explain</button><button type="submit" class="button primary" id="run-query">${icon('arrow')}<span data-label="run_query">${e(labels('run_query'))}</span></button></div></div></form></div></section>
     ${state.result ? resultTable() : `<div class="notice" style="margin-top:20px">Ready when you are. Your result will appear here, with its exact snapshot identity.</div>`}`;
 }
 function resultTable() {
@@ -325,6 +340,8 @@ function schemaView() {
         )}</tbody></table></div></section><div class="notice" style="margin-top:20px">Append mode preserves duplicate keys. A field called key does not imply uniqueness. Schema evolution is not enabled.</div>`;
 }
 function snapshotsView() {
+    if (!supportsFeature(state.capabilities, 'snapshots'))
+        return `${heading('Snapshot history', 'This server does not yet expose this capability.')}<div class="notice">Your data remains available in Data studio.</div>`;
     return `${heading('Every version has a story.', 'Read an immutable view. Keep your latest data untouched.')}<section class="panel"><div class="panel-header"><h2>Snapshot history</h2>${badge(`${state.snapshots.length} retained`)}</div><div class="table-wrap"><table aria-label="Snapshot history"><thead><tr><th>Snapshot ID</th><th>Parent</th><th>Rows added</th><th></th></tr></thead><tbody>${state.snapshots
         .slice()
         .reverse()
@@ -337,9 +354,13 @@ function snapshotsView() {
         )}</tbody></table></div>${!state.snapshots.length ? '<p class="result-empty">No append has been published yet.</p>' : ''}</section>`;
 }
 function storageView() {
+    if (!supportsFeature(state.capabilities, 'files'))
+        return `${heading('File inspection', 'This server does not yet expose this capability.')}<div class="notice">Your data remains available in Data studio.</div>`;
     return `${heading('A place for every file.', 'File membership belongs to the selected snapshot.')}<div class="notice" style="margin-bottom:20px">${state.capabilities?.mock ? 'These are synthetic descriptors for the mock adapter. No physical Parquet files are written.' : 'Immutable files; metadata is available where supported.'}</div><section class="panel"><div class="panel-header"><h2>Data files</h2>${badge(`${state.files.length} files`)}</div><div class="table-wrap"><table aria-label="Data files"><thead><tr><th>File</th><th>Rows</th><th>Bytes</th><th></th></tr></thead><tbody>${state.files.map((f, i) => `<tr><td><strong>Data file ${i + 1}</strong><p class="muted small mono">${e(f.file_id)}</p></td><td>${number(f.record_count)}</td><td>${f.compressed_bytes === null ? 'Unknown' : number(f.compressed_bytes)}</td><td><button class="button small" data-action="file" data-id="${e(f.file_id)}">Inspect${icon('arrow')}</button></td></tr>`).join('')}</tbody></table></div>${!state.files.length ? '<p class="result-empty">No files in this view.</p>' : ''}</section><div class="notice" style="margin-top:20px">Compaction, expiration and garbage collection are unavailable in append v0. Optional index presence does not imply execution support.</div>`;
 }
 function explainView() {
+    if (!supportsFeature(state.capabilities, 'explain'))
+        return `${heading('Query plans', 'This server does not yet expose this capability.')}<div class="notice">Your data remains available in Data studio.</div>`;
     return `${heading('A peek behind the query.', 'Plan estimates and executed measurements stay separate.')}<section class="panel"><div class="panel-header"><h2>Query plan</h2><button class="button small" data-action="explain-current">${icon('refresh')}Refresh plan</button></div><div class="panel-body">${
         state.plan
             ? `<div class="button-row" style="margin-bottom:18px">${badge('Fixed snapshot', 'pink')}${badge(state.capabilities?.mock ? 'Reference mock scan' : 'Native scan')}${badge('Page/Bloom execution unsupported')}</div>${[
@@ -356,7 +377,7 @@ function explainView() {
                       '',
                   )}<details style="margin-top:18px"><summary class="small">Inspect complete plan</summary><pre class="json-block">${json(state.plan)}</pre></details>`
             : '<p class="muted small">Build a query in Data studio, then choose Explain. You can also inspect the current all-column query.</p>'
-    }</div></section>${state.result?.profile ? `<section class="panel"><div class="panel-header"><h2>Execution profile</h2>${badge('Mock measurements')}</div><div class="panel-body"><pre class="json-block">${json(state.result.profile)}</pre><p class="muted small">A mock reference scan does not demonstrate native pruning, device IO or durability.</p></div></section>` : ''}`;
+    }</div></section>${state.result?.profile ? `<section class="panel"><div class="panel-header"><h2>Execution profile</h2>${badge(state.capabilities?.mock ? 'Mock measurements' : 'Native scan')}</div><div class="panel-body"><pre class="json-block">${json(state.result.profile)}</pre><p class="muted small">Returned row counts describe this scan. They do not establish pruning performance or power-loss durability.</p></div></section>` : ''}`;
 }
 function operationsView() {
     const ops = state.operations.filter((op) => op.collectionId === state.collectionId);
@@ -436,9 +457,15 @@ async function refreshSelection() {
     const suffix = `?snapshot_id=${encodeURIComponent(selected)}`;
     const [schema, stats, snapshots, filesResult] = await Promise.all([
         api.json(`/v0/collections/${encodeURIComponent(id)}/schema`, { signal }),
-        api.json(`/v0/collections/${encodeURIComponent(id)}/stats${suffix}`, { signal }),
-        allPages(`/v0/collections/${encodeURIComponent(id)}/snapshots`, signal, api),
-        allPages(`/v0/collections/${encodeURIComponent(id)}/files${suffix}`, signal, api),
+        supportsFeature(state.capabilities, 'stats')
+            ? api.json(`/v0/collections/${encodeURIComponent(id)}/stats${suffix}`, { signal })
+            : null,
+        supportsFeature(state.capabilities, 'snapshots')
+            ? allPages(`/v0/collections/${encodeURIComponent(id)}/snapshots`, signal, api)
+            : [],
+        supportsFeature(state.capabilities, 'files')
+            ? allPages(`/v0/collections/${encodeURIComponent(id)}/files${suffix}`, signal, api)
+            : [],
     ]);
     if (!current()) return;
     state.collection = info;
@@ -523,6 +550,8 @@ async function runQuery() {
     }
 }
 async function explainQuery(fromForm) {
+    if (!supportsFeature(state.capabilities, 'explain'))
+        throw new Error('Explain is unavailable on this server');
     const epoch = state.epoch;
     const body = fromForm
         ? readQuery()
@@ -998,7 +1027,7 @@ document.addEventListener('click', async (event) => {
         } else if (action === 'about')
             showModal(
                 'A pretty powerful workbench.',
-                `<div class="metadata-list"><p>Browse collections, append typed rows, filter your data and explore immutable snapshots.</p><div class="notice">${publicDemo ? 'This public demo runs in your browser. Your rows stay in this tab; Reset demo or reload restores the samples. JSON export is available here. Connect to a server separately for the network SDK and Arrow IPC.' : 'This workspace uses a disposable mock backend because the real C++ engine is not implemented yet. HTTP and Arrow transport are real; mock results do not qualify storage durability.'}</div><p class="small muted">Theme: edit <code>ui/config/theme.json</code>. Changes reload automatically. No token is saved in browser storage.</p></div>`,
+                `<div class="metadata-list"><p>Browse collections, append typed rows, filter your data and explore immutable snapshots.</p><div class="notice">${publicDemo ? 'This public demo runs in your browser. Your rows stay in this tab; Reset demo or reload restores the samples. JSON export is available here. Connect to a server separately for the network SDK and Arrow IPC.' : 'Connected servers report their backend and supported capabilities. Native writes use the C++ engine; mock results are disposable. Physical power-loss durability remains unqualified.'}</div><p class="small muted">Theme: edit <code>ui/config/theme.json</code>. Changes reload automatically. No token is saved in browser storage.</p></div>`,
             );
     } catch (error) {
         if (state.api === api) report(error);

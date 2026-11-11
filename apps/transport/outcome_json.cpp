@@ -1,4 +1,4 @@
-#include "apps/glamdb/outcome_json.h"
+#include "apps/transport/outcome_json.h"
 
 #include "core/api/binary.h"
 #include "core/api/canonical.h"

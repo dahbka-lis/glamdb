@@ -11,9 +11,9 @@ glamdb/
 ├── .gitmodules
 ├── apps/
 │   ├── mock_server/
-│   └── glamdb/
-│       ├── CMakeLists.txt
-│       └── main.cpp
+│   ├── cli/
+│   ├── server/
+│   └── transport/
 ├── public/
 │   └── storage/
 ├── core/
@@ -73,7 +73,8 @@ glamdb/
 | `core/io/` | Independent `glamdb_io`: local filesystem, store directories/URIs, attempts, receipts, SHA-256, durable files and copying. |
 | `core/storage/` | `glamdb_storage`: FileIO adapter, profiles, Parquet writer, Iceberg staging, publication, recovery and capacity. |
 | `docker/` | Linux development and dependency toolchains; builds mount product sources read-only. |
-| `apps/glamdb/` | Store-management CLI and transport-only outcome JSON. |
+| `apps/cli/` | Offline store-management and HTTP request CLI. |
+| `apps/server/`, `apps/transport/` | Native Asio server and shared JSON/HTTP codecs; no independent writer. |
 | `cmake/` | Compiler options, sanitizers, quality targets, and dependency recipes. |
 | `tests/` | Component/storage pipeline tests, catalog/coordinator tests, process recovery, VFS faults, installed consumers, tooling, and independent client/verification suites. |
 | `fixtures/` | Shared deterministic test inputs and expected outputs. |

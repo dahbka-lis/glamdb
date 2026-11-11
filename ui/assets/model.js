@@ -164,3 +164,20 @@ export function prepareMutation(previous, body, idFactory = () => crypto.randomU
     }
     return { operationId: idFactory(), fingerprint, body: structuredClone(body), terminal: false };
 }
+
+export function supportsFeature(capabilities, feature) {
+    return capabilities?.features?.[feature] ?? capabilities?.backend !== 'local';
+}
+export function validateQueryCapabilities(capabilities, body) {
+    if (body.projection?.length === 0 && !supportsFeature(capabilities, 'zero_column_projection'))
+        throw new Error('Empty projection is not supported by this server');
+    const supported = capabilities?.predicate_ops;
+    const visit = (predicate) => {
+        if (!predicate) return;
+        if (supported && !supported.includes(predicate.op))
+            throw new Error(`Predicate ${predicate.op} is not supported by this server`);
+        predicate.args?.forEach(visit);
+        if (predicate.arg) visit(predicate.arg);
+    };
+    visit(body.predicate);
+}
