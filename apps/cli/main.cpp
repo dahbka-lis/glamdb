@@ -24,7 +24,7 @@ try {
     uint16_t port = 8080;
     request->add_option("--host", host, "Loopback HTTP address");
     request->add_option("--port", port, "Server port");
-    request->add_option("--path", path, "API path, for example /collections")->required();
+    request->add_option("--path", path, "API path, for example /databases")->required();
     request->add_option("--method", method, "GET or POST");
     request->add_option("--body", file, "JSON file, or - for stdin");
     if (argc == 1) {

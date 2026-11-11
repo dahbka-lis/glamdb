@@ -34,7 +34,12 @@ for the integration contract, and [the storage guide](docs/development/STORAGE_M
 for the file-layer contract. Full engine durability remains unqualified.
 
 Independent verification tools, a Python network SDK and a browser workbench
-are implemented. They can use the native Asio HTTP server over the public Engine facade. A
+are implemented. They can use the native Asio HTTP server over the public Engine facade.
+`--data-dir` starts with no databases; authenticated API/UI operations create,
+list, open, close and reconcile databases. A separate SQLite service registry
+stores identities and open intent; collection/data writes remain in core.
+Collection routes are scoped by `/databases/{id}`; optional legacy
+`--root/--store-id` mode retains unscoped routes. A
 separate, explicitly disposable in-memory mock remains a development profile. The architecture and
 invariants below describe the intended engine, not qualified guarantees.
 
@@ -333,5 +338,5 @@ and separation from privileged release credentials. For vulnerabilities, follow
 Native HTTP verification: `ctest --preset local -R 'glamdb\.(native_http|transport\.|cli)'`.
 The server requires `GLAMDB_BUILD_STORAGE=ON`; storage-disabled builds retain
 the offline CLI and codecs. Run native browser checks with `GLAMDB_NATIVE_SERVER`
-and `GLAMDB_NATIVE_CLI` pointing to built binaries; `GLAMDB_E2E_PYTHON` can select
+pointing to the built server; `GLAMDB_E2E_PYTHON` can select
 the workbench Python environment. See the native HTTP guide for exact commands.

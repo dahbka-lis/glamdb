@@ -1,9 +1,9 @@
 # GlamDB Python network SDK
 
-This package talks only to the public HTTP endpoints (for example, `/collections`). It does not import
+This package talks only to the public HTTP endpoints. It does not import
 the C++ core, a Python storage writer, the development mock, or verification
-tools. The repository currently supplies a disposable mock HTTP adapter; passing
-SDK tests against it does not establish storage durability.
+tools. The native server manages databases; a disposable mock adapter is also
+available. Passing SDK tests does not establish storage durability.
 
 Install from this directory with `python -m pip install .`. Dependencies are
 HTTPX 0.28 and PyArrow 25; Python 3.10 or later is required. For local development,
@@ -22,7 +22,12 @@ schema = Schema([
     Field("at", "timestamp_us_utc", True),
 ])
 
-with Client("http://127.0.0.1:8765", token="your-development-token") as client:
+with Client("http://127.0.0.1:8080", token="your-token") as admin:
+    database = admin.create_database("analytics")  # same name reuses the same ID
+    print(admin.list_databases().items)
+
+with Client("http://127.0.0.1:8080", token="your-token",
+            database_id=database["database_id"]) as client:
     created = client.create_collection("example", schema, collection_id=collection_id)
     if created.outcome != "committed":
         raise RuntimeError(created.raw)
@@ -42,6 +47,13 @@ with Client("http://127.0.0.1:8765", token="your-development-token") as client:
             print(batch.to_pylist())
     print(stream.snapshot_id, stream.integrity, stream.checksum_verified)
 ```
+
+`get_database`, `open_database`, `close_database` and `reconcile_database` accept
+a database UUID. `database_id=` scopes collection requests and capabilities while
+management calls remain at the server root. Keep a separate client per database:
+schema caches and open streams belong to that client's selection. Omitting the
+argument preserves legacy single-store/mock behavior. Database creation never
+accepts a local filesystem path; after a lost response repeat the same name/UUID.
 
 Append preserves duplicates, including duplicate `key` values. There is no
 upsert, delete, compaction, or asynchronous job API here. Inspect

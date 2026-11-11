@@ -393,7 +393,9 @@ int ErrorStatus(std::string_view code)
     if (code == "NOT_FOUND" || code == "COLLECTION_NOT_FOUND" || code == "SNAPSHOT_NOT_FOUND") {
         return 404;
     }
-    if (code == "ALREADY_EXISTS" || code == "OPERATION_CONFLICT" || code == "SCHEMA_MISMATCH") {
+    if (code == "DATABASE_CLOSED" || code == "DATABASE_BUSY" || code == "DATABASE_REQUIRED" || code == "STATE_IN_USE" ||
+        code == "ALREADY_EXISTS" || code == "OPERATION_CONFLICT" || code == "SCHEMA_MISMATCH")
+    {
         return 409;
     }
     if (code == "PRECONDITION_FAILED") {

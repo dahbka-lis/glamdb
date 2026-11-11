@@ -27,7 +27,7 @@ class Client:
     """
 
     def __init__(self, base_url: str, token: str, *, verify: bool | ssl.SSLContext = True,
-                 timeout: float = 30.0, transport: httpx.BaseTransport | None = None,
+                 timeout: float = 30.0, database_id: str | UUID | None = None, transport: httpx.BaseTransport | None = None,
                  max_json_bytes: int = 16 * 1024**2, max_arrow_read_bytes: int = 64 * 1024**2):
         try:
             url = httpx.URL(base_url)
@@ -44,6 +44,7 @@ class Client:
         for name, value in (("max_json_bytes", max_json_bytes), ("max_arrow_read_bytes", max_arrow_read_bytes)):
             if type(value) is not int or value <= 0:
                 raise ValidationError(f"{name} must be a positive integer")
+        self._database_prefix = "" if database_id is None else f"databases/{uuid_string(database_id, 'database_id')}/"
         self._timeout = timeout
         self._max_json_bytes = max_json_bytes
         self._max_arrow_read_bytes = max_arrow_read_bytes
@@ -94,6 +95,8 @@ class Client:
         if body is not None:
             headers["Content-Type"] = "application/json"
         try:
+            if self._database_prefix and not path.startswith("databases"):
+                path = self._database_prefix + path.removeprefix("./")
             request = self._http.build_request(method, path, params=params, content=body, headers=headers, timeout=timeout)
             response = self._http.send(request, stream=True)
             try:
@@ -174,6 +177,38 @@ class Client:
 
     def capabilities(self, *, deadline: float | None = None) -> dict[str, Any]:
         return self._read("capabilities", deadline=deadline)
+
+    def list_databases(self, *, deadline: float | None = None) -> Page:
+        return self._page(self._read("databases", deadline=deadline))
+
+    def get_database(self, database_id: str | UUID, *, deadline: float | None = None) -> dict[str, Any]:
+        return self._read(f"databases/{uuid_string(database_id, 'database_id')}", deadline=deadline)
+
+    def _database_post(self, path: str, body: dict[str, Any], deadline: float | None) -> dict[str, Any]:
+        budget = Deadline(deadline)
+        status, value = self._json("POST", path, budget, body=json_bytes(body))
+        if not 200 <= status < 300:
+            self._http_error(status, value, budget)
+        return value
+
+    def create_database(self, name: str, *, database_id: str | UUID | None = None,
+                        deadline: float | None = None) -> dict[str, Any]:
+        """Create or open the same named database. Retry with the same name and ID."""
+        if not isinstance(name, str) or not name:
+            raise ValidationError("database name is required")
+        body = {"name": name}
+        if database_id is not None:
+            body["database_id"] = uuid_string(database_id, "database_id")
+        return self._database_post("databases", body, deadline)
+
+    def open_database(self, database_id: str | UUID, *, deadline: float | None = None) -> dict[str, Any]:
+        return self._database_post(f"databases/{uuid_string(database_id, 'database_id')}/open", {}, deadline)
+
+    def close_database(self, database_id: str | UUID, *, deadline: float | None = None) -> dict[str, Any]:
+        return self._database_post(f"databases/{uuid_string(database_id, 'database_id')}/close", {}, deadline)
+
+    def reconcile_database(self, database_id: str | UUID, *, deadline: float | None = None) -> dict[str, Any]:
+        return self._database_post(f"databases/{uuid_string(database_id, 'database_id')}/reconcile", {}, deadline)
 
     def list_collections(self, *, page_size: int = 100, cursor: str | None = None,
                          deadline: float | None = None) -> Page:

@@ -416,3 +416,45 @@ def test_committed_receipt_requires_shared_core_fields(field):
     with client_with(lambda request: reply(body)) as client:
         with pytest.raises(ProtocolError):
             client.find_append_outcome(CID, OP)
+
+
+def test_database_selection_keeps_management_at_server_root():
+    seen = []
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        if request.url.path.endswith('/collections:resolve'):
+            assert request.url.params['name'] == 'exact'
+            return reply({'collection_id': CID})
+        if request.url.path == '/databases' and request.method == 'GET':
+            return reply({'items': [], 'next_cursor': None})
+        if request.url.path.endswith('/schema'):
+            return reply(SCHEMA.to_dict())
+        return reply({'database_id': OP, 'state': 'open', 'name': 'a'})
+    with Client('https://example.test', 'token', database_id=OP, transport=httpx.MockTransport(handler)) as client:
+        client.create_database('a', database_id=OP)
+        client.list_databases()
+        client.get_database(OP)
+        client.close_database(OP)
+        client.open_database(OP)
+        client.reconcile_database(OP)
+        client.capabilities()
+        client.resolve_collection('exact')
+        client.get_schema(CID)
+    assert seen == [('POST', '/databases'), ('GET', '/databases'), ('GET', f'/databases/{OP}'),
+                    ('POST', f'/databases/{OP}/close'), ('POST', f'/databases/{OP}/open'),
+                    ('POST', f'/databases/{OP}/reconcile'), ('GET', f'/databases/{OP}/capabilities'),
+                    ('GET', f'/databases/{OP}/collections:resolve'), ('GET', f'/databases/{OP}/collections/{CID}/schema')]
+
+
+def test_database_mutations_do_not_retry_on_transport_failure():
+    seen = []
+    def handler(request):
+        seen.append(request.content)
+        raise httpx.ReadError('lost response', request=request)
+    with client_with(handler) as client:
+        with pytest.raises(TransportError):
+            client.create_database('a', database_id=OP)
+    assert len(seen) == 1
+    assert json.loads(seen[0]) == {'name': 'a', 'database_id': OP}
+    with pytest.raises(ValidationError):
+        Client('https://example.test', 'token', database_id='../escape')

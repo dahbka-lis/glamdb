@@ -21,16 +21,19 @@ class NativeHTTP(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir='/tmp')
         self.addCleanup(self.tmp.cleanup)
-        self.root = str(Path(self.tmp.name) / 'store')
+        self.data_dir = str(Path(self.tmp.name) / 'server')
         self.store_id = str(uuid.uuid4())
         self.env = dict(os.environ, GLAMDB_TOKEN=TOKEN)
         self.assertTrue(Path(SERVER).is_file(), 'native server executable is missing')
-        subprocess.run([CLI, 'create-store', '--root', self.root, '--store-id', self.store_id], check=True, capture_output=True)
+        self.root = str(Path(self.data_dir) / 'databases' / self.store_id)
         self.start()
         self.addCleanup(self.stop)
+        self.assertEqual(self.api('/databases')['items'], [])
+        self.assertTrue(self.api('/capabilities')['features']['database_management'])
+        self.api('/databases', {'database_id': self.store_id, 'name': 'test_database'})
 
     def start(self):
-        self.proc = subprocess.Popen([SERVER, '--root', self.root, '--store-id', self.store_id,
+        self.proc = subprocess.Popen([SERVER, '--data-dir', self.data_dir,
                                       '--port', '0', '--ui-root', UI, '--request-timeout-ms', '1000'],
                                      env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         readable, _, _ = select.select([self.proc.stdout], [], [], 15)
@@ -47,6 +50,8 @@ class NativeHTTP(unittest.TestCase):
         self.assertEqual(self.proc.returncode, 0, out + err)
 
     def request(self, path, body=None, token=TOKEN, accept='application/json', method=None):
+        if path.startswith(('/collections', '/%63ollections')):
+            path = '/databases/' + self.store_id + path
         conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
         headers = {'Accept': accept}
         if token is not None:
@@ -77,6 +82,89 @@ class NativeHTTP(unittest.TestCase):
         self.assertEqual(self.api('/collections', body), info)
         return '/collections/' + cid
 
+    def test_database_lifecycle_and_isolation(self):
+        first = self.api('/databases/' + self.store_id)
+        self.assertEqual(first['state'], 'open')
+        self.assertEqual(self.api('/databases', {'name': 'test_database'}), first)
+        self.api('/databases', {'name': 'different', 'database_id': self.store_id}, status=409)
+        self.api('/databases', {'name': 'test_database', 'database_id': str(uuid.uuid4())}, status=409)
+        second = self.api('/databases', {'name': 'second'})
+        self.assertNotEqual(second['database_id'], self.store_id)
+        path = self.collection()
+        self.api(path + '/append', {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'isolated'}]})
+        other_path = '/databases/' + second['database_id']
+        self.assertEqual(self.api(other_path + '/collections')['items'], [])
+        self.api(other_path + path, status=404)
+        same_id = self.api(path)
+        self.api(other_path + '/collections', {'collection_id': same_id['collection_id'],
+                 'name': same_id['name'], 'schema': same_id['schema']})
+        self.api(other_path + path + '/append', {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'second_only'}]})
+        self.assertEqual(self.api(other_path + path + '/scan', {})['rows'][0]['key'], 'second_only')
+        base = '/databases/' + self.store_id
+        self.assertEqual(self.api(base + '/close', {})['state'], 'closed')
+        self.api(path + '/scan', {}, status=409)
+        self.assertEqual(self.api(other_path)['state'], 'open')
+        self.stop()
+        self.start()
+        self.assertEqual(self.api(base)['state'], 'closed')
+        self.assertEqual(self.api(other_path)['state'], 'open')
+        self.api(base + '/open', {})
+        self.assertEqual(self.api(path + '/scan', {})['rows'][0]['key'], 'isolated')
+        self.api(base + '/reconcile', {})
+        self.assertEqual(len(self.api('/databases')['items']), 2)
+        for invalid in ('', '../outside', 'a/b'):
+            self.api('/databases', {'name': invalid}, status=400)
+        self.api('/databases', {'name': 'x', 'path': '/tmp/outside'}, status=400)
+        self.assertEqual(self.request('/databases', token=None)[0], 401)
+        self.assertEqual(self.request(base + '/open', {}, token=None)[0], 401)
+
+    def test_process_crash_reopens_registered_databases(self):
+        path = self.collection()
+        body = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'survives_process_crash'}]}
+        outcome = self.api(path + '/append', body)
+        self.proc.kill()
+        self.proc.communicate(timeout=10)
+        self.start()
+        self.assertEqual(self.api(path + '/operations/' + body['operation_id']), outcome)
+        self.assertEqual(self.api(path + '/scan', {})['rows'][0]['key'], 'survives_process_crash')
+
+    def test_failed_reconcile_preserves_operation_recovery_context(self):
+        path = self.collection()
+        body = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'recoverable'}]}
+        committed = self.api(path + '/append', body)
+        metadata = list(Path(self.root).rglob('*.metadata.json'))
+        self.assertTrue(metadata)
+        for index, file in enumerate(metadata):
+            file.rename(Path(self.tmp.name) / f'metadata-{index}')
+        try:
+            unknown = self.api(path + '/append', body, status=503)
+            self.assertEqual(unknown['outcome'], 'commit_unknown')
+            lookup = path + '/operations/' + body['operation_id']
+            self.assertEqual(self.api(lookup, status=503)['outcome'], 'commit_unknown')
+            status, _, _ = self.request('/databases/' + self.store_id + '/reconcile', {})
+            self.assertGreaterEqual(status, 400)
+            self.assertEqual(self.api(lookup, status=503)['outcome'], 'commit_unknown')
+            self.api('/databases/' + self.store_id + '/open', {}, status=503)
+            self.assertEqual(self.api(lookup, status=503)['outcome'], 'commit_unknown')
+            self.api('/databases', {'name': 'test_database'}, status=503)
+            self.assertEqual(self.api(lookup, status=503)['outcome'], 'commit_unknown')
+        finally:
+            for index, file in enumerate(metadata):
+                (Path(self.tmp.name) / f'metadata-{index}').rename(file)
+        self.api('/databases/' + self.store_id + '/reconcile', {})
+        self.assertEqual(self.api(lookup), committed)
+
+    def test_missing_database_is_not_recreated(self):
+        base = '/databases/' + self.store_id
+        self.api(base + '/close', {})
+        Path(self.root).rename(self.root + '.saved')
+        self.api(base + '/open', {}, status=500)
+        self.assertEqual(self.api(base)['state'], 'error')
+        self.api('/databases', {'name': 'test_database'}, status=500)
+        self.assertFalse(Path(self.root).exists())
+        Path(self.root + '.saved').rename(self.root)
+        self.assertEqual(self.api(base + '/open', {})['state'], 'open')
+
     def test_append_scan_retry_restart_and_cli(self):
         path = self.collection()
         body = {'operation_id': str(uuid.uuid4()), 'rows': [
@@ -100,7 +188,7 @@ class NativeHTTP(unittest.TestCase):
         self.assertEqual(self.api(path + '/operations/' + body['operation_id']), receipt)
         self.assertEqual(self.api(path + '/scan', {'snapshot_id': snap})['rows'], result['rows'])
         self.assertTrue(list(Path(self.root).rglob('*.parquet')))
-        cli = subprocess.run([CLI, 'request', '--port', str(self.port), '--path', path + '/schema'],
+        cli = subprocess.run([CLI, 'request', '--port', str(self.port), '--path', '/databases/' + self.store_id + path + '/schema'],
                              env=self.env, check=True, capture_output=True, text=True)
         self.assertEqual(json.loads(cli.stdout)['fields'][1]['type'], 'int64')
 
@@ -120,7 +208,7 @@ class NativeHTTP(unittest.TestCase):
             ('Content-Length: -1\r\n', 400),
         ]:
             with self.subTest(headers=headers), socket.create_connection(('127.0.0.1', self.port)) as sock:
-                sock.sendall(('POST /collections HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ' + TOKEN + '\r\n' + headers + '\r\n').encode())
+                sock.sendall(('POST /databases/' + self.store_id + '/collections HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ' + TOKEN + '\r\n' + headers + '\r\n').encode())
                 self.assertIn(f' {status} '.encode(), sock.recv(4096))
         with socket.create_connection(('127.0.0.1', self.port)) as slow:
             slow.settimeout(4)
@@ -167,6 +255,7 @@ class NativeHTTP(unittest.TestCase):
 
     def test_route_schema_fixtures(self):
         fixture = json.loads((Path(__file__).resolve().parents[2] / 'fixtures/http/v0.json').read_text())
+        fixture['database_id'] = self.store_id
         kinds = {'object': dict, 'array': list, 'string': str, 'boolean': bool, 'integer': int, 'null': type(None)}
         wire_schema = json.loads((Path(__file__).resolve().parents[2] / 'fixtures/http/v0.schema.json').read_text())
         validator = None
@@ -241,7 +330,13 @@ class NativeHTTP(unittest.TestCase):
             self.skipTest('SDK dependencies are tested in the workbench environment')
         path = self.collection()
         cid = path.rsplit('/', 1)[1]
-        with Client(f'http://127.0.0.1:{self.port}', TOKEN) as client:
+        with Client(f'http://127.0.0.1:{self.port}', TOKEN, database_id=self.store_id) as client:
+            self.assertEqual(len(client.list_databases().items), 1)
+            self.assertEqual(client.get_database(self.store_id)['state'], 'open')
+            self.assertEqual(client.close_database(self.store_id)['state'], 'closed')
+            self.assertEqual(client.open_database(self.store_id)['state'], 'open')
+            self.assertEqual(client.reconcile_database(self.store_id)['state'], 'open')
+            self.assertEqual(client.create_database('test_database')['database_id'], self.store_id)
             self.assertEqual(client.get_schema(cid).fields[1].type, 'int64')
             outcome = client.append(cid, [{'key': 'sdk', 'n': 9223372036854775807}], operation_id=str(uuid.uuid4()))
             self.assertEqual(outcome.outcome, 'committed')
@@ -252,6 +347,10 @@ class NativeHTTP(unittest.TestCase):
                 self.assertEqual(table.to_pylist()[0]['n'], 9223372036854775807)
 
     def test_owner_invalid_json_disconnect_and_shutdown(self):
+        owner = subprocess.run([SERVER, '--data-dir', self.data_dir, '--port', '0'],
+                               env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(owner.returncode, 0)
+        self.assertIn('STATE_IN_USE', owner.stderr)
         second = subprocess.run([CLI, 'inspect-store', '--root', self.root, '--store-id', self.store_id], capture_output=True, text=True)
         self.assertNotEqual(second.returncode, 0)
         self.assertIn('STATE_IN_USE', second.stderr)
@@ -260,7 +359,7 @@ class NativeHTTP(unittest.TestCase):
         body = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'lost-response'}]}
         wire = json.dumps(body).encode()
         with socket.create_connection(('127.0.0.1', self.port)) as sock:
-            sock.sendall((f'POST {path}/append HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {len(wire)}\r\n\r\n').encode() + wire)
+            sock.sendall((f'POST /databases/{self.store_id}{path}/append HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {len(wire)}\r\n\r\n').encode() + wire)
             # Receiving the response headers proves dispatch before discarding it.
             self.assertIn(b'200', sock.recv(16))
         self.stop()

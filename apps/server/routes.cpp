@@ -1,4 +1,6 @@
 #include "apps/server/routes.h"
+#include "apps/server/databases.h"
+#include "core/api/binary.h"
 
 #include "apps/transport/outcome_json.h"
 #include "core/api/canonical.h"
@@ -13,8 +15,8 @@ using namespace NTransport;
 namespace {
 bool IsApiPath(std::string_view path)
 {
-    return path == "/capabilities" || path == "/collections" || path == "/collections:resolve" ||
-        path.starts_with("/collections/");
+    return path == "/databases" || path.starts_with("/databases/") || path == "/capabilities" ||
+        path == "/collections" || path == "/collections:resolve" || path.starts_with("/collections/");
 }
 TResponse JsonResponse(const TJson& value)
 {
@@ -82,6 +84,12 @@ TRoutes::TRoutes(std::shared_ptr<Engine> engine, std::filesystem::path uiRoot, s
     , Token_(std::move(token))
 { }
 
+TRoutes::TRoutes(std::shared_ptr<TDatabases> databases, std::filesystem::path uiRoot, std::string token)
+    : Databases_(std::move(databases))
+    , UIRoot_(std::move(uiRoot))
+    , Token_(std::move(token))
+{ }
+
 bool TRoutes::IsAuthorized(const TRequest& request) const
 {
     const auto path = DecodeUrl(request.Target.substr(0, request.Target.find('?')));
@@ -110,6 +118,8 @@ TResponse TRoutes::Handle(const TRequest& request) const
         return Route(request);
     } catch (const TFailure& error) {
         return {ErrorStatus(error.Detail.code), EncodeError(error.Detail).dump()};
+    } catch (const detail::Failure& error) {
+        return {ErrorStatus(error.detail.code), EncodeError(error.detail).dump()};
     } catch (const TJson::exception&) {
         return ErrorResponse(400, "INVALID_ARGUMENT", "invalid JSON request");
     } catch (const std::bad_alloc&) {
@@ -142,7 +152,8 @@ TResponse TRoutes::Route(const TRequest& request) const
             {"durability_validation", "designed"},
             {"collection_modes", {"append"}},
             {"features",
-                {{"append", true},
+                {{"database_management", static_cast<bool>(Databases_)},
+                    {"append", true},
                     {"scan", true},
                     {"arrow_export", true},
                     {"stats", false},
@@ -159,6 +170,51 @@ TResponse TRoutes::Route(const TRequest& request) const
                     {"scan_rows", 100000},
                     {"batch_rows", 1024}}}});
     }
+    TJson body;
+    if (request.Method == "POST") {
+        const auto type = request.Headers.find("content-type");
+        if (type == request.Headers.end() ||
+            (type->second != "application/json" && type->second != "application/json; charset=utf-8"))
+        {
+            return ErrorResponse(415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json");
+        }
+        Require(query.empty(), "POST query parameters are unsupported");
+        body = ParseJson(request.Body);
+        Require(body.is_object(), "request body must be an object");
+    }
+    if (path == "/databases" || path.starts_with("/databases/")) {
+        Require(static_cast<bool>(Databases_), "database management requires --data-dir", "UNSUPPORTED_OPERATION");
+        if (path == "/databases") {
+            Require(query.empty(), "unknown query parameter");
+            return JsonResponse(request.Method == "GET" ? Databases_->List() : Databases_->Create(body));
+        }
+        const auto parts = Split(path);
+        if (parts.size() == 2 && request.Method == "GET") {
+            Require(query.empty(), "unknown query parameter");
+            return JsonResponse(Databases_->Get(parts[1]));
+        }
+        if (parts.size() == 3 && request.Method == "POST" &&
+            (parts[2] == "open" || parts[2] == "close" || parts[2] == "reconcile"))
+        {
+            CheckKeys(body, {});
+            return JsonResponse(Databases_->Change(parts[1], parts[2]));
+        }
+        Require(parts.size() >= 3 &&
+                (parts[2] == "collections" || parts[2] == "collections:resolve" || parts[2] == "capabilities"),
+            "route not found",
+            "NOT_FOUND");
+        // Dispatch using the raw suffix: percent decoding must happen exactly once.
+        const auto rawPath = request.Target.substr(0, request.Target.find('?'));
+        const auto first = rawPath.find('/', 1);
+        const auto second = first == std::string::npos ? first : rawPath.find('/', first + 1);
+        Require(second != std::string::npos, "invalid database route");
+        auto scoped = request;
+        scoped.Target = request.Target.substr(second);
+        return Databases_->Use(parts[1], [&](const auto& engine) {
+            return TRoutes(engine, UIRoot_, Token_).Handle(scoped);
+        });
+    }
+    Require(static_cast<bool>(Engine_), "select a database using /databases/{id}", "DATABASE_REQUIRED");
     if (request.Method == "GET" && path == "/collections:resolve") {
         Require(query.size() == 1 && query.contains("name"), "exact name is required");
         return JsonResponse(Collection(Unwrap(Engine_->ResolveCollection(query.at("name")))));
@@ -183,18 +239,6 @@ TResponse TRoutes::Route(const TRequest& request) const
             items.push_back(Collection(info));
         }
         return JsonResponse({{"items", items}, {"next_cursor", nullptr}});
-    }
-    TJson body;
-    if (request.Method == "POST") {
-        const auto type = request.Headers.find("content-type");
-        if (type == request.Headers.end() ||
-            (type->second != "application/json" && type->second != "application/json; charset=utf-8"))
-        {
-            return ErrorResponse(415, "UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json");
-        }
-        Require(query.empty(), "POST query parameters are unsupported");
-        body = ParseJson(request.Body);
-        Require(body.is_object(), "request body must be an object");
     }
     if (request.Method == "POST" && path == "/collections") {
         CheckKeys(body, {"collection_id", "name", "schema", "mode"});

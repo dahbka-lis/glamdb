@@ -1,37 +1,94 @@
-# Native HTTP service (v0)
+# Native HTTP service
 
-`apps/server` builds `glamdb`; `apps/cli` builds `glamdb-cli`. The server opens
-one existing store through the public C++ facade. Creation remains explicit:
+`apps/server` builds `glamdb`; `apps/cli` builds `glamdb-cli`. The server manages named databases through the public C++ facade. Start with an
+empty data directory; create and administer databases through HTTP or the UI:
 
 ```sh
 cmake --preset local
 cmake --build --preset local
-store_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
-./build/local/apps/cli/glamdb-cli create-store --root /tmp/my-glamdb --store-id "$store_id"
 export GLAMDB_TOKEN='replace-with-a-random-secret'
-./build/local/apps/server/glamdb --root /tmp/my-glamdb --store-id "$store_id" --ui-root "$PWD/ui"
+./build/local/apps/server/glamdb --data-dir /tmp/my-glamdb --ui-root "$PWD/ui"
 ```
 
-Open [the workbench](http://127.0.0.1:8080), enter the token, create a collection,
-append rows and query them. Restart with the same root and store ID. No mock
+Open [the workbench](http://127.0.0.1:8080), enter the token, create a database,
+then create collections, append rows and query them. The database screen also
+opens, closes and reconciles databases. Restart with the same data directory. No mock
 fallback exists. `--port 0` selects a port; the first stdout line reports it as
 JSON. Installation places the binaries in `bin` and the UI in `share/glamdb/ui`;
 the installed server discovers that UI relative to its executable on Linux.
+
+Existing standalone stores can still be served with `--root ABSOLUTE_PATH
+--store-id UUID`, mutually exclusive with `--data-dir`. This compatibility mode
+uses unscoped collection routes and does not offer database management.
 
 The offline CLI retains `create-store` and `inspect-store`. Both acquire core
 ownership and fail with `STATE_IN_USE` while the server owns the store. Online:
 
 ```sh
-glamdb-cli request --path /collections
-glamdb-cli request --path /collections --body collection.json
-glamdb-cli request --path /collections/COLLECTION_UUID/append --body append.json
-glamdb-cli request --path /collections/COLLECTION_UUID/scan --body query.json
+glamdb-cli request --path /databases
+# database.json: {"name":"analytics"}; response includes database_id
+# Retrying the same name returns the same database.
+glamdb-cli request --path /databases --body database.json
+glamdb-cli request --path /databases/DATABASE_UUID/collections --body collection.json
+glamdb-cli request --path /databases/DATABASE_UUID/collections/COLLECTION_UUID/append --body append.json
+glamdb-cli request --path /databases/DATABASE_UUID/collections/COLLECTION_UUID/scan --body query.json
 ```
 
 `request` defaults to GET, or POST with `--body FILE` (`-` reads stdin).
 `--method`, `--host` and `--port` are explicit. It prints the complete JSON and
 exits nonzero for HTTP errors; it never retries. Direct CLI HTTP is loopback-only.
 For remote access use the Python SDK with HTTPS through a TLS reverse proxy.
+
+## Database lifecycle
+
+| HTTP route | Behavior |
+| --- | --- |
+| `GET /databases` | List registered identities, names, states and errors |
+| `POST /databases` | Create/open `{name,database_id?:UUID}`; returns database info |
+| `GET /databases/{id}` | Database info and store profile while open |
+| `POST /databases/{id}/open` | Open existing data and run core recovery |
+| `POST /databases/{id}/close` | Stop new calls, drain admitted calls and shut down |
+| `POST /databases/{id}/reconcile` | Run core reconciliation for an open engine |
+
+Lifecycle actions take `{}`. All routes require the bearer token. Collection
+routes in the next table are relative to `/databases/{id}` in managed mode;
+`GET /capabilities` at the server root advertises `features.database_management`.
+A database response contains `{database_id,name,state,store?,error?}`; states are
+`open`, `closed`, `closing`, `error`. Lists contain `{items,next_cursor:null}`.
+Names are unique, case-sensitive UTF-8 (1–128 bytes, no NUL or path separators).
+At most 64 databases are registered. Paths are generated from UUIDs under
+`--data-dir/databases`; clients cannot provide filesystem paths. Database and
+collection identities are separate, and collection/operation IDs are database scoped.
+
+Creation reserves the name and UUID durably before calling `CreateStore`.
+Repeated creation with the same name and optional matching UUID returns or
+reopens that database; a conflicting name/UUID returns 409. A lost response can
+be resolved by listing databases or repeating the same request. There are no
+automatic client retries. An unfinished reservation without a store can be
+completed only by explicit creation. `open` never creates anything. An incomplete
+store, or a missing initialized store, remains an error and is never replaced.
+There is no drop/import/rename endpoint in this release.
+
+A separate `registry.sqlite` records identities and intended open state, using
+verified SQLite DELETE/EXTRA settings. The registry does not contain collection
+catalogs or data. A failed registry write blocks lifecycle mutations until restart,
+since its commit may be uncertain; it never triggers speculative store creation.
+A missing registry in a nonempty directory fails startup. Each service directory
+has one process owner; each core store retains its own identity and owner lock.
+Use an absolute canonical data path with an existing parent on trusted local disk.
+
+Open databases reopen on restart; explicitly closed databases stay closed. A
+failed store open is listed as an error while other databases remain usable.
+Close persists the intent to remain closed before shutdown. Failed shutdown
+retains the engine and its ownership in `closing`; fix the reported storage issue
+and retry close before reopening. Reconciliation does not undo shutdown. A client
+timeout does not roll back lifecycle changes: inspect state or retry the same
+action. Per-database leases drain accepted calls and reject new calls during
+close/reconcile; unrelated databases remain usable within the fixed worker pool.
+Database info/list requests wait for concurrent lifecycle changes. Failed core
+reconciliation preserves outcome lookup while core readiness rejects unsafe work.
+The workbench clears query results, schema caches and mutation drafts on database
+switch, and ignores replies from the previous session.
 
 ## Contract and ownership
 
@@ -66,15 +123,15 @@ CLI mapping: `create-store` → `CreateStore`, `inspect-store` → `OpenExisting
 The transport owns HTTP parsing, codecs, authentication, connection admission
 and static UI assets. Core owns store identity/locking, schema validation,
 canonical hashes, serialized writes, durable publication, receipts, recovery and
-snapshot selection. The adapter never reads catalog tables or enumerates the
-warehouse. Metadata/explain must be added through public core methods, not
+snapshot selection. The adapter never reads core catalog tables or enumerates the
+warehouse; its separate registry stores only database lifecycle metadata. Metadata/explain must be added through public core methods, not
 synthetic values. The UI respects `features` and reports unavailable sections.
 
 `GET /healthz` is public process liveness, **not write readiness**. An opened
 engine has completed open/recovery, but core errors may subsequently prevent
 writes. `backend=local`, `mock=false` do not imply power-loss qualification;
-`durability_validation=designed` remains explicit. Detailed readiness and global
-engine resource accounting are separate follow-up contracts.
+`durability_validation=designed` remains explicit. Database lifecycle state is not a per-write readiness guarantee. Global engine
+resource accounting remains a separate follow-up contract.
 
 ## Requests and results
 
@@ -170,10 +227,12 @@ ctest --preset local -R 'glamdb\.(native_http|transport\.|cli)'
 # With workbench Python dependencies, also exercise SDK JSON/Arrow decoding:
 .venv/bin/python tests/server/native_http_test.py build/local/apps/server/glamdb build/local/apps/cli/glamdb-cli ui
 GLAMDB_NATIVE_SERVER="$PWD/build/local/apps/server/glamdb" \
-GLAMDB_NATIVE_CLI="$PWD/build/local/apps/cli/glamdb-cli" npm --prefix ui run test:e2e
+npm --prefix ui run test:e2e
 ```
 
-The native suite uses fresh disposable stores, real HTTP, exact scalar checks,
+The native suite starts with an empty service directory and creates databases
+through HTTP without an offline CLI. It covers isolation, close/open/reconcile,
+restart and process crashes, missing-store preservation, real HTTP, exact scalar checks,
 repeat-ID conflicts, fixed snapshots, lost-response lookup, reopen, owner locking,
 request framing/auth/limits and UI assets. Mock/client suites remain separate.
 Passing these tests does not qualify physical power-loss durability.
@@ -187,3 +246,8 @@ Set `GLAMDB_VALIDATE_SCHEMAS=1` when running the native Python suite in an
 environment with `jsonschema` to validate each fixture request and actual response
 against Draft 2020-12. The standard-library CTest runner always checks route/status
 and required response-field types.
+
+`glamdb.routes.Databases.*` additionally checks concurrent name reservations,
+request draining across databases, failed-close ownership and retry, incomplete
+creation, and registry COMMIT errors before/after rollback-journal unlink. These
+are deterministic failure-model tests, not physical power-loss qualification.

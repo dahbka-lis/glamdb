@@ -869,6 +869,95 @@
         "brand",
         "colors"
       ]
+    },
+    "empty": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "databaseCreate": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "database_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "database": {
+      "type": "object",
+      "properties": {
+        "database_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "name": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "open",
+            "closed",
+            "closing",
+            "error"
+          ]
+        },
+        "error": {
+          "type": "object"
+        },
+        "store": {
+          "type": "object",
+          "properties": {
+            "store_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "profile_id": {
+              "type": "string"
+            },
+            "format_version": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "store_id",
+            "profile_id",
+            "format_version"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "database_id",
+        "name",
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    "databases": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/database"
+          },
+          "maxItems": 64
+        },
+        "next_cursor": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor"
+      ],
+      "additionalProperties": false
     }
   }
 }

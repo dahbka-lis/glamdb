@@ -39,8 +39,47 @@
       "response_schema": "capabilities"
     },
     {
+      "method": "GET",
+      "path": "/databases",
+      "core": "Service registry",
+      "status": 200,
+      "response_fields": {
+        "items": "array",
+        "next_cursor": "null"
+      },
+      "response_schema": "databases"
+    },
+    {
       "method": "POST",
-      "path": "/collections",
+      "path": "/databases",
+      "core": "CreateStore / OpenExisting",
+      "status": 200,
+      "response_fields": {
+        "database_id": "string",
+        "name": "string",
+        "state": "string"
+      },
+      "response_schema": "database",
+      "request": {
+        "name": "test_database"
+      },
+      "request_schema": "databaseCreate"
+    },
+    {
+      "method": "GET",
+      "path": "/databases/{database_id}",
+      "core": "GetStoreInfo / service registry",
+      "status": 200,
+      "response_fields": {
+        "database_id": "string",
+        "name": "string",
+        "state": "string"
+      },
+      "response_schema": "database"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections",
       "core": "Engine::CreateCollection",
       "status": 200,
       "response_fields": {
@@ -66,7 +105,7 @@
     },
     {
       "method": "GET",
-      "path": "/collections",
+      "path": "/databases/{database_id}/collections",
       "core": "Engine::ListCollections",
       "status": 200,
       "response_fields": {
@@ -77,7 +116,7 @@
     },
     {
       "method": "GET",
-      "path": "/collections:resolve?name=contract_fixture",
+      "path": "/databases/{database_id}/collections:resolve?name=contract_fixture",
       "core": "Engine::ResolveCollection",
       "status": 200,
       "response_fields": {
@@ -88,7 +127,7 @@
     },
     {
       "method": "GET",
-      "path": "/collections/{collection_id}",
+      "path": "/databases/{database_id}/collections/{collection_id}",
       "core": "Engine::GetCollection",
       "status": 200,
       "response_fields": {
@@ -100,7 +139,7 @@
     },
     {
       "method": "GET",
-      "path": "/collections/{collection_id}/schema",
+      "path": "/databases/{database_id}/collections/{collection_id}/schema",
       "core": "Engine::GetCollection / Schema",
       "status": 200,
       "response_fields": {
@@ -110,7 +149,7 @@
     },
     {
       "method": "POST",
-      "path": "/collections/{collection_id}/append",
+      "path": "/databases/{database_id}/collections/{collection_id}/append",
       "core": "Engine::AppendDurable",
       "status": 200,
       "response_fields": {
@@ -132,7 +171,7 @@
     },
     {
       "method": "GET",
-      "path": "/collections/{collection_id}/operations/{operation_id}",
+      "path": "/databases/{database_id}/collections/{collection_id}/operations/{operation_id}",
       "core": "Engine::FindAppendOutcome",
       "status": 200,
       "response_fields": {
@@ -144,7 +183,7 @@
     },
     {
       "method": "POST",
-      "path": "/collections/{collection_id}/scan",
+      "path": "/databases/{database_id}/collections/{collection_id}/scan",
       "core": "Engine::Scan",
       "status": 200,
       "response_fields": {
@@ -160,7 +199,7 @@
     },
     {
       "method": "POST",
-      "path": "/collections/{collection_id}/scan",
+      "path": "/databases/{database_id}/collections/{collection_id}/scan",
       "core": "Engine::Scan + Arrow IPC",
       "status": 200,
       "response_fields": {
@@ -172,7 +211,7 @@
     },
     {
       "method": "GET",
-      "path": "/collections/{collection_id}/stats",
+      "path": "/databases/{database_id}/collections/{collection_id}/stats",
       "core": "proposed Engine::Stats",
       "status": 501,
       "response_fields": {
@@ -182,7 +221,7 @@
     },
     {
       "method": "GET",
-      "path": "/collections/{collection_id}/snapshots",
+      "path": "/databases/{database_id}/collections/{collection_id}/snapshots",
       "core": "proposed Engine::ListSnapshots",
       "status": 501,
       "response_fields": {
@@ -192,7 +231,7 @@
     },
     {
       "method": "GET",
-      "path": "/collections/{collection_id}/files",
+      "path": "/databases/{database_id}/collections/{collection_id}/files",
       "core": "proposed Engine::ListFiles",
       "status": 501,
       "response_fields": {
@@ -202,7 +241,7 @@
     },
     {
       "method": "GET",
-      "path": "/collections/{collection_id}/files/example",
+      "path": "/databases/{database_id}/collections/{collection_id}/files/example",
       "core": "proposed Engine::FileDetails",
       "status": 501,
       "response_fields": {
@@ -212,7 +251,7 @@
     },
     {
       "method": "POST",
-      "path": "/collections/{collection_id}/explain",
+      "path": "/databases/{database_id}/collections/{collection_id}/explain",
       "core": "proposed Engine::Explain",
       "status": 501,
       "response_fields": {
@@ -221,6 +260,48 @@
       "request": {},
       "response_schema": "error",
       "request_schema": "scan"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/reconcile",
+      "core": "Engine::Reconcile",
+      "status": 200,
+      "response_fields": {
+        "database_id": "string",
+        "name": "string",
+        "state": "string"
+      },
+      "response_schema": "database",
+      "request": {},
+      "request_schema": "empty"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/close",
+      "core": "Engine::Shutdown",
+      "status": 200,
+      "response_fields": {
+        "database_id": "string",
+        "name": "string",
+        "state": "string"
+      },
+      "response_schema": "database",
+      "request": {},
+      "request_schema": "empty"
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/open",
+      "core": "OpenExisting",
+      "status": 200,
+      "response_fields": {
+        "database_id": "string",
+        "name": "string",
+        "state": "string"
+      },
+      "response_schema": "database",
+      "request": {},
+      "request_schema": "empty"
     }
   ]
 }

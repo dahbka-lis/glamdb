@@ -27,19 +27,15 @@ ctest --preset local --no-tests=error
 ./build/local/apps/cli/glamdb-cli --help
 ```
 
-The default full build provides the catalog/coordinator and public C++ facade.
-The CLI creates or inspects an empty store with an explicit identity; it does
-not serve HTTP. The real file module is available separately, but connecting it
-through `core/engine/storage_backend.h` remains integration work. Public factories
-do not yet write user-data files, and the scanner is pending.
+The full build provides the public C++ facade, native storage/scanner, HTTP server
+and offline/network CLI. Start `apps/server/glamdb --data-dir ABSOLUTE_PATH` with
+`GLAMDB_TOKEN` set, then create databases in the UI or API. See the
+[native server guide](HTTP_SERVER.md) for the full workflow.
 
-CLI11 provides argument parsing and help from its pinned submodule. Run
-`glamdb --help` or `glamdb create-store --help` / `glamdb inspect-store --help`
-for usage. Both commands require `--root ABSOLUTE_PATH` and `--store-id UUID`;
-options may appear in either order and also accept `--name=value` syntax.
-No arguments prints help successfully. Invalid command lines exit with code 2
-before opening a store; engine errors exit with code 1. Successful commands
-retain the store-info JSON output.
+CLI11 provides argument parsing from its pinned submodule. The optional offline
+`glamdb-cli create-store` and `glamdb-cli inspect-store` commands require
+`--root ABSOLUTE_PATH --store-id UUID`; they fail while another process owns the
+store. `glamdb-cli request` calls the running server. Each binary provides `--help`.
 
 Use `release` or `asan-ubsan` in place of `local` for the other build profiles.
 For a build without tests or GoogleTest, use a separate directory:

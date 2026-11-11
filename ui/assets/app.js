@@ -36,6 +36,7 @@ let connectionController = null,
     viewController = null,
     queryController = null,
     queryGeneration = 0,
+    databaseSelectionGeneration = 0,
     toastTimer = null,
     themeStamp = '',
     configTimer = null;
@@ -66,6 +67,7 @@ function report(error) {
     if (error.name !== 'AbortError') toast(error.message ?? 'Something went wrong');
 }
 function resetSession() {
+    databaseSelectionGeneration++;
     connectionController?.abort();
     viewController?.abort();
     queryController?.abort();
@@ -155,17 +157,107 @@ function login() {
     <p class="login-error" id="login-error" role="alert"></p><p class="login-footnote">Local demo? Use the token from your GLAMDB_TOKEN environment.<br>Mock data is disposable. No storage durability is claimed.</p></div></section></main>`;
 }
 
+async function databaseWorkspace(database = null) {
+    const { base, token } = state;
+    resetSession();
+    state.base = base;
+    state.token = token;
+    state.database = database;
+    state.managed = true;
+    const api = new WorkbenchAPI(
+        database
+            ? `${base.replace(/\/$/, '')}/databases/${encodeURIComponent(database.database_id)}`
+            : base,
+        token,
+    );
+    state.api = api;
+    const controller = new AbortController();
+    connectionController = controller;
+    // Remove the previous database's controls before awaiting the new session.
+    $('#app').innerHTML = '<main class="main"><p role="status">Loading workspace…</p></main>';
+    try {
+        const capabilities = await api.json('/capabilities', { signal: controller.signal });
+        if (state.api !== api || controller.signal.aborted) return;
+        state.capabilities = capabilities;
+        if (database) await refreshWorkspace();
+        else await databaseList();
+    } catch (error) {
+        if (state.api !== api) return;
+        if (database) await databaseWorkspace();
+        else {
+            resetSession();
+            login();
+        }
+        report(error);
+    }
+}
+async function databaseList() {
+    const api = state.api,
+        signal = connectionController.signal;
+    const result = await api.json('/databases', { signal });
+    if (state.api !== api || signal.aborted) return;
+    $('#app').innerHTML =
+        `<header class="topbar">${brand()}<div class="top-actions"><button class="text-button" data-action="databases">Refresh databases</button><button class="text-button" data-action="disconnect">Disconnect</button></div></header>
+    <main id="main-content" class="main">${heading('Your databases', 'Create a database or open an existing workspace.', false)}
+    <section class="panel"><div class="panel-body"><form id="database-form" class="button-row"><label class="field">Database name<input name="name" required maxlength="128" autocomplete="off"></label><button class="button primary" type="submit">Create database</button></form></div></section>
+    <section class="panel"><div class="table-wrap"><table aria-label="Databases"><thead><tr><th>Database</th><th>State</th><th>Actions</th></tr></thead><tbody>${result.items.map((db) => `<tr><td><strong>${e(db.name)}</strong><p class="small mono">${e(db.database_id)}</p>${db.error ? `<p role="alert">${e(db.error.message)}</p>` : ''}</td><td>${e(db.state)}</td><td><div class="button-row"><button class="button small" data-action="database-use" data-id="${e(db.database_id)}">${db.state === 'open' ? 'Use database' : 'Open database'}</button><button class="button small" data-action="database-close" data-id="${e(db.database_id)}" ${db.state === 'closed' ? 'disabled' : ''}>Close database</button><button class="button small" data-action="database-reconcile" data-id="${e(db.database_id)}" ${db.state === 'closed' || db.state === 'closing' ? 'disabled' : ''}>Reconcile</button></div></td></tr>`).join('')}</tbody></table></div>${result.items.length ? '' : '<p class="result-empty">No databases yet. Create your first database above.</p>'}</section></main>`;
+}
+async function databaseAction(target) {
+    const api = state.api,
+        signal = connectionController.signal;
+    const action = target.dataset.action.replace('database-', '');
+    const selection = action === 'use' ? ++databaseSelectionGeneration : null;
+    const current = () =>
+        state.api === api &&
+        !signal.aborted &&
+        (selection === null || selection === databaseSelectionGeneration);
+    setBusy(target, true);
+    try {
+        const db = await api.json(
+            `/databases/${encodeURIComponent(target.dataset.id)}/${action === 'use' ? 'open' : action}`,
+            { method: 'POST', body: {}, signal },
+        );
+        if (!current()) return;
+        if (action === 'use') await databaseWorkspace(db);
+        else await databaseList();
+    } catch (error) {
+        if (!current()) return;
+        await databaseList();
+        report(error);
+    } finally {
+        setBusy(target, false);
+    }
+}
+async function createDatabase(form) {
+    const api = state.api,
+        signal = connectionController.signal;
+    const button = form.querySelector('button');
+    const selection = ++databaseSelectionGeneration;
+    setBusy(button, true);
+    try {
+        const db = await api.json('/databases', {
+            method: 'POST',
+            body: { name: form.elements.name.value },
+            signal,
+        });
+        if (state.api === api && !signal.aborted && selection === databaseSelectionGeneration)
+            await databaseWorkspace(db);
+    } finally {
+        setBusy(button, false);
+    }
+}
+
 function chrome() {
     $('#app').innerHTML =
         `<div class="shell"><aside class="sidebar" id="sidebar" aria-label="Workspace navigation">${brand()}
     <p class="brand-tagline" data-brand="tagline">${e(state.theme.brand.tagline)}</p><div class="workspace-tag"><span class="status-dot"></span>
-    <div><strong>My workspace</strong><small>${e(new URL(state.base).host)} · ${state.capabilities?.mock ? 'MOCK' : 'CONNECTED'}</small></div></div>
+    <div><strong>${e(state.database?.name ?? 'My workspace')}</strong><small>${e(new URL(state.base).host)} · ${state.capabilities?.mock ? 'MOCK' : 'CONNECTED'}</small></div></div>
     <nav class="nav">${nav.map(([key, symbol]) => `<button data-action="nav" data-tab="${key}" class="${state.tab === key ? 'active' : ''}" ${state.tab === key ? 'aria-current="page"' : ''}>${icon(symbol)}<span data-label="nav_${key}">${e(labels(`nav_${key}`))}</span></button>`).join('')}</nav>
     <div class="collection-heading"><span data-label="collections">${e(labels('collections'))}</span><button class="icon-button" data-action="create" aria-label="New collection">${icon('plus')}</button></div>
     <div class="collection-list">${state.collections.map((item) => `<button data-action="select-collection" data-id="${e(item.collection_id)}" class="${state.collectionId === item.collection_id ? 'selected' : ''}">${icon('table')}<span>${e(item.name)}</span></button>`).join('')}</div>
     <div class="sidebar-footer">${icon('kiss', 'decor-kiss')}<p data-label="footer">${e(labels('footer'))}</p></div></aside>
     <div class="workspace"><header class="topbar"><div class="breadcrumb"><button class="icon-button menu-toggle" data-action="menu" aria-label="Toggle navigation">${icon('menu')}</button><span>Workspace</span>${icon('chevron')}<strong>${e(currentCollection()?.name ?? 'Your collections')}</strong></div>
-    <div class="top-actions"><button class="text-button docs-button" data-action="about">Quick guide</button><button class="icon-button" data-action="refresh" aria-label="Refresh workspace">${icon('refresh')}</button><button class="text-button" data-action="disconnect">${publicDemo ? 'Reset demo' : 'Disconnect'}</button><span class="avatar" aria-label="Workspace avatar">${state.theme.brand.mark ? `<img data-brand-logo="mark" class="brand-mark" src="${e(brandAsset(state.theme, 'mark'))}" alt="">` : 'G'}</span></div></header>
+    <div class="top-actions">${state.managed ? '<button class="text-button" data-action="databases">Databases</button>' : ''}<button class="text-button docs-button" data-action="about">Quick guide</button><button class="icon-button" data-action="refresh" aria-label="Refresh workspace">${icon('refresh')}</button><button class="text-button" data-action="disconnect">${publicDemo ? 'Reset demo' : 'Disconnect'}</button><span class="avatar" aria-label="Workspace avatar">${state.theme.brand.mark ? `<img data-brand-logo="mark" class="brand-mark" src="${e(brandAsset(state.theme, 'mark'))}" alt="">` : 'G'}</span></div></header>
     <main id="main-content" class="main">${state.capabilities?.mock ? `<div class="mock-banner">${icon('sparkle')}<span data-label="${publicDemo ? 'public_demo_notice' : 'mock_notice'}">${e(labels(publicDemo ? 'public_demo_notice' : 'mock_notice'))}</span></div>` : ''}<div id="view"></div>
     <footer class="page-footer"><span>GlamDB · <span data-brand="tagline">${e(state.theme.brand.tagline)}</span></span><span>Append mode · duplicate keys preserved ${icon('sparkle', 'decor-sparkle')}</span></footer></main></div></div>`;
     renderView();
@@ -904,7 +996,11 @@ function navigate(tab) {
 }
 
 document.addEventListener('submit', async (event) => {
-    if (!['connect-form', 'query-form', 'create-form', 'append-form'].includes(event.target.id))
+    if (
+        !['connect-form', 'database-form', 'query-form', 'create-form', 'append-form'].includes(
+            event.target.id,
+        )
+    )
         return;
     event.preventDefault();
     const form = event.target,
@@ -926,7 +1022,8 @@ document.addEventListener('submit', async (event) => {
                 });
                 if (state.api !== api || controller.signal.aborted) return;
                 state.capabilities = capabilities;
-                await refreshWorkspace();
+                if (capabilities.features?.database_management) await databaseWorkspace();
+                else await refreshWorkspace();
             } catch (error) {
                 if (connectionController !== controller) return;
                 resetSession();
@@ -935,7 +1032,8 @@ document.addEventListener('submit', async (event) => {
             } finally {
                 setBusy(button, false);
             }
-        } else if (form.id === 'query-form') await runQuery();
+        } else if (form.id === 'database-form') await createDatabase(form);
+        else if (form.id === 'query-form') await runQuery();
         else if (form.id === 'append-form') await appendForm(form);
         else if (form.id === 'create-form') await createForm(form);
     } catch (error) {
@@ -948,7 +1046,9 @@ document.addEventListener('click', async (event) => {
     const action = target.dataset.action,
         api = state.api;
     try {
-        if (action === 'nav') navigate(target.dataset.tab);
+        if (action === 'databases') await databaseWorkspace();
+        else if (action.startsWith('database-')) await databaseAction(target);
+        else if (action === 'nav') navigate(target.dataset.tab);
         else if (action === 'menu') $('#sidebar').classList.toggle('open');
         else if (action === 'disconnect') {
             if (publicDemo) {

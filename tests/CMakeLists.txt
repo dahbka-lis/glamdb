@@ -126,7 +126,7 @@ if(TARGET glamdb_transport)
 endif()
 
 if(TARGET glamdb_routes)
-    add_executable(glamdb_routes_test server/routes_test.cpp support/fake_storage.cpp support/journal_fault_vfs.cpp)
+    add_executable(glamdb_routes_test server/routes_test.cpp server/databases_test.cpp support/fake_storage.cpp support/journal_fault_vfs.cpp)
     target_link_libraries(glamdb_routes_test PRIVATE glamdb_routes glamdb_build_options GTest::gtest_main
         SQLite::SQLite3 iceberg::iceberg_sql_catalog_static)
     gtest_discover_tests(glamdb_routes_test TEST_PREFIX glamdb.routes.

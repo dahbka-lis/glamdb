@@ -47,7 +47,10 @@ favicon; artwork paths and sizes remain runtime theme settings.
 
 **[Open the public demo](https://nnrpi.github.io/glamdb/)** — anyone can try it.
 
-For persistent data, follow the [native server quickstart](docs/development/HTTP_SERVER.md).
+For persistent data, start `glamdb --data-dir /absolute/data/path` with
+`GLAMDB_TOKEN` set, then create and manage databases in the workbench or API.
+No offline initialization is required. Follow the
+[native server quickstart](docs/development/HTTP_SERVER.md).
 Launch the disposable mock workbench (Python 3.13 and Node 22+):
 
 ```sh
