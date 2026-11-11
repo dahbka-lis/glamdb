@@ -32,7 +32,8 @@ closure; that candidate remains tentative until the outer SQLite commit.
 The engine caches the index with its confirmed collection view. A scan pins both
 under the same state lock, including the interval between backend confirmation
 and engine-view refresh. Later appends cannot change its files or selected view.
-The cursor retains its FileIO and store lease; returned buffers retain the lease.
+The cursor and returned buffers retain their owned Arrow pool, FileIO and engine
+resources until the last dependent handle is released, including after filtering.
 New scans are blocked while recovery is required. Existing pinned cursors retain
 their immutable membership and normal data-read/error behavior.
 
@@ -100,10 +101,29 @@ pass 110 scan/mock cases and the 155-case storage suite (one child-only skip in
 each); 18 storage-disabled checks include the installed consumer. Leak detection
 is disabled in the sandbox; pinned dependencies use their ordinary builds.
 
-LLVM 18 formatting covers 196 files; static analysis covers 121 translation
-units. One new upstream admission file was rechecked after its build metadata
-became available. Formatting/analyzer negative checks pass. An independent
-critical review found no issues, including a follow-up against the updated base.
+On that base, LLVM 18 formatting covered 196 files and static analysis covered
+121 translation units. One new upstream admission file was rechecked after its
+build metadata became available. Formatting/analyzer negative checks passed.
+An independent critical review found no issues.
+
+After merging official `d61aeaa`, Release CTest passes with 654 discovered cases
+(one disabled benchmark and two child-only skips). ASan/UBSan passes 151 scan,
+mock, predicate and metadata-page cases (one child-only skip). The storage-disabled
+suite passes with 319 discovered cases (one disabled benchmark). The independent
+integration review found no issues. Recheck commands:
+
+```sh
+GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 \
+  ctest --test-dir build/release --output-on-failure --no-tests=error -j 6
+ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build/asan-ubsan \
+  --output-on-failure --no-tests=error -j 4 \
+  -R '^glamdb\.(vertical\.|mock\.)|^glamdb\.unit\.(TMetadataPagesTest|ScanPredicate)\.'
+ctest --test-dir build/nostorage --output-on-failure --no-tests=error -j 4
+cmake --build build/release --target format-check quality-negative-check
+```
+
+The merged tree passes LLVM 18 formatting for 201 files and the negative checks.
+Focused static analysis passes for the scan and metadata-page integration.
 
 The existing `SerializationIsLinearInRetainedSnapshots` timing check initially
 reported a 3.20 ratio during concurrent builds/analysis (limit 3.0). The complete

@@ -28,6 +28,8 @@ see [SCANNER.md](docs/development/SCANNER.md).
 Native scans reuse an immutable [verified membership index](docs/development/SCAN_INDEX.md)
 for fixed latest, historical and initial-empty views. Publication and reopen
 derive it from authoritative Iceberg metadata; healthy scan planning reads no manifests.
+Returned scan buffers retain allocator accounting, FileIO and engine ownership
+through slices and Arrow exports, including after shutdown.
 The [installed public API consumer](docs/development/BUILDING.md#build-and-install)
 checks real A/B appends, fixed-view scans, persisted receipts and retries after
 reopening in a new process, with a separate storage-disabled contour.
@@ -54,7 +56,8 @@ snapshots and commits are synthetic and disappear on restart.
 
 The embedded C++ facade also exposes [native metadata](docs/development/METADATA.md):
 capabilities, receipt-backed snapshot history, selected-view statistics,
-snapshot-bound file and row-group details, scan explain and execution profiles.
+snapshot-bound file and row-group details, fixed-view collection/history/file
+pages, scan explain and execution profiles.
 HTTP metadata/explain adapters remain pending.
 
 The workbench also has a **public browser demo** requiring no token or Python

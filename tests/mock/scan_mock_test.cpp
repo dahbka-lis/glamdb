@@ -326,6 +326,106 @@ TEST_F(ScanMockTest, CancelInsideReadIsDeterministic)
     EXPECT_EQ(next.error().code, "CANCELLED");
 }
 
+TEST_F(ScanMockTest, StopDuringManifestReadDoesNotOpenData)
+{
+    const auto plan = PlanManifests(IO_, Base_, SnapshotSelector::Id(Snap1_));
+    ASSERT_TRUE(plan) << plan.error().message;
+    ASSERT_FALSE(plan->Manifests.empty());
+    for (const bool closing : {false, true}) {
+        SCOPED_TRACE(closing);
+        auto stopped = std::make_shared<std::atomic<bool>>(false);
+        auto context = Context();
+        context.Closing = stopped;
+        const auto cursor =
+            OpenScan(std::move(context), {.collection_id = CollectionId, .selector = SnapshotSelector::Id(Snap1_)});
+        ASSERT_TRUE(cursor) << cursor.error().message;
+        bool manifestRead = false;
+        int dataReads = 0;
+        IO_->OnRead = [&](const std::string& path) {
+            if (path == plan->Manifests.front().manifest_path) {
+                manifestRead = true;
+                if (closing) {
+                    stopped->store(true);
+                } else {
+                    (*cursor)->Cancel();
+                }
+            }
+            if (path.ends_with(".parquet")) {
+                ++dataReads;
+            }
+        };
+        const auto next = (*cursor)->Next();
+        IO_->OnRead = nullptr;
+        ASSERT_TRUE(manifestRead);
+        ASSERT_FALSE(next);
+        EXPECT_EQ(next.error().code, "CANCELLED");
+        EXPECT_EQ((*cursor)->Profile().state, ScanState::Cancelled);
+        EXPECT_EQ(dataReads, 0);
+    }
+}
+
+TEST_F(ScanMockTest, ExtractedBufferRetainsFileIOAndOwner)
+{
+    auto io = std::make_shared<TMemoryFileIO>();
+    io->Files = IO_->Files;
+    auto owner = std::make_shared<int>(0);
+    const std::weak_ptr<TMemoryFileIO> ioLifetime = io;
+    const std::weak_ptr<int> ownerLifetime = owner;
+    auto context = Context();
+    context.FileIO = io;
+    context.Lease = owner;
+    auto cursor = OpenScan(std::move(context), {.collection_id = CollectionId});
+    ASSERT_TRUE(cursor) << cursor.error().message;
+    auto next = (*cursor)->Next();
+    ASSERT_TRUE(next);
+    ASSERT_NE(*next, nullptr);
+    auto buffer = (*next)->column(0)->data()->buffers[2];
+    *next = nullptr;
+    cursor->reset();
+    io.reset();
+    owner.reset();
+    EXPECT_FALSE(ioLifetime.expired());
+    EXPECT_FALSE(ownerLifetime.expired());
+    buffer.reset();
+    EXPECT_TRUE(ioLifetime.expired());
+    EXPECT_TRUE(ownerLifetime.expired());
+}
+
+TEST_F(ScanMockTest, DecodedAndFilteredBuffersRetainAllocatorAccounting)
+{
+    for (const bool filtered : {false, true}) {
+        SCOPED_TRACE(filtered);
+        auto pool = std::make_shared<arrow::ProxyMemoryPool>(arrow::default_memory_pool());
+        const std::weak_ptr<arrow::MemoryPool> lifetime = pool;
+        auto context = Context();
+        context.Pool = pool;
+        ScanRequest request{.collection_id = CollectionId, .selector = SnapshotSelector::Id(Snap1_)};
+        if (filtered) {
+            request.predicate = Predicate::Compare("key", CompareOp::Ne, std::string("B"));
+        }
+        auto cursor = OpenScan(std::move(context), request);
+        ASSERT_TRUE(cursor) << cursor.error().message;
+        auto next = (*cursor)->Next();
+        ASSERT_TRUE(next);
+        ASSERT_NE(*next, nullptr);
+        EXPECT_EQ((*next)->num_rows(), filtered ? 3 : 4);
+        EXPECT_GT(pool->bytes_allocated(), 0);
+        auto array = (*next)->column(2)->Slice(0, 2);
+        auto buffer = (*next)->column(0)->data()->buffers[2];
+        *next = nullptr;
+        cursor->reset();
+        EXPECT_GT(pool->bytes_allocated(), 0);
+        pool.reset();
+        EXPECT_FALSE(lifetime.expired());
+        EXPECT_TRUE(array->ValidateFull().ok());
+        EXPECT_EQ(RenderArrow(*array, 0), filtered ? "2" : "1");
+        array.reset();
+        EXPECT_FALSE(lifetime.expired());
+        buffer.reset();
+        EXPECT_TRUE(lifetime.expired());
+    }
+}
+
 TEST_F(ScanMockTest, MissingOrTruncatedDataIsStickyCorruption)
 {
     for (const bool truncate : {false, true}) {
