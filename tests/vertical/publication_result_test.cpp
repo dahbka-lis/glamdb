@@ -163,10 +163,8 @@ TEST_F(BackendPublicationTest, OnlySuccessfulOuterCommitPromotesCandidate)
     EXPECT_TRUE(Backend_->CheckAppendAdmissible(Store_, info, next, Input_));
     EXPECT_FALSE(Backend_->CheckAppendAdmissible(Store_, View_.info, View_.base, Input_));
     const auto operation = Catalog_->FindOperation(test::collection_id, FirstOperation);
-    ASSERT_TRUE(operation);
-    ASSERT_TRUE(test::Present(operation).outcome);
-    ASSERT_TRUE(test::Present(test::Present(operation).outcome).result);
-    EXPECT_EQ(test::Present(test::Present(test::Present(operation).outcome).result), receipt);
+    const auto& outcome = test::Present(test::Present(operation).outcome);
+    EXPECT_EQ(test::Present(outcome.result), receipt);
 }
 
 TEST_F(BackendPublicationTest, RolledBackOuterTransactionDiscardsCandidateAndPreservesBase)
@@ -195,7 +193,6 @@ TEST_F(BackendPublicationTest, RolledBackOuterTransactionDiscardsCandidateAndPre
     Backend_->PublicationFinished(test::collection_id, location, CommitDisposition::DefinitelyNotCommitted);
     EXPECT_EQ(Catalog_->Base(test::collection_id), View_.base);
     const auto operation = Catalog_->FindOperation(test::collection_id, FirstOperation);
-    ASSERT_TRUE(operation);
     EXPECT_EQ(test::Present(operation).state, detail::OperationState::Bound);
     EXPECT_TRUE(Backend_->CheckAppendAdmissible(Store_, View_.info, View_.base, Input_));
     // A late, erroneous success handoff must not revive the discarded candidate.
