@@ -61,9 +61,13 @@ does not imply scan pruning. These are stored metadata observations, not a
 verification of every data page. Corrupt/missing committed files close readiness;
 environmental read/close failures retain `IO_ERROR` without closing readiness.
 
-File listings and details materialize caller-owned DTOs under existing local
-file/footer limits. Shared metadata reservations remain separate work; these
-APIs do not provide a process-wide memory bound.
+File listings and details materialize DTOs under existing local file/footer
+limits and shared metadata working reservations. Original results retain
+capacity-sized leases for file descriptors, bounds and row-group/column data
+until their final owner releases them, including after engine close. Independently
+copied caller DTOs belong to the host budget. Conservative working envelopes
+are not an RSS guarantee. See
+[shared resources](SHARED_RESOURCES.md) for the accounting contract.
 
 ## Fixed-view pages
 
@@ -96,9 +100,11 @@ estimated retained DTO/token allocations. Admission refuses excess with
 `RESOURCE_EXHAUSTED`; it does not evict live cursors. Listings expire five
 minutes after admission, without renewal on replay; the next page request
 reclaims expired entries. Shutdown releases retained listings. Empty and
-single-page results retain no cursor. Listing construction, returned DTO copies,
-allocator overhead and other engine/transport allocations still require the
-host's shared metadata budget; this cache is not a process-wide RAM limit.
+single-page results retain no cursor. Listing construction, cached descriptors
+and tokens, and every returned page use the engine's shared metadata parent.
+Returned pages retain independent capacity-sized leases after engine close.
+Pressure refuses a page without consuming its continuation; retry and replay
+remain available after capacity returns. These envelopes are not an RSS limit.
 
 Every `Metric` contains an optional integer and a `MetricKind`:
 
@@ -124,9 +130,19 @@ candidate was read. Open profiles are partial. Cancellation is observable
 before another `Next()`; terminal complete/failed states are retained through
 shutdown. Custom cursors may leave unsupported counters unavailable.
 
-No persistent format changes, snapshot expiration, directory inventory, HTTP
-routes, SDK/UI integration or durability qualification are introduced here.
-The existing HTTP metadata/explain routes still return `501`.
+[HTTP metadata routes](HTTP_SERVER.md) adapt these methods into the existing
+SDK/workbench types. Counts/identities use decimal strings; unavailable values
+remain null with explicit metric kinds. File details distinguish descriptor
+metadata from verified actual bytes. Presence of an index does not imply scan
+pruning. Root leases cover footer inspection through concurrent append cleanup.
+No snapshot expiration, directory-based inventory, format change or durability
+qualification is introduced.
+
+Metadata history/file pages retain the first resolved view. Opaque tokens bind
+to database, collection, kind, original selector and page size; tampering,
+expiry, lifecycle invalidation and changed read admission fail explicitly.
+The [installed acceptance guide](NATIVE_ACCEPTANCE.md) independently verifies
+Parquet/Avro, API membership, reopen and whole-store restore.
 
 Validation uses real dependencies in `NativeMetadata`, metadata cases in
 `ScanReadErrorClassificationTest` and `SupersededRootTest`, and the installed

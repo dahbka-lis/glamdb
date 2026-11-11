@@ -10,6 +10,10 @@
 #include "core/storage/format_verifier.h"
 #include "core/storage/table_profile.h"
 
+#include "core/resources/arrow_pool.h"
+#include "core/resources/envelopes.h"
+#include "storage/resources.h"
+
 #include <arrow/api.h>
 #include <arrow/io/memory.h>
 #include <iceberg/file_io.h>
@@ -147,13 +151,6 @@ T Take(Result<T> result)
     return std::move(*result);
 }
 
-struct TScanResources
-{
-    std::shared_ptr<const void> Owner;
-    std::shared_ptr<iceberg::FileIO> FileIO;
-    std::shared_ptr<arrow::MemoryPool> Pool;
-};
-
 class TLeaseBuffer final : public arrow::Buffer
 {
 public:
@@ -225,7 +222,10 @@ public:
         int64_t batchRows,
         std::optional<int64_t> limit)
         : Context_(std::move(context))
-        , Resources_(std::make_shared<TScanResources>(Context_.Lease, Context_.FileIO, Context_.Pool))
+        , Pool_(MakeResourcePool(Context_.Resources, Context_.Pool))
+        , CursorMemory_(Take(Context_.Resources->Reserve(ResourceClass::Metadata, 16ULL << 20)))
+        , SelectionMemory_(Take(Context_.Resources->Reserve(ResourceClass::Data, 1ULL << 20)))
+        , BufferLease_(std::make_shared<TBufferLease>(Context_.Lease, Context_.FileIO, Pool_, CursorMemory_))
         , FileSchema_(std::move(fileSchema))
         , OutputSchema_(std::move(outputSchema))
         , Info_{OutputSchema_,
@@ -302,13 +302,24 @@ public:
     }
 
 private:
+    struct TBufferLease
+    {
+        std::shared_ptr<const void> Store;
+        std::shared_ptr<iceberg::FileIO> FileIO;
+        std::shared_ptr<arrow::MemoryPool> Pool;
+        std::shared_ptr<ResourceReservation> Metadata;
+    };
     const TScanContext Context_;
-    const std::shared_ptr<const TScanResources> Resources_;
+    const std::shared_ptr<arrow::MemoryPool> Pool_;
+    const std::shared_ptr<ResourceReservation> CursorMemory_, SelectionMemory_;
+    const std::shared_ptr<TBufferLease> BufferLease_;
+    std::shared_ptr<ResourceReservation> FileMemory_;
     // The canonical Iceberg schema of every data file of this collection.
     const std::shared_ptr<iceberg::Schema> FileSchema_;
     const std::shared_ptr<arrow::Schema> OutputSchema_;
     const ScanInfo Info_;
-    // Manifests are read on demand, so a limited scan opens only what it needs.
+    // Production plans pin verified membership; custom backends can retain
+    // on-demand manifest planning.
     const TScanManifests Plan_;
     const TBoundPredicate Predicate_;
     // Schema field indices in output order, and every field read from files.
@@ -326,6 +337,7 @@ private:
     std::atomic<bool> Cancelled_{false};
     std::optional<ErrorDetail> Failed_;
     size_t NextManifest_ = 0;
+    size_t NextIndexedFile_ = 0;
     std::deque<TScanFile> PendingFiles_;
     // A RecordBatchReader must not outlive its FileReader; members are
     // destroyed in reverse order.
@@ -347,6 +359,7 @@ private:
     {
         BatchReader_.reset();
         FileReader_.reset();
+        FileMemory_.reset();
     }
 
     Result<std::shared_ptr<arrow::RecordBatch>> ReadNext()
@@ -355,8 +368,12 @@ private:
         while (!Remaining_ || *Remaining_ > 0) {
             CheckActive();
             if (!BatchReader_) {
+                if (Plan_.Index && NextIndexedFile_ < Plan_.FileCount) {
+                    PendingFiles_.push_back(Plan_.Index->Files[Plan_.FileCount - ++NextIndexedFile_]);
+                }
                 while (PendingFiles_.empty() && NextManifest_ < Plan_.Manifests.size()) {
                     CheckActive();
+                    auto memory = Take(Context_.Resources->Reserve(ResourceClass::Metadata, 256ULL << 20));
                     auto files = Take(ManifestFiles(Context_.FileIO, Plan_, NextManifest_++));
                     ++ManifestsRead_;
                     CheckActive();
@@ -395,6 +412,12 @@ private:
 
     void OpenFile(const TScanFile& file)
     {
+        // Reserve before FileIO creates the std::string and the upstream
+        // footer parser materializes metadata. Arrow decoding is charged by Pool_.
+        RequireInput(file.SizeBytes >= 0 && file.SizeBytes <= (32LL << 20), "invalid data file size");
+        auto bytesMemory = Take(Context_.Resources->Reserve(ResourceClass::Data,
+            static_cast<uint64_t>(file.SizeBytes) * 2 + (64ULL << 10)));
+        FileMemory_ = Take(Context_.Resources->Reserve(ResourceClass::Metadata, 256ULL << 20));
         // Writer limits bound one data file to 32 MiB in this profile.
         auto bytes = TakeIceberg(Context_.FileIO->ReadFile(file.Path, static_cast<size_t>(file.SizeBytes)),
             "IO_ERROR",
@@ -412,9 +435,9 @@ private:
             "CORRUPTION",
             "verify Parquet file");
         DecodeParquet("open Parquet file", [&] {
-            auto source = std::make_shared<arrow::io::BufferReader>(arrow::Buffer::FromString(std::move(bytes)));
-            auto reader =
-                TakeArrow(parquet::arrow::OpenFile(source, Context_.Pool.get()), "CORRUPTION", "open Parquet file");
+            auto buffer = std::make_shared<TLeaseBuffer>(arrow::Buffer::FromString(std::move(bytes)), bytesMemory);
+            auto source = std::make_shared<arrow::io::BufferReader>(std::move(buffer));
+            auto reader = TakeArrow(parquet::arrow::OpenFile(source, Pool_.get()), "CORRUPTION", "open Parquet file");
             reader->set_batch_size(BatchRows_);
             std::vector<int> rowGroups(static_cast<size_t>(reader->num_row_groups()));
             std::iota(rowGroups.begin(), rowGroups.end(), 0);
@@ -497,11 +520,11 @@ private:
             auto array = findReadColumn(field);
             if (selected) {
                 const auto rows = std::span<const int64_t>(*selected).first(static_cast<size_t>(count));
-                array = Take(TakeRows(*array, rows, Context_.Pool.get()));
+                array = Take(TakeRows(*array, rows, Pool_.get()));
             } else if (count != array->length()) {
                 array = array->Slice(0, count);
             }
-            columns.push_back(arrow::MakeArray(AttachLease(array->data(), Resources_)));
+            columns.push_back(arrow::MakeArray(AttachLease(array->data(), BufferLease_)));
         }
         if (Remaining_) {
             *Remaining_ -= count;
@@ -515,15 +538,14 @@ private:
 Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanRequest& request)
 {
     try {
-        if (!context.Pool) {
-            context.Pool = std::make_shared<arrow::ProxyMemoryPool>(arrow::default_memory_pool());
-        }
+        context.Resources = context.Resources ? context.Resources : ResourceOwner::ProcessDefault();
+        auto planningMemory = Take(context.Resources->Reserve(ResourceClass::Metadata, MetadataWorkBytes));
         RequireInput(request.batch_rows >= 1 && request.batch_rows <= MaxBatchRows,
             "batch_rows must be within 1..65536");
         RequireInput(!request.limit || *request.limit >= 0, "limit must not be negative");
         const auto& schema = context.Collection.schema;
         auto outputFields = ResolveProjection(schema, request.projection);
-        auto predicate = Take(BindPredicate(request.predicate, schema));
+        auto predicate = Take(BindPredicate(request.predicate, schema, context.Resources));
 
         auto readFields = outputFields;
         readFields.insert(readFields.end(), predicate.ReferencedFields.begin(), predicate.ReferencedFields.end());
@@ -542,7 +564,9 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
                 BoundedDiagnostic("collection schema profile: " + profile.error().message),
                 RetryHint::OperatorAction});
         }
-        auto plan = Take(PlanManifests(context.FileIO, context.Base, request.selector));
+        auto plan =
+            Take(context.VerifiedState ? PlanVerifiedScan(*context.VerifiedState, context.Base, request.selector)
+                                       : PlanManifests(context.FileIO, context.Base, request.selector));
         return std::make_shared<TScanCursor>(std::move(context),
             std::move(profile->Schema),
             arrow::schema(std::move(fields)),

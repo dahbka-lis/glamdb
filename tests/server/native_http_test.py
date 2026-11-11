@@ -20,7 +20,7 @@ TOKEN = 'native-test-secret'
 
 class NativeHTTP(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(dir='/tmp')
+        self.tmp = tempfile.TemporaryDirectory(dir=str(Path(os.environ.get('GLAMDB_TEST_TMPDIR', '/tmp')).resolve()))
         self.addCleanup(self.tmp.cleanup)
         self.data_dir = str(Path(self.tmp.name) / 'server')
         self.store_id = str(uuid.uuid4())
@@ -157,10 +157,10 @@ class NativeHTTP(unittest.TestCase):
         path = self.collection()
         body = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'recoverable'}]}
         committed = self.api(path + '/append', body)
-        metadata = list(Path(self.root).rglob('*.metadata.json'))
-        self.assertTrue(metadata)
-        for index, file in enumerate(metadata):
-            file.rename(Path(self.tmp.name) / f'metadata-{index}')
+        data_files = list(Path(self.root).rglob('*.parquet'))
+        self.assertTrue(data_files)
+        for index, file in enumerate(data_files):
+            file.rename(Path(self.tmp.name) / f'data-{index}')
         try:
             self.assertEqual(self.api(path + '/append', body), committed)
             self.assertEqual(self.api(path + '/scan', {}, status=500)['error']['code'], 'CORRUPTION')
@@ -180,8 +180,8 @@ class NativeHTTP(unittest.TestCase):
             self.api('/databases', {'name': 'test_database'}, status=503)
             self.assertEqual(self.api(lookup, status=503)['error']['code'], 'RECOVERY_REQUIRED')
         finally:
-            for index, file in enumerate(metadata):
-                (Path(self.tmp.name) / f'metadata-{index}').rename(file)
+            for index, file in enumerate(data_files):
+                (Path(self.tmp.name) / f'data-{index}').rename(file)
         self.api('/databases/' + self.store_id + '/reconcile', {})
         self.assertEqual(self.api(lookup), committed)
 
@@ -276,10 +276,10 @@ class NativeHTTP(unittest.TestCase):
         self.assertEqual(self.api(path + '/scan', {'predicate': {'op': 'is_null', 'field': 'n'}})['rows'], [])
         self.api(path + '/scan', {'predicate': {'op': 'and', 'args': []}}, status=400)
         self.api(path + '/scan', {'predicate': {'op': 'xor', 'args': [{'op': 'true'}]}}, status=501)
-        self.api(path + '/snapshots', status=501)
-        self.api(path + '/files', status=501)
-        self.api(path + '/stats', status=501)
-        self.api(path + '/explain', {}, status=501)
+        self.assertEqual(self.api(path + '/snapshots')['items'], [])
+        self.assertEqual(self.api(path + '/files')['items'], [])
+        self.assertEqual(self.api(path + '/stats')['rows'], '0')
+        self.assertIsNone(self.api(path + '/explain', {})['snapshot_id'])
         status, headers, data = self.request(path + '/scan', {}, accept='application/vnd.apache.arrow.stream')
         self.assertEqual(status, 200, data)
         self.assertEqual(headers['X-Content-SHA256'], hashlib.sha256(data).hexdigest())
@@ -553,7 +553,10 @@ class NativeHTTP(unittest.TestCase):
                     continue
                 value = json.loads(data)
                 for variable, field in route.get('capture', {}).items():
-                    fixture[variable] = value[field]
+                    selected = value
+                    for component in field.split('.'):
+                        selected = selected[int(component)] if isinstance(selected, list) else selected[component]
+                    fixture[variable] = selected
                 if validator:
                     validator(dict(wire_schema, **{'$ref': '#/$defs/' + route['response_schema']})).validate(value)
                 for name, kind in route['response_fields'].items():

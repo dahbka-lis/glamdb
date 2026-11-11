@@ -20,8 +20,10 @@ requires the storage validator. Coordinator test doubles are confined to
 `tests/`; they produce no real Parquet or Avro data. The separate storage
 component tests do exercise real Parquet, Avro and JSON files. The
 [native HTTP server](HTTP_SERVER.md) adapts this same facade outside the embedded
-component. Payload journaling, background jobs, whole-store backup and general
-automatic file cleanup remain outside this MVP.
+component. Payload journaling, background jobs and general automatic file cleanup
+remain outside this MVP. A separate [quiesced backup tool](NATIVE_ACCEPTANCE.md)
+closes SQLite while retaining store ownership; it does not add a coordinator
+writer, background job or online backup protocol.
 
 ## Persistence and retry rules
 
@@ -120,9 +122,12 @@ root, so a rejected configuration leaves the root and store UUID reusable.
 
 See the [shared resource budget contract](RESOURCE_BUDGETS.md) for the limit
 matrix, reservation/release ownership, retained-buffer lifetimes and protected
-completion/recovery requirements. The owned-input estimate does not cover HTTP
-decoding, all writer allocations or scan buffers; the current checks are
-store-local rather than a shared process-memory governor.
+completion/recovery requirements. The [process resource owner](SHARED_RESOURCES.md)
+adds shared data, metadata, control, completion, recovery and device reservations
+to these store-local checks. New attempts acquire capacity before binding;
+uncertain outcomes retain it until reconciliation. The owned-input estimate is
+one charge within that parent; HTTP decoding, writer work and scan buffers have
+separate reservations. Conservative upstream envelopes require RSS calibration.
 
 ## Storage backend integration
 
