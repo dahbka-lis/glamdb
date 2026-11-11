@@ -31,7 +31,11 @@ coordinator StorageBackend and `core/scan/` implements `Engine::Scan`
 [the scanner guide](docs/development/SCANNER.md) for their contract and
 validation status, [the coordinator guide](docs/development/COORDINATOR.md)
 for the integration contract, and [the storage guide](docs/development/STORAGE_MODULE.md)
-for the file-layer contract. Full engine durability remains unqualified. `Engine::GetHealth()` exposes
+for the file-layer contract. A shared `ResourceOwner` now admits engines,
+transport copies and tracked Arrow allocations under finite class and device
+reservations; see [the resource owner](docs/development/SHARED_RESOURCES.md)
+for conservative envelopes, retained-buffer lifetime and measured validation.
+Full engine durability remains unqualified. `Engine::GetHealth()` exposes
 nonblocking read/write admission and recovery/shutdown state; HTTP
 `GET /databases/{id}/readyz` (or legacy `/readyz`) maps write readiness to
 200/503. A latched durable-I/O failure permits reads but requires reopen for
@@ -59,12 +63,19 @@ Collection routes are scoped by `/databases/{id}`; optional legacy
 separate, explicitly disposable in-memory mock remains a development profile. The architecture and
 invariants below describe the intended engine, not qualified guarantees.
 
-Data studio separates compact read and schema-driven write panels; the form
-generates typed JSON, while a batch JSON editor remains optional. Without HTTP
-metadata APIs, Overview can count rows via a cancellable fixed-snapshot scan.
-Snapshots and Storage show only confirmed receipts from this session, clearly
-labelled as partial observations rather than complete history or file inventory.
-See the workbench guide for configurable editor sizing and validation.
+Data studio separates compact read and schema-driven write panels. Native
+Overview, Snapshots, Storage and Explain use public-facade HTTP metadata;
+reload/restart restore these views from the server. Storage IDs derive from
+selected committed manifest membership; details verify actual Parquet footers,
+field IDs, statistics and row groups. Unsupported backends retain explicit
+session/count fallbacks. Metadata requests are sequenced to respect per-database
+admission; stale selections cannot replace a newer workspace.
+Completed metadata inventories retain replay while capacity permits; new listings
+reclaim completed inventories before refusing admission, preserving unread pages.
+Unresolved create/append requests have explicit token-free export/import, retaining
+their original identity/schema/payload. Import never submits a write; confirmed outcomes
+survive failed metadata refreshes. Published snapshot operation IDs remain
+available after reload and look up original outcomes.
 
 The same UI can publish as a static browser-only demo on GitHub Pages. It has
 no API token or shared backend: tab-local rows/operations disappear on reload.
@@ -81,8 +92,9 @@ Key-value upserts and deletes are a subsequent extension using copy-on-write
 and an explicit KV collection mode. Native capabilities, receipt-backed snapshot
 history, selected-view statistics, snapshot-bound file/row-group details,
 fixed-view collection/history/file pages, explain and cursor profiles use the public
-facade; see [the metadata guide](docs/development/METADATA.md). Their HTTP/SDK/UI
-adapters and object storage remain later extensions. Compaction, snapshot expiration,
+facade; see [the metadata guide](docs/development/METADATA.md). HTTP/SDK/UI metadata,
+snapshot/file pagination and explain adapters are implemented; HTTP collection
+pagination and object storage remain later extensions. Compaction, snapshot expiration,
 garbage collection, asynchronous admission, replication, multiple writers, and
 schema evolution are outside the initial append scope. Consult
 [docs/ROADMAP.md](docs/ROADMAP.md) when assessing feature scope; its current
@@ -105,7 +117,7 @@ recovery, scan semantics, or resource ownership.
 For resource limits, read [the shared budget contract](docs/development/RESOURCE_BUDGETS.md):
 it names accounting units, owners, enforcement and release points across the
 engine and transport. Preserve its distinction between current local checks and
-required aggregate memory/device reservations; update the matrix when either changes.
+shared reservation envelopes and remaining RSS/DTO qualification; update the matrix when either changes.
 
 Preserve these boundaries when adding or changing engine behavior:
 
@@ -170,8 +182,10 @@ Preserve these boundaries when adding or changing engine behavior:
   production; recovery checks the same physical cap without reserving a future
   attempt. Logical reachable
   usage is accumulated with overflow and limit checks across collections.
-  Orphan files consume capacity; automatic cleanup is
-  outside the initial scope. The only exception is a metadata root superseded
+  Warehouse orphan files consume capacity; their automatic cleanup is
+  outside the initial scope. Interrupted recovery scratch files are reclaimed
+  only after exclusive ownership and identity validation, before device admission.
+  The warehouse exception is a metadata root superseded
   by a confirmed append (the current root retains the whole history); it is
   removed once no scan is still resolving it. Detected corruption closes readiness; leave SQLite
   journal recovery to SQLite rather than deleting or truncating its journal.
@@ -354,6 +368,23 @@ git submodule update --init --recursive
 cmake --preset deps-local
 cmake --build --preset deps-local --parallel 2
 ```
+
+## Installed system acceptance
+
+`tools/acceptance/run.py --prefix PREFIX --workspace NEW_CANONICAL_PATH` runs the
+installed native service, CLI, SDK and Chromium against one persistent marked
+store: A=1,000, latest=1,010, initial=0. It verifies duplicate rows, precise
+JSON/Arrow, retained buffers, successful/failed outcomes, restart/exact retry,
+browser reload and a separate UI-write collection. It then runs offline reads,
+checks the physical catalog→JSON→Avro→Parquet chain and whole-store restore with
+the original root unavailable. Missing native setup fails; `--no-browser` is an
+explicit incomplete diagnostic profile. Normal native CI invokes the recipe.
+See [the guide](docs/development/NATIVE_ACCEPTANCE.md) for dependencies/evidence.
+`glamdb-admin quiesce-store` closes SQLite and retains the independent directory
+lease until stdin closes; the backup helper holds it through copy and verification.
+No live-service shutdown, automatic source deletion, power-loss or full governor
+qualification is implied. `GLAMDB_TEST_TMPDIR` chooses a canonical disposable
+parent for native test directories without disabling disk reserves.
 
 ## Code and dependency conventions
 

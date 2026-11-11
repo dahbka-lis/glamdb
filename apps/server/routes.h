@@ -7,11 +7,13 @@
 namespace glamdb::NServer {
 class TDatabases;
 class TScans;
+class TMetadata;
 class TRoutes
 {
 public:
     TRoutes(std::shared_ptr<Engine> engine, std::filesystem::path uiRoot, std::string token);
     TRoutes(std::shared_ptr<TDatabases> databases, std::filesystem::path uiRoot, std::string token);
+    std::shared_ptr<ResourceOwner> GetResourceOwner() const;
     NTransport::TResponse Handle(const NTransport::TRequest& request) const;
     // Service shutdown: close scan admission and cancel without waiting for active reads.
     void CancelScans() const;
@@ -25,7 +27,9 @@ private:
         const std::map<std::string, std::string>& query,
         const NTransport::TJson& body) const;
     NTransport::TResponse StaticFile(const std::string& path) const;
+    std::shared_ptr<ResourceOwner> Resources_;
     std::shared_ptr<TScans> Scans_;
+    std::shared_ptr<TMetadata> Metadata_;
     std::string DatabaseID_;
     std::shared_ptr<Engine> Engine_;
     std::shared_ptr<TDatabases> Databases_;

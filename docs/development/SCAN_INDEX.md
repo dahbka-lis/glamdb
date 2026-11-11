@@ -47,11 +47,13 @@ neither cached planning nor recovery is a full data-page scrub.
 
 ## Cost and reproduction
 
-The current development caps bound snapshots and files. They do not impose a
-shared memory quota. A live generation takes O(files + snapshots) index space;
-publication copies that space, and cursors may retain previous generations.
-Recovery adds descriptors to one mutable builder before publishing it. See
-[resource budgets](RESOURCE_BUDGETS.md) for the remaining aggregate reservations.
+The current development caps bound snapshots and files. A live generation takes
+O(files + snapshots) index space; publication copies that space, and cursors may
+retain previous generations. The backend's shared metadata reservation stays
+with the parsed root and its index, including generations pinned by cursors.
+Recovery adds descriptors to one mutable builder before publishing it. The
+[shared resource envelopes](SHARED_RESOURCES.md) remain conservative admission
+estimates, not a bound on total process memory.
 
 Build and run the native benchmark:
 
@@ -68,6 +70,8 @@ the engine. Reopen is cold with respect to engine state; the OS page cache is
 not flushed. `index_capacity_bytes` counts the index object and retained vector
 and path-string capacities, excluding allocator rounding, shared-pointer control
 blocks, parsed roots/manifests, FileIO instrumentation and process RSS.
+
+These measurements use the initial implementation on official base `1f48601`.
 
 Measured on 2026-11-12 with Linux x86-64, Clang 18 and a Release build using
 the pinned native dependencies. Timings are observations on a shared host,
@@ -95,36 +99,18 @@ suite uses in-memory FileIO and remains separate evidence.
 
 ## Executed checks
 
-On official base `1f48601`, the Release build and native CTest pass with 627
-discovered cases (one disabled benchmark and two child-only skips). ASan/UBSan
-pass 110 scan/mock cases and the 155-case storage suite (one child-only skip in
-each); 18 storage-disabled checks include the installed consumer. Leak detection
-is disabled in the sandbox; pinned dependencies use their ordinary builds.
-
-On that base, LLVM 18 formatting covered 196 files and static analysis covered
-121 translation units. One new upstream admission file was rechecked after its
-build metadata became available. Formatting/analyzer negative checks passed.
-An independent critical review found no issues.
-
-After merging official `d61aeaa`, Release CTest passes with 654 discovered cases
-(one disabled benchmark and two child-only skips). ASan/UBSan passes 151 scan,
-mock, predicate and metadata-page cases (one child-only skip). The storage-disabled
-suite passes with 319 discovered cases (one disabled benchmark). The independent
-integration review found no issues. Recheck commands:
+On official base `0382261`, the normal Release build and native CTest pass with
+694 discovered cases (one existing disabled benchmark and three child-only skips).
+Only normal tests were rerun locally for this merge:
 
 ```sh
+cmake --build build/release --parallel 8
 GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 \
   ctest --test-dir build/release --output-on-failure --no-tests=error -j 6
-ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build/asan-ubsan \
-  --output-on-failure --no-tests=error -j 4 \
-  -R '^glamdb\.(vertical\.|mock\.)|^glamdb\.unit\.(TMetadataPagesTest|ScanPredicate)\.'
-ctest --test-dir build/nostorage --output-on-failure --no-tests=error -j 4
-cmake --build build/release --target format-check quality-negative-check
 ```
 
-The merged tree passes LLVM 18 formatting for 201 files and the negative checks.
-Focused static analysis passes for the scan and metadata-page integration.
-
-The existing `SerializationIsLinearInRetainedSnapshots` timing check initially
-reported a 3.20 ratio during concurrent builds/analysis (limit 3.0). The complete
-storage suite passed when rerun without that load; the ratio was 2.17.
+The metadata-pressure regression failed with `RESOURCE_EXHAUSTED` before the fix.
+Recovery now releases engine-owned generation pins after closing admission and
+before rebuilding; active cursors retain their own states and reservations.
+The independent critical review found this issue and reported no remaining
+findings after the fix.

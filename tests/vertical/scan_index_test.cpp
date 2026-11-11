@@ -1,6 +1,7 @@
 #include "core/scan/scan_cursor.h"
 #include "core/scan/scan_planner.h"
 #include "core/storage/base_state.h"
+#include "storage/resources.h"
 #include "tests/support/fault_fs.h"
 #include "tests/vertical/vertical_support.h"
 
@@ -194,6 +195,22 @@ TEST_F(ScanIndexTest, ReopenRebuildsMembershipAndWarmScansReadNoMetadata)
         EXPECT_TRUE(Drain(**zero).empty());
     }
     EXPECT_EQ(MetadataOpens(), rebuiltOpens);
+}
+
+TEST_F(ScanIndexTest, ReconciliationReusesRootReservationUnderMetadataPressure)
+{
+    Append(FirstOperation, FirstRows);
+    const auto owner = Engine_->GetResourceOwner();
+    auto pressure = owner->Reserve(ResourceClass::Metadata,
+        owner->GetLimits().memory_bytes[1] - owner->GetUsage().memory_bytes[1]);
+    ASSERT_TRUE(pressure) << pressure.error().message;
+    const auto recovered = Engine_->Reconcile();
+    ASSERT_TRUE(recovered) << recovered.error().code << ": " << recovered.error().message;
+    pressure->reset();
+    const auto cursor = Engine_->Scan({.collection_id = test::collection_id});
+    ASSERT_TRUE(cursor) << cursor.error().message;
+    EXPECT_EQ(Drain(**cursor), Expected({&FirstRows}));
+    EXPECT_EQ((*cursor)->Profile().manifests_read.value, 0);
 }
 
 TEST_F(ScanIndexTest, ObservedCorruptionRevokesMembershipUntilSuccessfulReconciliation)
