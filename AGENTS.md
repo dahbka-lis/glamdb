@@ -164,8 +164,10 @@ Preserve these boundaries when adding or changing engine behavior:
   production; recovery checks the same physical cap without reserving a future
   attempt. Logical reachable
   usage is accumulated with overflow and limit checks across collections.
-  Orphan files consume capacity; automatic cleanup is
-  outside the initial scope. The only exception is a metadata root superseded
+  Warehouse orphan files consume capacity; their automatic cleanup is
+  outside the initial scope. Interrupted recovery scratch files are reclaimed
+  only after exclusive ownership and identity validation, before device admission.
+  The warehouse exception is a metadata root superseded
   by a confirmed append (the current root retains the whole history); it is
   removed once no scan is still resolving it. Detected corruption closes readiness; leave SQLite
   journal recovery to SQLite rather than deleting or truncating its journal.

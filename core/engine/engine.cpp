@@ -191,11 +191,15 @@ struct Engine::Impl
     std::optional<AppendOutcome> pending_failure;
     std::optional<CreateOutcome> unresolved_create;
 
-    void ReserveStore(const std::shared_ptr<ResourceOwner>& supplied, const std::string& root)
+    void ReserveStoreMemory(const std::shared_ptr<ResourceOwner>& supplied)
     {
         resources = supplied ? supplied : ResourceOwner::ProcessDefault();
         store_resources.push_back(Take(resources->Reserve(ResourceClass::Metadata, CatalogMemoryBytes)));
         store_resources.push_back(Take(resources->Reserve(ResourceClass::Recovery, RecoveryMemoryBytes)));
+    }
+
+    void ReserveStoreDevice(const std::string& root)
+    {
         // Catalog growth/journal and a bounded recovery workspace on this
         // exact device stay protected for the entire engine lifetime.
         store_resources.push_back(Take(resources->ReserveDevice(root,
@@ -754,7 +758,8 @@ EngineFactory::CreateWith(const CreateStoreRequest& request, const BackendFactor
         impl->info = {request.store_id, request.profile_id, 1};
         impl->limits = request.limits;
         ValidateConfig(impl->info, impl->limits);
-        impl->ReserveStore(request.resources, request.absolute_root);
+        impl->ReserveStoreMemory(request.resources);
+        impl->ReserveStoreDevice(request.absolute_root);
         impl->lease = StoreLease::Create(request.absolute_root, impl->info);
         impl->backend = MakeBackend(backend, impl->lease->Root(), impl->info);
         impl->catalog = DurableSqliteCatalogStore::Create(impl->lease->Root() / "catalog.sqlite",
@@ -779,8 +784,11 @@ EngineFactory::OpenWith(const OpenStoreRequest& request, const BackendFactory& b
         impl->info = {request.expected_store_id, request.profile_id, 1};
         impl->limits = request.limits;
         ValidateConfig(impl->info, impl->limits);
-        impl->ReserveStore(request.resources, request.absolute_root);
+        impl->ReserveStoreMemory(request.resources);
         impl->lease = StoreLease::Open(request.absolute_root, impl->info);
+        // Exclusive open reclaims interrupted workspaces before their retained
+        // bytes/inodes can prevent admission of the next recovery workspace.
+        impl->ReserveStoreDevice(impl->lease->Root().string());
         impl->backend = MakeBackend(backend, impl->lease->Root(), impl->info);
         impl->catalog = DurableSqliteCatalogStore::Open(impl->lease->Root() / "catalog.sqlite",
             impl->info,

@@ -60,9 +60,15 @@ journal growth plus a 256 MiB recovery workspace; a write reserves another
 the store root, on the reserved device. The service registry has a page cap and
 its own memory/disk reservation.
 
+On reopen, memory admission precedes exclusive ownership and identity checks.
+Only then are regular `.recovery-XXXXXX` scratch files with six alphanumeric
+suffix characters reclaimed, before device admission and backend recovery.
+Other names, directories and symlinks are preserved. This prevents repeated
+interrupted recovery from consuming the next workspace reservation.
+
 The filesystem remains the authority for retained physical usage, including
-orphans and interrupted workspaces. Every admission samples current available
-blocks/inodes, including after restart, and subtracts outstanding reservations.
+warehouse orphans. Every device admission samples current available blocks/inodes,
+including after restart, and subtracts outstanding reservations.
 Releasing an attempt does not refund files: their allocated space remains in
 the next filesystem observation. Reservations are process-local and do not
 replace checked ENOSPC/EIO handling or coordinate independent external writers.

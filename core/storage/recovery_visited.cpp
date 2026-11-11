@@ -90,6 +90,8 @@ iceberg::Result<std::unique_ptr<TRecoveryVisited>> TRecoveryVisited::Make(std::u
 iceberg::Status TRecoveryVisited::Initialize(std::uint64_t maxBytes, const std::string& directory)
 {
     if (!directory.empty()) {
+        // Process death can leave this file behind. Exclusive, identity-validated
+        // StoreLease::Open reclaims this exact name pattern before device admission.
         Path_ = (std::filesystem::path(directory) / ".recovery-XXXXXX").string();
         const auto descriptor = mkstemp(Path_.data());
         if (descriptor < 0) {

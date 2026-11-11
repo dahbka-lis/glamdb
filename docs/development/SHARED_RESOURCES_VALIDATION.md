@@ -10,18 +10,19 @@ The final tree includes official main through `85bd283`.
 
 | Check | Result |
 | --- | --- |
-| Storage-enabled build and full native CTest suite | PASS: 607 passed, two skipped, one disabled; 610 discovered |
-| Resource owner/pool, shared-store, native route, file metadata and HTTP profile tests under ASan/UBSan/LSan | PASS: 24 tests, leak detection enabled |
+| Storage-enabled build and full native CTest suite | PASS: 610 passed, three skipped, one disabled; 614 discovered |
+| Resource owner/pool, shared-store, native route, file metadata, workspace recovery and HTTP profile tests under ASan/UBSan/LSan | PASS: 27 tests, leak detection enabled |
 | Storage-disabled resource tests and installed public consumer | PASS: eleven tests |
-| LLVM 18 formatting | PASS: 203 project files |
-| LLVM 18 static analysis with configured warnings as errors | PASS: all 22 changed translation units, including project headers |
+| LLVM 18 formatting | PASS: 204 project files |
+| LLVM 18 static analysis with configured warnings as errors | PASS: all 24 changed translation units, including project headers |
 | Quality negative checks and `git diff --check` | PASS |
 
-The skipped cases are the standalone `CapacityRecoveryChild.RejectsOverBudgetStore`
-and `RecoveryChildProcess.ReopensPublishedRoot` subprocess helpers. The disabled
-case is `TerminalRetryCost.CoordinatorWorkScalesWithStoreHistory`. No new skips
-or disabled cases were added. Full-repository static analysis, full sanitizer
-suites, TSan and MSan were not run locally.
+The skipped cases are the standalone `CapacityRecoveryChild.RejectsOverBudgetStore`,
+`RecoveryChildProcess.ReopensPublishedRoot` and
+`RecoveryWorkspaceChild.CrashesDuringVerification` subprocess helpers. The disabled
+case is `TerminalRetryCost.CoordinatorWorkScalesWithStoreHistory`. The crash helper
+is invoked by its parent regression; no disabled cases were added. Full-repository
+static analysis, full sanitizer suites, TSan and MSan were not run locally.
 
 An earlier parallel run during static analysis failed the unchanged metadata
 serialization timing ratio (3.34 against a limit of 3). Three isolated repeats
@@ -35,7 +36,7 @@ described in [BUILDING.md](BUILDING.md):
 cmake --build build/local --parallel 2
 ctest --test-dir build/local --output-on-failure --parallel 2
 ctest --test-dir build/issue-43-asan --output-on-failure -V \
-  -R 'ResourceOwner|ResourcePool|MetadataResources|SharedResources|SharedPressure|TFileMetadataTest|glamdb.resource_profile'
+  -R 'ResourceOwner|ResourcePool|MetadataResources|SharedResources|SharedPressure|TFileMetadataTest|RecoveryWorkspaces|glamdb.resource_profile'
 ctest --test-dir build/nostorage --output-on-failure \
   -R 'ResourceOwner|ResourcePool|MetadataResources|^glamdb.installed_consumer$'
 cmake --build build/local --target format-check quality-negative-check
@@ -83,6 +84,20 @@ headers and rounding per allocation.
 
 Final self-inspection also reproduced and fixed premature release on a rejected
 zero-size reallocation; its regression checks both refusal and successful release.
+
+## Review follow-up, 2026-11-12
+
+[The PR review](https://github.com/glamourdb/glamdb/pull/119#discussion_r4543069093)
+identified named workspaces surviving process death. Three regressions first
+failed, then passed after cleanup moved into exclusive, identity-validated open
+and device admission moved after cleanup. Memory remains reserved before open.
+
+A fresh child is killed by SIGKILL after a real recovery workspace write. Three
+successive interrupted recoveries leave one file each; reopen removes it and
+preserves the original receipt and rows. Other cases check busy/wrong-identity
+stores, unrelated names, directories and symlinks, plus cleanup before device
+refusal and release of the refused open's reservations. These pass under
+ASan/UBSan/LSan as well as the native build. SIGKILL does not qualify power loss.
 
 ## Measured HTTP profile
 
