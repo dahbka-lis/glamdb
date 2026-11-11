@@ -46,6 +46,27 @@ void JournalFaultVfs::Disarm()
     remaining_ = 0;
 }
 
+void JournalFaultVfs::PauseBeforeDelete(int journal_delete_number)
+{
+    std::lock_guard lock(pause_mutex_);
+    paused_ = false;
+    released_ = false;
+    pause_remaining_ = journal_delete_number;
+}
+bool JournalFaultVfs::WaitUntilPaused(std::chrono::milliseconds timeout)
+{
+    std::unique_lock lock(pause_mutex_);
+    return pause_changed_.wait_for(lock, timeout, [&] {
+        return paused_;
+    });
+}
+void JournalFaultVfs::Release()
+{
+    std::lock_guard lock(pause_mutex_);
+    released_ = true;
+    pause_changed_.notify_all();
+}
+
 int JournalFaultVfs::Delete(sqlite3_vfs* vfs, const char* path, int sync_directory)
 {
     JournalFaultVfs* owner = nullptr;
@@ -58,6 +79,14 @@ int JournalFaultVfs::Delete(sqlite3_vfs* vfs, const char* path, int sync_directo
         owner = found->second;
     }
     const bool journal = path != nullptr && std::string_view(path).ends_with("-journal");
+    if (journal && owner->pause_remaining_.load() > 0 && owner->pause_remaining_.fetch_sub(1) == 1) {
+        std::unique_lock lock(owner->pause_mutex_);
+        owner->paused_ = true;
+        owner->pause_changed_.notify_all();
+        owner->pause_changed_.wait(lock, [&] {
+            return owner->released_;
+        });
+    }
     const bool fail = journal && owner->remaining_.load() > 0 && owner->remaining_.fetch_sub(1) == 1;
     if (fail && !owner->after_unlink_) {
         return SQLITE_IOERR_DELETE;

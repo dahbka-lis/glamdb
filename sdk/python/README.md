@@ -210,3 +210,35 @@ retaining the caller operation ID. Those tests require localhost socket access
 and an OpenSSL CLI. Temporary server processes and test keys are confined to
 test directories and reaped on exit. This verifies the network boundary, not
 C++ storage or power-loss durability.
+
+Native scans use fixed-view pages. `scan_json()` collects every page into one
+result (caller memory grows with the full result); `scan_batches()` drains
+independently checksummed Arrow pages as batches and checks the schema and
+snapshot remain unchanged. Both retain compatibility with single-response
+servers. Their first request starts a new scan, so a lost initial response must
+be reported rather than silently restarting against a newer snapshot.
+
+For bounded JSON consumption with safe first-page retry, use the native
+`scan_pages()` API. It opens a fixed view before consuming rows and retries a
+lost cursor-page response once using the same token. No write is retried:
+
+```python
+with client.scan_pages(collection_id, projection=["key", "value"]) as pages:
+    for page in pages:
+        consume(page.rows)
+```
+
+Closing the iterator or client cancels an unfinished scan. `cancel_scan(id,
+opaque_cursor)` is also available for explicitly managed tokens. Native tokens
+are database-, collection-, and representation-scoped; only the most recently
+consumed page can be replayed. Inactive sessions expire after 60 seconds and
+restart/close/reconcile invalidates tokens. An expired token fails explicitly;
+it never restarts a scan. A failed page is an error, never a successful end of
+stream. The server permits eight concurrent live sessions, so close unused
+iterators promptly. Completed replay caches may be evicted to admit new scans.
+
+Managed `create_database(name, limits={"max_collections": 2})` accepts partial
+engine limits. `open_database(database_id, limits={"max_collections": 3})` changes
+them for a closed database. Omit `limits` to preserve the stored configuration;
+responses include all normalized limits. See the [native server contract](../../docs/development/HTTP_SERVER.md)
+for ranges, retry semantics and persistence.

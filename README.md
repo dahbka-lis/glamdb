@@ -17,7 +17,7 @@ See the [architecture](docs/ARCHITECTURE.md) for semantics and the
 ## Current status
 
 The SQLite catalog, write/recovery coordinator, canonical Arrow input, public
-C++ facade, outcome JSON and store-management CLI are implemented. Independent
+C++ facade, outcome JSON and network CLI are implemented. Independent
 storage primitives implement durable local I/O, Parquet writing, Iceberg append
 staging, publication validation, reachable-file recovery, and capacity checks.
 Tests cover real files, injected failures and fresh-process recovery.

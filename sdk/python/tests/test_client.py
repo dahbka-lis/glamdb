@@ -458,3 +458,19 @@ def test_database_mutations_do_not_retry_on_transport_failure():
     assert json.loads(seen[0]) == {'name': 'a', 'database_id': OP}
     with pytest.raises(ValidationError):
         Client('https://example.test', 'token', database_id='../escape')
+
+
+def test_database_limits_preserve_partial_and_omitted_configuration():
+    seen = []
+    def handler(request):
+        seen.append((request.url.path, json.loads(request.content)))
+        return reply({'database_id': OP, 'state': 'open', 'name': 'a'})
+    with client_with(handler) as client:
+        client.create_database('a', limits={'max_collections': 2, 'writer_wait_ms': 0})
+        client.create_database('a')
+        client.open_database(OP, limits={'max_collections': 3})
+        client.open_database(OP)
+    assert seen == [('/databases', {'name': 'a', 'limits': {'max_collections': 2, 'writer_wait_ms': 0}}),
+                    ('/databases', {'name': 'a'}),
+                    (f'/databases/{OP}/open', {'limits': {'max_collections': 3}}),
+                    (f'/databases/{OP}/open', {})]

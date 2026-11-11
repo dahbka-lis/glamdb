@@ -104,6 +104,22 @@ export class WorkbenchAPI {
             throw new APIError(response.status, payload);
         return payload;
     }
+    async cancelScan(path, cursor) {
+        try {
+            await this.json(`${path}/cancel`, {
+                method: 'POST',
+                body: { cursor },
+                signal: AbortSignal.timeout(5000),
+            });
+        } catch {
+            /* Server expiry releases cursors if cleanup cannot reach it. */
+        }
+    }
+    async scanPreview(path, options) {
+        const result = await this.json(path, options);
+        if (result.next_cursor) await this.cancelScan(path, result.next_cursor);
+        return result;
+    }
     async arrow(path, body, { signal } = {}) {
         const response = await this.request(path, {
             method: 'POST',
@@ -112,6 +128,14 @@ export class WorkbenchAPI {
             headers: { Accept: 'application/vnd.apache.arrow.stream' },
         });
         if (!response.ok) throw new APIError(response.status, await response.json());
+        const cursor = response.headers.get('X-GlamDB-Next-Cursor');
+        if (cursor) {
+            await response.body?.cancel();
+            await this.cancelScan(path, cursor);
+            throw new Error(
+                'This export requires multiple pages. Reduce the preview limit or use the Python SDK for a full Arrow scan.',
+            );
+        }
         const bytes = await this.readBytes(response);
         const expected = response.headers.get('X-Content-SHA256');
         if (expected) {

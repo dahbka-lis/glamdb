@@ -396,7 +396,7 @@ function dataView() {
 function resultTable() {
     const schema = state.result.schema?.fields ?? state.projection.map((name) => ({ name }));
     const page = state.rows.slice(state.page * 100, (state.page + 1) * 100);
-    return `<section class="panel results-panel"><div class="panel-header"><div><h2>Your results</h2><p>${number(state.rows.length)} rows · snapshot <code>${e(state.result.snapshot_id ?? 'initial empty')}</code></p></div><button class="button small" data-action="${publicDemo ? 'export-json' : 'export-arrow'}">${icon('download')}${publicDemo ? 'JSON' : 'Arrow'}</button></div><div class="table-wrap"><table aria-label="Query results"><thead><tr>${schema.map((f) => `<th>${e(f.name)}</th>`).join('')}</tr></thead><tbody>${page.map((row) => `<tr>${schema.map((f) => `<td title="${e(displayValue(row[f.name]))}">${row[f.name] === null ? '<span class="null">NULL</span>' : e(displayValue(row[f.name]))}</td>`).join('')}</tr>`).join('')}</tbody></table>${!page.length ? '<p class="result-empty">No rows match this query. The result schema is still available.</p>' : ''}</div><div class="table-footer"><span>${page.length ? state.page * 100 + 1 : 0}–${state.page * 100 + page.length} of ${number(state.rows.length)} · bounded preview</span><div class="button-row"><button class="button small" data-action="previous-page" ${state.page === 0 ? 'disabled' : ''}>Previous</button><button class="button small" data-action="next-page" ${(state.page + 1) * 100 >= state.rows.length ? 'disabled' : ''}>Next</button></div></div></section>`;
+    return `<section class="panel results-panel"><div class="panel-header"><div><h2>Your results</h2><p>${number(state.rows.length)} rows${state.result.next_cursor ? ' · partial preview; reduce the limit or use the SDK for all rows' : ''} · snapshot <code>${e(state.result.snapshot_id ?? 'initial empty')}</code></p></div><button class="button small" data-action="${publicDemo ? 'export-json' : 'export-arrow'}">${icon('download')}${publicDemo ? 'JSON' : 'Arrow'}</button></div><div class="table-wrap"><table aria-label="Query results"><thead><tr>${schema.map((f) => `<th>${e(f.name)}</th>`).join('')}</tr></thead><tbody>${page.map((row) => `<tr>${schema.map((f) => `<td title="${e(displayValue(row[f.name]))}">${row[f.name] === null ? '<span class="null">NULL</span>' : e(displayValue(row[f.name]))}</td>`).join('')}</tr>`).join('')}</tbody></table>${!page.length ? '<p class="result-empty">No rows match this query. The result schema is still available.</p>' : ''}</div><div class="table-footer"><span>${page.length ? state.page * 100 + 1 : 0}–${state.page * 100 + page.length} of ${number(state.rows.length)} · bounded preview</span><div class="button-row"><button class="button small" data-action="previous-page" ${state.page === 0 ? 'disabled' : ''}>Previous</button><button class="button small" data-action="next-page" ${(state.page + 1) * 100 >= state.rows.length ? 'disabled' : ''}>Next</button></div></div></section>`;
 }
 
 function renderView() {
@@ -622,11 +622,15 @@ async function runQuery() {
     const button = $('#run-query');
     setBusy(button, true);
     try {
-        const result = await state.api.json(`${collectionPath()}/scan`, {
-            method: 'POST',
-            body,
-            signal: controller.signal,
-        });
+        const result = await (state.api.scanPreview ?? state.api.json).call(
+            state.api,
+            `${collectionPath()}/scan`,
+            {
+                method: 'POST',
+                body,
+                signal: controller.signal,
+            },
+        );
         if (epoch !== state.epoch || generation !== queryGeneration) return;
         state.result = result;
         state.rows = result.rows ?? [];
@@ -634,7 +638,7 @@ async function runQuery() {
         state.lastQuery = { ...body, snapshot_id: result.snapshot_id ?? 'initial' };
         renderView();
         toast(
-            `${state.rows.length} rows. Fixed snapshot ${result.snapshot_id ?? 'initial empty'}.`,
+            `${state.rows.length} rows${result.next_cursor ? ' (partial preview)' : ''}. Fixed snapshot ${result.snapshot_id ?? 'initial empty'}.`,
         );
     } finally {
         if (queryController === controller) queryController = null;

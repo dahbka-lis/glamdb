@@ -28,12 +28,14 @@ ctest --preset local --no-tests=error
 ```
 
 The full build provides the public C++ facade, native storage/scanner, HTTP server
-and offline/network CLI. Start `apps/server/glamdb --data-dir ABSOLUTE_PATH` with
+and independent network CLI. Start `apps/server/glamdb --data-dir ABSOLUTE_PATH` with
 `GLAMDB_TOKEN` set, then create databases in the UI or API. See the
 [native server guide](HTTP_SERVER.md) for the full workflow.
 
-CLI11 provides argument parsing from its pinned submodule. The optional offline
-`glamdb-cli create-store` and `glamdb-cli inspect-store` commands require
+CLI11 provides argument parsing from its pinned submodule. The network client
+uses system OpenSSL for verified HTTPS and can be [built independently](../../apps/cli/README.md).
+With `GLAMDB_BUILD_ADMIN=ON`, the optional offline
+`glamdb-admin create-store` and `glamdb-admin inspect-store` commands require
 `--root ABSOLUTE_PATH --store-id UUID`; they fail while another process owns the
 store. `glamdb-cli request` calls the running server. Each binary provides `--help`.
 

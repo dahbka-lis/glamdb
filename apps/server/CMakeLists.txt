@@ -1,4 +1,4 @@
-add_library(glamdb_routes STATIC routes.cpp databases.cpp)
+add_library(glamdb_routes STATIC routes.cpp databases.cpp scans.cpp)
 target_link_libraries(glamdb_routes PUBLIC glamdb_transport PRIVATE glamdb_build_options SQLite::SQLite3)
 add_executable(glamdb_server main.cpp server.cpp)
 set_target_properties(glamdb_server PROPERTIES OUTPUT_NAME glamdb)

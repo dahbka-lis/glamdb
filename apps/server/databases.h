@@ -18,9 +18,12 @@ public:
     NTransport::TJson List() const;
     NTransport::TJson Get(const std::string& id) const;
     NTransport::TJson Create(const NTransport::TJson& body);
-    NTransport::TJson Change(const std::string& id, std::string_view action);
+    NTransport::TJson
+    Change(const std::string& id, std::string_view action, const NTransport::TJson& body = NTransport::TJson::object());
     NTransport::TResponse Use(const std::string& id,
         const std::function<NTransport::TResponse(std::shared_ptr<Engine>)>& call) const;
+    // Releases cursor leases after admitted requests drain and before engine lifecycle changes.
+    void SetScanCanceller(std::function<void(const std::string&)> cancel);
     void Shutdown();
 
 private:

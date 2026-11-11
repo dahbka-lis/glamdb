@@ -216,12 +216,12 @@
         "limit": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 100000
+          "maximum": 9223372036854775807
         },
         "batch_rows": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 1024
+          "maximum": 65536
         }
       },
       "required": [],
@@ -775,6 +775,16 @@
             "rows_returned"
           ],
           "additionalProperties": false
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/scanCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -782,7 +792,8 @@
         "snapshot_id",
         "rows",
         "identity",
-        "profile"
+        "profile",
+        "next_cursor"
       ],
       "additionalProperties": false
     },
@@ -884,6 +895,9 @@
         },
         "database_id": {
           "$ref": "#/$defs/uuid"
+        },
+        "limits": {
+          "$ref": "#/$defs/limits"
         }
       },
       "required": [
@@ -930,12 +944,31 @@
             "format_version"
           ],
           "additionalProperties": false
+        },
+        "limits": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/limits"
+            },
+            {
+              "required": [
+                "max_operations",
+                "max_collections",
+                "max_catalog_bytes",
+                "max_pending_calls",
+                "max_owned_input_bytes",
+                "writer_wait_ms",
+                "append_deadline_ms"
+              ]
+            }
+          ]
         }
       },
       "required": [
         "database_id",
         "name",
-        "state"
+        "state",
+        "limits"
       ],
       "additionalProperties": false
     },
@@ -957,6 +990,115 @@
         "items",
         "next_cursor"
       ],
+      "additionalProperties": false
+    },
+    "scanCursor": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "scanContinue": {
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/scanCursor"
+        }
+      },
+      "required": [
+        "cursor"
+      ],
+      "additionalProperties": false
+    },
+    "scanOpened": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "$ref": "#/$defs/schema"
+        },
+        "snapshot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/int64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "cursor": {
+          "$ref": "#/$defs/scanCursor"
+        }
+      },
+      "required": [
+        "cursor",
+        "schema",
+        "snapshot_id",
+        "identity"
+      ],
+      "additionalProperties": false
+    },
+    "scanCancelled": {
+      "type": "object",
+      "properties": {
+        "cancelled": {
+          "const": true
+        }
+      },
+      "required": [
+        "cancelled"
+      ],
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "max_operations": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "max_collections": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "max_catalog_bytes": {
+          "type": "integer",
+          "minimum": 65536,
+          "maximum": 268435456
+        },
+        "max_pending_calls": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "max_owned_input_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 134217728
+        },
+        "writer_wait_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000
+        },
+        "append_deadline_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60000
+        }
+      },
+      "additionalProperties": false
+    },
+    "databaseOpen": {
+      "type": "object",
+      "properties": {
+        "limits": {
+          "$ref": "#/$defs/limits"
+        }
+      },
       "additionalProperties": false
     }
   }

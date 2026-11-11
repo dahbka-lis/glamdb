@@ -23,7 +23,7 @@ must remain usable from a standalone checkout.
 GlamDB is an open-source C++23 columnar key-value storage engine in early
 development. The checkout implements the SQLite catalog, synchronous write and
 recovery coordinator, canonical Arrow input, public C++ facade, outcome JSON,
-and store-management CLI. Independent durable I/O and Arrow/Parquet/Iceberg
+and network CLI. Independent durable I/O and Arrow/Parquet/Iceberg
 storage primitives provide file production, staging, publication validation,
 recovery verification, and capacity checks. `core/backend/` connects them to the
 coordinator StorageBackend and `core/scan/` implements a minimal `Engine::Scan`
@@ -37,7 +37,10 @@ Independent verification tools, a Python network SDK and a browser workbench
 are implemented. They can use the native Asio HTTP server over the public Engine facade.
 `--data-dir` starts with no databases; authenticated API/UI operations create,
 list, open, close and reconcile databases. A separate SQLite service registry
-stores identities and open intent; collection/data writes remain in core.
+stores identities, persisted engine limits and open intent; collection/data writes remain in core.
+Scans use bounded fixed-view pages with replay, expiry and explicit cancellation.
+The network CLI also builds independently with OpenSSL; optional offline commands
+are in `apps/admin` and never required for server initialization.
 Collection routes are scoped by `/databases/{id}`; optional legacy
 `--root/--store-id` mode retains unscoped routes. A
 separate, explicitly disposable in-memory mock remains a development profile. The architecture and
@@ -132,7 +135,8 @@ Preserve these boundaries when adding or changing engine behavior:
 | `core/scan/` | Predicate evaluation, snapshot planning and Parquet scan cursor. |
 | `core/io/` | Independent local filesystem, attempts, receipts, durable files and copying (`glamdb_io`). |
 | `core/storage/` | FileIO, Parquet writer, Iceberg staging, publication/recovery and capacity checks (`glamdb_storage`). |
-| `apps/cli/` | `glamdb-cli`: offline store management and loopback HTTP requests. |
+| `apps/cli/`, `apps/client/` | Standalone `glamdb-cli`: network database management and HTTP/HTTPS requests, without engine dependencies. |
+| `apps/admin/` | Optional offline `glamdb-admin` store creation/inspection utility. |
 | `apps/server/`, `apps/transport/` | `glamdb`: Asio HTTP server, shared precise codecs and native outcome serialization. |
 | `cmake/` | Build options, sanitizers, quality targets, and dependency recipes. |
 | `tests/` | Native unit/recovery/SqlCatalog/VFS/consumer suites, `vertical/` public-API storage tests, `mock/` in-memory scan tests, verification and actual SDK HTTP/HTTPS tests. |
@@ -204,7 +208,8 @@ ctest --preset local
 
 The application links the pinned SQLite, Arrow and Iceberg installation. Tests
 also require GoogleTest. Applications use pinned header-only CLI11, Asio and nlohmann/json submodules;
-they are not part of the public engine API or dependency installation. Use `release`
+The independent network client also uses system OpenSSL for verified TLS.
+These dependencies are not part of the public engine API or dependency installation. Use `release`
 or `asan-ubsan` in place of `local` for the corresponding configure, build, and
 test presets. `GLAMDB_BUILD_STORAGE` defaults to `ON` (unless `GLAMDB_IO_ONLY=ON`)
 and adds `glamdb_storage`, the production backend, the scanner, `glamdb_vertical`
@@ -335,8 +340,17 @@ When changing workflows, preserve SHA-pinned Actions, read-only PR permissions,
 and separation from privileged release credentials. For vulnerabilities, follow
 [SECURITY.md](SECURITY.md) and report privately rather than in public issues.
 
-Native HTTP verification: `ctest --preset local -R 'glamdb\.(native_http|transport\.|cli)'`.
+Native HTTP verification: configure `Python3_EXECUTABLE` with SDK, PyArrow and
+JSON Schema dependencies (`requirements-native-ci.txt` for the CI Python/platform),
+then run `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 ctest --preset local -R 'glamdb\.(native_http|transport\.|cli)'`.
 The server requires `GLAMDB_BUILD_STORAGE=ON`; storage-disabled builds retain
-the offline CLI and codecs. Run native browser checks with `GLAMDB_NATIVE_SERVER`
+the network CLI and codecs. `GLAMDB_BUILD_ADMIN=ON` additionally builds the offline
+`glamdb-admin`; it is not required to initialize or operate a server. Run native browser checks with `GLAMDB_NATIVE_SERVER`
 pointing to the built server; `GLAMDB_E2E_PYTHON` can select
 the workbench Python environment. See the native HTTP guide for exact commands.
+
+Native CI requires SDK/Arrow/schema checks in every profile and native browser
+acceptance plus a standalone client build in the normal profile. MSan uses the
+ordinary standalone TLS client against the instrumented server; system OpenSSL
+is not instrumented. Test-only native HTTP VFS faults model COMMIT uncertainty
+and lifecycle draining; they do not establish physical power-loss durability.

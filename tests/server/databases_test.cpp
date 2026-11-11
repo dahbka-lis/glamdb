@@ -152,7 +152,8 @@ TEST(Databases, ReservationCrashAndIncompleteStoreRemainExplicit)
     {
         detail::Database registry;
         registry.Open(directory / "registry.sqlite", SQLITE_OPEN_READWRITE, "");
-        registry.Execute("INSERT INTO databases VALUES(?,?,0,1)", {test::store_id, "reserved"});
+        registry.Execute("INSERT INTO databases(id,name,initialized,auto_open) VALUES(?,?,0,1)",
+            {test::store_id, "reserved"});
     }
     {
         TDatabases databases(directory);
@@ -166,7 +167,8 @@ TEST(Databases, ReservationCrashAndIncompleteStoreRemainExplicit)
     {
         detail::Database registry;
         registry.Open(directory / "registry.sqlite", SQLITE_OPEN_READWRITE, "");
-        registry.Execute("INSERT INTO databases VALUES(?,?,0,1)", {test::table_uuid, "incomplete"});
+        registry.Execute("INSERT INTO databases(id,name,initialized,auto_open) VALUES(?,?,0,1)",
+            {test::table_uuid, "incomplete"});
     }
     {
         TDatabases databases(directory);

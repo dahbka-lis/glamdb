@@ -19,6 +19,33 @@ from .request import AppendRequest, json_bytes, schema_fingerprint, uuid_string
 from .transport import Deadline, read_json, translate_transport
 
 
+class _ScanPages:
+    def __init__(self, iterator, on_close):
+        self._iterator, self._on_close = iterator, on_close
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            return next(self._iterator)
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        try:
+            self._iterator.close()
+        finally:
+            self._on_close(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
 class Client:
     """Use with a context manager. Mutating POSTs are sent exactly once per call.
 
@@ -65,7 +92,6 @@ class Client:
     def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
         first_error = None
         try:
             for stream in tuple(self._streams):
@@ -76,6 +102,7 @@ class Client:
                         first_error = exc
         finally:
             try:
+                self._closed = True
                 self._http.close()
             except BaseException as exc:
                 if first_error is None:
@@ -192,6 +219,7 @@ class Client:
         return value
 
     def create_database(self, name: str, *, database_id: str | UUID | None = None,
+                        limits: dict[str, int] | None = None,
                         deadline: float | None = None) -> dict[str, Any]:
         """Create or open the same named database. Retry with the same name and ID."""
         if not isinstance(name, str) or not name:
@@ -199,10 +227,14 @@ class Client:
         body = {"name": name}
         if database_id is not None:
             body["database_id"] = uuid_string(database_id, "database_id")
+        if limits is not None:
+            body["limits"] = limits
         return self._database_post("databases", body, deadline)
 
-    def open_database(self, database_id: str | UUID, *, deadline: float | None = None) -> dict[str, Any]:
-        return self._database_post(f"databases/{uuid_string(database_id, 'database_id')}/open", {}, deadline)
+    def open_database(self, database_id: str | UUID, *, limits: dict[str, int] | None = None,
+                      deadline: float | None = None) -> dict[str, Any]:
+        body = {} if limits is None else {"limits": limits}
+        return self._database_post(f"databases/{uuid_string(database_id, 'database_id')}/open", body, deadline)
 
     def close_database(self, database_id: str | UUID, *, deadline: float | None = None) -> dict[str, Any]:
         return self._database_post(f"databases/{uuid_string(database_id, 'database_id')}/close", {}, deadline)
@@ -467,6 +499,38 @@ class Client:
         status, value = self._json("POST", path, budget, body=self._scan_body(projection, predicate, snapshot_id, limit))
         if status != 200:
             self._http_error(status, value, budget)
+        # Own an advertised cursor before validating the first page. A schema
+        # or value error must not strand the server session until its TTL.
+        cursor = value.get("next_cursor")
+        if not isinstance(cursor, str) or not cursor:
+            cursor = None
+        try:
+            first = self._scan_result(value, cid)
+            rows = list(first.rows)
+            wire_rows = list(first.raw["rows"])
+            cursor = first.next_cursor
+            while cursor is not None:
+                status, value = self._cursor_page(path, cursor, budget)
+                if status != 200:
+                    self._http_error(status, value, budget)
+                result = self._scan_result(value, cid)
+                self._same_scan(first, result)
+                if result.next_cursor == cursor:
+                    raise ProtocolError("scan cursor did not advance", collection_id=cid)
+                rows.extend(result.rows)
+                wire_rows.extend(result.raw["rows"])
+                cursor = result.next_cursor
+        finally:
+            if cursor is not None:
+                self._cancel_scan_quietly(cid, cursor)
+        raw = dict(first.raw, rows=wire_rows, next_cursor=None)
+        # Decoded rows are returned independently of wire precision conventions.
+        profile = dict(first.profile, rows_returned=str(len(rows)))
+        raw["profile"] = profile
+        return ScanResult(first.schema, first.snapshot_id, rows, profile, first.identity, raw)
+
+    @staticmethod
+    def _scan_result(value, cid):
         try:
             schema = Schema.from_dict(value["schema"], allow_empty=True)
             snapshot = value["snapshot_id"]
@@ -474,15 +538,87 @@ class Client:
                 raise ValidationError("snapshot_id must be a canonical decimal string or null")
             if not isinstance(value["rows"], list) or not isinstance(value["profile"], dict) or not isinstance(value["identity"], dict):
                 raise ValidationError("invalid scan rows, profile, or identity")
+            cursor = value.get("next_cursor")
+            if cursor is not None and (not isinstance(cursor, str) or not cursor):
+                raise ValidationError("invalid next_cursor")
             rows = decode_rows(schema, value["rows"])
             return ScanResult(schema, snapshot, rows, value["profile"], value["identity"], value)
         except (KeyError, ValidationError) as exc:
             raise ProtocolError("invalid scan JSON response", raw=value, collection_id=cid) from exc
 
+    @staticmethod
+    def _same_scan(first, following):
+        if (first.schema != following.schema or first.snapshot_id != following.snapshot_id
+                or first.identity != following.identity):
+            raise ProtocolError("scan view changed between pages")
+
+    def _cursor_page(self, path, cursor, budget):
+        body = json_bytes({"cursor": cursor})
+        try:
+            return self._json("POST", path, budget, body=body)
+        except TransportError:
+            # Read-only cursor pages replay their cached bytes. Never restart a
+            # scan or retry a write after an ambiguous transport failure.
+            return self._json("POST", path, budget, body=body)
+
+    def cancel_scan(self, collection_id, cursor, *, deadline=None):
+        cid, path = self._path(collection_id, "scan/cancel")
+        if not isinstance(cursor, str) or not cursor:
+            raise ValidationError("cursor must be a nonempty string")
+        budget = Deadline(deadline, collection_id=cid)
+        status, value = self._json("POST", path, budget, body=json_bytes({"cursor": cursor}))
+        if status != 200:
+            self._http_error(status, value, budget)
+
+    def _cancel_scan_quietly(self, cid, cursor):
+        try:
+            self.cancel_scan(cid, cursor, deadline=min(self._timeout, 5.0))
+        except (TransportError, HTTPError, ProtocolError):
+            pass  # Server TTL is the fallback when cleanup cannot reach it.
+
+    def scan_pages(self, collection_id, *, projection=None, predicate=None,
+                   snapshot_id=ANY, limit=None, deadline=None):
+        """Yield bounded JSON pages. Use as a context manager when stopping early.
+
+        Opens a fixed view before reading rows; each page may be retried once
+        after a transport failure without duplicating or skipping rows.
+        """
+        iterator = _ScanPages(self._scan_pages(collection_id, projection=projection, predicate=predicate,
+                                              snapshot_id=snapshot_id, limit=limit, deadline=deadline),
+                              self._streams.discard)
+        self._streams.add(iterator)
+        return iterator
+
+    def _scan_pages(self, collection_id, *, projection, predicate, snapshot_id, limit, deadline):
+        cid, path = self._path(collection_id, "scan")
+        budget = Deadline(deadline, collection_id=cid)
+        status, opened = self._json("POST", path + "/open", budget,
+            body=self._scan_body(projection, predicate, snapshot_id, limit))
+        if status != 200:
+            self._http_error(status, opened, budget)
+        cursor = opened.get("cursor")
+        if not isinstance(cursor, str) or not cursor:
+            raise ProtocolError("scan open requires a cursor", raw=opened)
+        try:
+            fixed = self._scan_result(dict(opened, rows=[], profile={}), cid)
+            while cursor is not None:
+                status, value = self._cursor_page(path, cursor, budget)
+                if status != 200:
+                    self._http_error(status, value, budget)
+                page = self._scan_result(value, cid)
+                self._same_scan(fixed, page)
+                if page.next_cursor == cursor:
+                    raise ProtocolError("scan cursor did not advance", collection_id=cid)
+                cursor = page.next_cursor
+                yield page
+        finally:
+            if cursor is not None:
+                self._cancel_scan_quietly(cid, cursor)
+
     def scan_batches(self, collection_id: str | UUID, *, projection: Iterable[str] | None = None,
                      predicate: Predicate | Mapping[str, Any] | None = None, snapshot_id: Any = ANY,
                      limit: int | None = None, deadline: float | None = None):
-        from .stream import ScanStream
+        from .stream import PagedScanStream, ScanStream
 
         cid, path = self._path(collection_id, "scan")
         budget = Deadline(deadline, collection_id=cid)
@@ -492,7 +628,36 @@ class Client:
             status = response.status_code
             value = read_json(response, budget, self._max_json_bytes)
             self._http_error(status, value, budget)
-        stream = ScanStream(response, budget, max_read_bytes=self._max_arrow_read_bytes,
-                            on_close=self._streams.discard)
+        def next_page(cursor):
+            body = json_bytes({"cursor": cursor})
+            try:
+                following = self._send("POST", path, budget, body=body,
+                                       accept="application/vnd.apache.arrow.stream")
+            except TransportError:
+                following = self._send("POST", path, budget, body=body,
+                                       accept="application/vnd.apache.arrow.stream")
+            if following.status_code != 200:
+                status = following.status_code
+                value = read_json(following, budget, self._max_json_bytes)
+                self._http_error(status, value, budget)
+            return ScanStream(following, budget, max_read_bytes=self._max_arrow_read_bytes,
+                              on_close=lambda stream: None)
+        cursor = response.headers.get("x-glamdb-next-cursor")
+        paged = cursor is not None
+        try:
+            stream = ScanStream(response, budget, max_read_bytes=self._max_arrow_read_bytes,
+                                on_close=(lambda stream: None) if paged else self._streams.discard)
+        except BaseException:
+            # ScanStream closes HTTP/Arrow owners on construction failure, but
+            # no public iterator exists yet to release the server-side cursor.
+            try:
+                if cursor:
+                    self._cancel_scan_quietly(cid, cursor)
+            except BaseException:
+                pass  # Preserve the original schema/transport/allocation error.
+            raise
+        if paged:
+            stream = PagedScanStream(stream, next_page, lambda cursor: self._cancel_scan_quietly(cid, cursor),
+                                     self._streams.discard)
         self._streams.add(stream)
         return stream

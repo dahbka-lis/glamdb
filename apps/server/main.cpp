@@ -35,12 +35,14 @@ try {
         auto databases = std::make_shared<glamdb::NServer::TDatabases>(dataDir);
         glamdb::NServer::TRoutes routes(databases, uiRoot, token);
         glamdb::NServer::RunServer(routes, address, port, std::chrono::milliseconds(timeoutMs));
+        routes.CancelScans();
         databases->Shutdown();
         return 0;
     }
     auto engine = glamdb::NTransport::Unwrap(glamdb::OpenExisting({root, storeID}));
     glamdb::NServer::TRoutes routes(engine, uiRoot, token);
     glamdb::NServer::RunServer(routes, address, port, std::chrono::milliseconds(timeoutMs));
+    routes.CancelScans();
     const auto closed = engine->Shutdown(std::chrono::milliseconds(60000));
     if (!closed) {
         std::cerr << closed.error().code << ": " << closed.error().message << '\n';

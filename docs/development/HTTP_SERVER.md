@@ -21,8 +21,12 @@ Existing standalone stores can still be served with `--root ABSOLUTE_PATH
 --store-id UUID`, mutually exclusive with `--data-dir`. This compatibility mode
 uses unscoped collection routes and does not offer database management.
 
-The offline CLI retains `create-store` and `inspect-store`. Both acquire core
-ownership and fail with `STATE_IN_USE` while the server owns the store. Online:
+`glamdb-cli` is a standalone network client with DNS and verified HTTPS; it does
+not link the engine or storage libraries. `create-store --name analytics` calls
+the managed database API. The optional `glamdb-admin` contains offline
+`create-store`/`inspect-store`, which acquire core ownership and fail with
+`STATE_IN_USE` while the server owns the store. See the [client guide](../../apps/cli/README.md)
+for its independent build and TLS configuration. Online:
 
 ```sh
 glamdb-cli request --path /databases
@@ -35,25 +39,27 @@ glamdb-cli request --path /databases/DATABASE_UUID/collections/COLLECTION_UUID/s
 ```
 
 `request` defaults to GET, or POST with `--body FILE` (`-` reads stdin).
-`--method`, `--host` and `--port` are explicit. It prints the complete JSON and
-exits nonzero for HTTP errors; it never retries. Direct CLI HTTP is loopback-only.
-For remote access use the Python SDK with HTTPS through a TLS reverse proxy.
+`--method`, `--url`, `--host` and `--port` are explicit. It writes the exact response
+bytes and exits nonzero for HTTP, transport or output failures; it never retries.
+`--accept application/vnd.apache.arrow.stream --output result.arrow --headers headers.json`
+retains binary Arrow and cursor/checksum metadata. HTTP is loopback-only; remote
+CLI and SDK access use verified HTTPS through a TLS reverse proxy.
 
 ## Database lifecycle
 
 | HTTP route | Behavior |
 | --- | --- |
 | `GET /databases` | List registered identities, names, states and errors |
-| `POST /databases` | Create/open `{name,database_id?:UUID}`; returns database info |
+| `POST /databases` | Create/open `{name,database_id?:UUID,limits?:object}`; returns database info |
 | `GET /databases/{id}` | Database info and store profile while open |
 | `POST /databases/{id}/open` | Open existing data and run core recovery |
 | `POST /databases/{id}/close` | Stop new calls, drain admitted calls and shut down |
 | `POST /databases/{id}/reconcile` | Run core reconciliation for an open engine |
 
-Lifecycle actions take `{}`. All routes require the bearer token. Collection
+Close/reconcile take `{}`; open accepts `{limits?:object}`. All routes require the bearer token. Collection
 routes in the next table are relative to `/databases/{id}` in managed mode;
 `GET /capabilities` at the server root advertises `features.database_management`.
-A database response contains `{database_id,name,state,store?,error?}`; states are
+A database response contains `{database_id,name,state,limits,store?,error?}`; states are
 `open`, `closed`, `closing`, `error`. Lists contain `{items,next_cursor:null}`.
 Names are unique, case-sensitive UTF-8 (1–128 bytes, no NUL or path separators).
 At most 64 databases are registered. Paths are generated from UUIDs under
@@ -68,6 +74,30 @@ automatic client retries. An unfinished reservation without a store can be
 completed only by explicit creation. `open` never creates anything. An incomplete
 store, or a missing initialized store, remains an error and is never replaced.
 There is no drop/import/rename endpoint in this release.
+
+Optional `limits` configure the public engine limits. Creation merges omitted
+fields with defaults; an omitted limits object on retry preserves the existing
+configuration. An explicit conflicting creation configuration returns 409.
+Open merges partial settings with persisted values; changing values requires a
+closed database. Configuration and open intent are durable before opening the
+engine. If a lower limit prevents reopening existing data, close the errored
+entry and open again with sufficient limits; data is never discarded.
+
+| Limit | Range | Default |
+| --- | --- | --- |
+| `max_operations` | 1–4096 | 4096 |
+| `max_collections` | 1–8 | 8 |
+| `max_catalog_bytes` | 65536–268435456 | 268435456 |
+| `max_pending_calls` | 1–16 | 16 |
+| `max_owned_input_bytes` | 1–134217728 | 134217728 |
+| `writer_wait_ms` | 0–5000 | 5000 |
+| `append_deadline_ms` | 1–60000 | 60000 |
+
+Values are JSON integers; booleans, fractions, unknown fields and values outside
+these bounds are rejected before reserving a database. Every database response
+includes normalized limits, including closed/error states. The service registry
+upgrades transactionally from version 1 to 2, supplying defaults to existing
+entries. Older server binaries reject version 2; core store formats are unchanged.
 
 A separate `registry.sqlite` records identities and intended open state, using
 verified SQLite DELETE/EXTRA settings. The registry does not contain collection
@@ -113,12 +143,14 @@ separate, broader development profile.
 | `GET /collections/{id}/schema` | `GetCollection` / `Schema` | Stable field IDs |
 | `POST /collections/{id}/append` | `AppendDurable` | Synchronous native receipt |
 | `GET /collections/{id}/operations/{op}` | `FindAppendOutcome` | Original result or authoritative absence |
-| `POST /collections/{id}/scan` | `Scan` | Fixed-view JSON or Arrow IPC |
+| `POST /collections/{id}/scan/open` | `Scan` | Resolve a fixed view and return a cursor without consuming rows |
+| `POST /collections/{id}/scan` | `Scan` / `ScanCursor::Next` | First page or cursor continuation, JSON or Arrow IPC |
+| `POST /collections/{id}/scan/cancel` | `ScanCursor::Cancel` | Release a cursor and its retained resources |
 | `GET .../stats`, `.../snapshots`, `.../files`, `.../files/{file}` | Proposed public metadata methods | `501 UNSUPPORTED_OPERATION` |
 | `POST .../explain` | Proposed public explain method | `501 UNSUPPORTED_OPERATION` |
 
-CLI mapping: `create-store` → `CreateStore`, `inspect-store` → `OpenExisting` /
-`GetStoreInfo`, `request` → the route/core mapping above.
+CLI mapping: `create-store` → `POST /databases`; `request` exposes every route
+in the tables above. Offline `glamdb-admin` uses `CreateStore` / `OpenExisting`.
 
 The transport owns HTTP parsing, codecs, authentication, connection admission
 and static UI assets. Core owns store identity/locking, schema validation,
@@ -138,7 +170,8 @@ resource accounting remains a separate follow-up contract.
 Requests use UTF-8 JSON objects with unknown/duplicate fields rejected. Create:
 `{collection_id,name,schema:{fields:[{name,type,nullable}]},mode?:"append"}`.
 Types: `string`, `bool`, `int64`, `float64`, `timestamp_us_utc`. Core assigns IDs
-1..N; supplied field IDs must match. The required string `key` is not unique.
+1..N; supplied field IDs must match. A field named `key`, if supplied, must be a
+non-nullable string; its values are not unique.
 Schema evolution, SQL, upsert and delete are unsupported.
 
 Append: `{operation_id,rows:[{field:value,...}],expected_snapshot?}`. Omitted
@@ -153,17 +186,41 @@ latest once; null or `"initial"` selects the initial empty view. Historical IDs
 are decimal strings. Omitted/null projection defaults to all columns; zero-column projection
 is unavailable. Predicates are null/`{op:"true"}` or one comparison
 `{op:"eq|ne|lt|le|gt|ge",field,value}` with a correctly typed literal. Other
-operators return 501. Limit is an integer 0..100000; batch_rows is 1..1024.
+operators return 501. Limit is a nonnegative int64 integer; batch_rows is 1..65536.
 Only TRUE survives NULL filtering. No SQL parser is implied.
 
-JSON scan returns `{schema,snapshot_id,rows,identity,profile}`. Profile currently
-contains only the actual `rows_returned` decimal string. It makes no pruning or
-physical IO claims. `Accept: application/vnd.apache.arrow.stream` returns a real
-schema-bearing Arrow IPC stream, including empty results, with `Content-Length`,
-`X-Content-SHA256` and `X-GlamDB-Snapshot-Id`. The entire bounded response is
-prepared before sending success headers: an encoding/read error cannot become
-an apparently successful truncated result. Larger results fail explicitly;
-streaming pagination is a later extension.
+JSON scan returns `{schema,snapshot_id,rows,identity,profile,next_cursor}`. The
+snapshot is the resolved selected view, including null for the initial empty
+view; `identity` is the core catalog identity captured when planning the scan.
+Profile contains only the actual page `rows_returned` decimal string, without
+pruning or physical IO claims. `Accept: application/vnd.apache.arrow.stream`
+returns a schema-bearing Arrow IPC page, including empty results, with
+`Content-Length`, `X-Content-SHA256`, `X-GlamDB-Snapshot-Id`, and an optional
+`X-GlamDB-Next-Cursor`. Each page is fully prepared before success headers, so a
+read/encoding failure cannot become a successful partial page.
+
+For complete reads, continue with `POST .../scan {"cursor":"TOKEN"}` and the same
+Accept header until JSON `next_cursor` is null or the Arrow cursor header is
+absent. Each page has at most 10000 rows and targets 4 MiB; a single larger row is
+allowed if its complete response fits 16 MiB. Total rows are not capped by the
+page size. Writes after scan creation never enter that scan's fixed view.
+
+For retry-safe reading from the first page, first call `POST .../scan/open` with
+the ordinary scan body and chosen Accept header. Its JSON response contains
+`{cursor,schema,snapshot_id,identity}` and consumes no rows. Use that cursor for
+the first page. The last consumed cursor replays exactly the same response;
+advancing invalidates older cursors. A lost response to ordinary `/scan` without
+a cursor cannot be replayed: opening again creates a new scan. The SDK's
+`scan_pages()` uses the explicit open protocol.
+
+`POST .../scan/cancel {"cursor":"TOKEN"}` accepts either the next or most recently
+consumed cursor and returns `{"cancelled":true}`. Tokens are scoped to database,
+collection and representation; stale or missing tokens return 404, never restart
+queries. Eight sessions are available across the server. Idle sessions expire
+after 60 seconds (checked every second); completed replay caches may be evicted
+to admit new scans. A failed page invalidates its session. Close, reconciliation
+and shutdown release sessions after admitted calls drain. Cancellation releases
+between page calls; it does not interrupt an active filesystem read.
 
 Create/append results use the existing native serializer. Append preserves
 `committed`, `definitely_not_committed` and `commit_unknown`, phase, original ID,
@@ -187,7 +244,7 @@ of four workers calls core; at most 16 connections bound the queue. Saturation
 closes new connections before admission. Core retains its single serialized
 writer. Header/body timeout defaults to 10 seconds (`--request-timeout-ms`);
 response writes have 30 seconds. Header limit: 16 KiB; request/response: 16 MiB;
-append: 10000 rows; scan: 100000 rows. JSON depth/node limits also bound parsing.
+append: 10000 rows. Scan responses are bounded pages. JSON depth/node limits also bound parsing.
 These transport bounds are not a qualified process-memory or storage budget.
 
 HTTP/1.1 uses Content-Length and closes each response connection. Duplicate
@@ -202,8 +259,8 @@ storage. API responses are uncached. CORS is disabled; the UI uses the same orig
 SIGINT/SIGTERM stop accepting and close incomplete requests; admitted calls finish
 and responses drain before Engine::Shutdown releases store ownership. OS IO may
 still block; there is no forced rollback or detached writer. Client disconnects
-do not cancel publication. Scans are synchronous bounded responses; independent
-server-side query cancellation is not advertised.
+do not cancel publication. Scan pages are synchronous bounded responses; cursor
+cancellation releases the remaining read session.
 
 Static serving allows only index, theme and supported assets beneath `--ui-root`,
 rejects traversal and symlinks, and never exposes the store. Administrators must
@@ -213,17 +270,18 @@ keep the UI tree trusted and separate from the store.
 
 [ClickHouse HTTP](https://clickhouse.com/docs/interfaces/http) provides a useful
 cross-language HTTP/format model and documents late streaming error caveats.
-GlamDB v0 buffers bounded responses before success headers to avoid that ambiguity.
+GlamDB buffers bounded pages before success headers to avoid that ambiguity.
 [Trino's REST protocol](https://trino.io/docs/current/develop/client-protocol.html)
-separates query submission, result pages and cancellation; GlamDB advertises only
-the synchronous subset its core supports. [PostgreSQL message flow](https://www.postgresql.org/docs/current/protocol-flow.html)
+separates query submission, result pages and cancellation; GlamDB exposes these
+for its fixed-view scan cursors. [PostgreSQL message flow](https://www.postgresql.org/docs/current/protocol-flow.html)
 illustrates why requesting cancellation does not prove a write failed. GlamDB
 keeps operation identity and durable outcome lookup separate from the connection.
 
 ## Validation
 
 ```sh
-ctest --preset local -R 'glamdb\.(native_http|transport\.|cli)'
+GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 \
+ctest --preset local -R 'glamdb\.(native_http|scan_http|database_limits|transport\.|routes\.|cli)'
 # With workbench Python dependencies, also exercise SDK JSON/Arrow decoding:
 .venv/bin/python tests/server/native_http_test.py build/local/apps/server/glamdb build/local/apps/cli/glamdb-cli ui
 GLAMDB_NATIVE_SERVER="$PWD/build/local/apps/server/glamdb" \
@@ -251,3 +309,17 @@ and required response-field types.
 request draining across databases, failed-close ownership and retry, incomplete
 creation, and registry COMMIT errors before/after rollback-journal unlink. These
 are deterministic failure-model tests, not physical power-loss qualification.
+
+Native CI installs hash-pinned SDK, Arrow and JSON Schema dependencies and requires
+these checks without silent import skips. Its normal profile also builds the CLI
+without engine dependencies and runs the native browser profile. Run the same gate
+with `scripts/check-native-http.sh build/local build/client/glamdb-cli`, selecting
+its Python environment through `GLAMDB_NATIVE_PYTHON` if needed.
+
+`glamdb.native_http_fault` uses the production managed HTTP service and real
+storage with a test-only SQLite VFS control channel. It covers faults before/after
+create, append and registry COMMIT, failed recovery fencing, failure recording,
+producer path corruption, and close waiting for an admitted native append.
+`glamdb.scan_http` covers fixed-view pages beyond 100000 rows and 16 MiB, response
+replay, scope, cancellation, expiry, resource capacity, and real read corruption.
+These deterministic checks are separate from physical power-loss qualification.

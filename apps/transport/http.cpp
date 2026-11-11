@@ -1,7 +1,5 @@
 #include "apps/transport/http.h"
 
-#include <asio.hpp>
-
 #include <charconv>
 #include <cstdlib>
 #include <sstream>
@@ -107,12 +105,14 @@ TResponse ErrorResponse(int status, std::string_view code, std::string_view mess
     return {status, EncodeError({std::string(code), std::string(message)}).dump()};
 }
 
-std::string DecodeUrl(std::string_view text)
+namespace {
+std::string DecodeUrlPart(std::string_view text, bool queryValue)
 {
     std::string result;
     for (size_t i = 0; i < text.size(); ++i) {
         auto c = text[i];
-        if (c == '%') {
+        const bool escaped = c == '%';
+        if (escaped) {
             Require(i + 2 < text.size(), "invalid URL escape");
             unsigned value = 0;
             const auto parsed = std::from_chars(text.data() + i + 1, text.data() + i + 3, value, 16);
@@ -122,10 +122,19 @@ std::string DecodeUrl(std::string_view text)
         } else if (c == '+') {
             c = ' ';
         }
-        Require(static_cast<unsigned char>(c) >= 32 && c != 127, "invalid URL character");
+        // Exact UTF-8 collection names may contain controls. Only percent-encoded
+        // query values admit them; paths, query keys, raw framing and NUL do not.
+        Require(c != '\0' && ((queryValue && escaped) || (static_cast<unsigned char>(c) >= 32 && c != 127)),
+            "invalid URL character");
         result += c;
     }
     return result;
+}
+} // namespace
+
+std::string DecodeUrl(std::string_view text)
+{
+    return DecodeUrlPart(text, false);
 }
 
 std::pair<std::string, std::map<std::string, std::string>> ParseTarget(std::string_view target)
@@ -141,7 +150,8 @@ std::pair<std::string, std::map<std::string, std::string>> ParseTarget(std::stri
         const auto pair = target.substr(position, end == std::string_view::npos ? end : end - position);
         const auto equals = pair.find('=');
         Require(equals != std::string_view::npos &&
-                result.second.emplace(DecodeUrl(pair.substr(0, equals)), DecodeUrl(pair.substr(equals + 1))).second,
+                result.second.emplace(DecodeUrl(pair.substr(0, equals)), DecodeUrlPart(pair.substr(equals + 1), true))
+                    .second,
             "invalid or duplicate query parameter");
         if (end == std::string_view::npos) {
             break;
@@ -164,74 +174,4 @@ std::string ReadToken()
     return token;
 }
 
-TResponse SendRequest(std::string_view host, uint16_t port, const TRequest& request)
-{
-    // The CLI's direct HTTP transport is loopback-only. Use SDK HTTPS through a
-    // TLS proxy for remote hosts; never send a bearer token over remote HTTP.
-    const auto address = asio::ip::make_address(host);
-    Require(address.is_loopback(), "CLI HTTP requires a loopback address");
-    Require(request.Target.starts_with('/') && request.Target.find_first_of("\r\n ") == std::string::npos,
-        "invalid request path");
-    Require(request.Method == "GET" || request.Method == "POST", "request method must be GET or POST");
-    std::ostringstream output;
-    output << request.Method << ' ' << request.Target << " HTTP/1.1\r\nHost: " << host << ':' << port
-           << "\r\nAuthorization: Bearer " << ReadToken()
-           << "\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: "
-           << request.Body.size() << "\r\nConnection: close\r\n\r\n"
-           << request.Body;
-    const auto bytes = output.str();
-    asio::io_context io;
-    asio::ip::tcp::socket socket(io);
-    asio::steady_timer timer(io, std::chrono::seconds(65));
-    std::error_code result;
-    std::string reply;
-    auto finish = [&](const std::error_code& error) {
-        result = error;
-        timer.cancel();
-        std::error_code ignored;
-        socket.close(ignored);
-    };
-    timer.async_wait([&](const std::error_code& error) {
-        if (!error) {
-            std::error_code ignored;
-            socket.close(ignored);
-        }
-    });
-    socket.async_connect(asio::ip::tcp::endpoint(address, port), [&](const std::error_code& error) {
-        if (error) {
-            finish(error);
-            return;
-        }
-        asio::async_write(socket, asio::buffer(bytes), [&](const std::error_code& writeError, size_t) {
-            if (writeError) {
-                finish(writeError);
-                return;
-            }
-            asio::async_read(socket,
-                asio::dynamic_buffer(reply, MaxResponseBytes + 16384),
-                [&](const std::error_code& readError, size_t) {
-                    finish(readError);
-                });
-        });
-    });
-    io.run();
-    Require(result == asio::error::eof, "HTTP exchange failed; write outcome may be unknown", "IO_ERROR");
-    const auto headerEnd = reply.find("\r\n\r\n");
-    Require(headerEnd != std::string::npos && headerEnd + 4 <= 16384 && reply.starts_with("HTTP/1.1 "),
-        "invalid HTTP response; write outcome may be unknown",
-        "IO_ERROR");
-    const auto header = reply.substr(0, headerEnd + 4);
-    TResponse response;
-    const auto parsed = std::from_chars(header.data() + 9, header.data() + 12, response.Status);
-    Require(parsed.ec == std::errc{} && parsed.ptr == header.data() + 12, "invalid HTTP status", "IO_ERROR");
-    auto lower = Lower(header);
-    const auto lengthPos = lower.find("\r\ncontent-length: ");
-    Require(lengthPos != std::string::npos, "missing response length", "IO_ERROR");
-    const auto start = lengthPos + 18;
-    const auto size = ParseSize(std::string_view(header).substr(start, header.find("\r\n", start) - start));
-    Require(size <= MaxResponseBytes, "HTTP response too large", "IO_ERROR");
-    Require(reply.size() - header.size() == size, "interrupted response; write outcome may be unknown", "IO_ERROR");
-    response.Body = reply.substr(header.size());
-    return response;
-}
 } // namespace glamdb::NTransport

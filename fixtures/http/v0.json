@@ -183,6 +183,53 @@
     },
     {
       "method": "POST",
+      "path": "/databases/{database_id}/collections/{collection_id}/scan/open",
+      "core": "Engine::Scan (fixed-view cursor)",
+      "status": 200,
+      "request": {},
+      "request_schema": "scan",
+      "response_schema": "scanOpened",
+      "response_fields": {
+        "cursor": "string",
+        "schema": "object",
+        "snapshot_id": "string",
+        "identity": "object"
+      },
+      "capture": {
+        "scan_cursor": "cursor"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{collection_id}/scan",
+      "core": "ScanCursor::Next (replayable page)",
+      "status": 200,
+      "request": {
+        "cursor": "{scan_cursor}"
+      },
+      "request_schema": "scanContinue",
+      "response_schema": "scanResult",
+      "response_fields": {
+        "rows": "array",
+        "next_cursor": "null"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/databases/{database_id}/collections/{collection_id}/scan/cancel",
+      "core": "ScanCursor::Cancel",
+      "status": 200,
+      "request": {
+        "cursor": "{scan_cursor}"
+      },
+      "request_schema": "scanContinue",
+      "response_schema": "scanCancelled",
+      "response_fields": {
+        "cancelled": "boolean"
+      }
+    },
+    {
+      "method": "POST",
       "path": "/databases/{database_id}/collections/{collection_id}/scan",
       "core": "Engine::Scan",
       "status": 200,
@@ -301,7 +348,7 @@
       },
       "response_schema": "database",
       "request": {},
-      "request_schema": "empty"
+      "request_schema": "databaseOpen"
     }
   ]
 }

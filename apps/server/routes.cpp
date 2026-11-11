@@ -1,5 +1,6 @@
 #include "apps/server/routes.h"
 #include "apps/server/databases.h"
+#include "apps/server/scans.h"
 #include "core/api/binary.h"
 
 #include "apps/transport/outcome_json.h"
@@ -47,48 +48,28 @@ std::vector<std::string> Split(const std::string& path)
     }
     return parts;
 }
-class TBoundedOutput final : public arrow::io::OutputStream
-{
-public:
-    arrow::Status Close() override
-    {
-        Closed_ = true;
-        return arrow::Status::OK();
-    }
-    bool closed() const override
-    {
-        return Closed_;
-    }
-    arrow::Result<int64_t> Tell() const override
-    {
-        return static_cast<int64_t>(Bytes.size());
-    }
-    arrow::Status Write(const void* data, int64_t size) override
-    {
-        if (Closed_ || size < 0 || static_cast<uint64_t>(size) > MaxResponseBytes - Bytes.size()) {
-            return arrow::Status::CapacityError("Arrow response exceeds transport limit");
-        }
-        Bytes.append(static_cast<const char*>(data), static_cast<size_t>(size));
-        return arrow::Status::OK();
-    }
-    std::string Bytes;
-
-private:
-    bool Closed_ = false;
-};
 } // namespace
 
 TRoutes::TRoutes(std::shared_ptr<Engine> engine, std::filesystem::path uiRoot, std::string token)
-    : Engine_(std::move(engine))
+    : Scans_(std::make_shared<TScans>())
+    , Engine_(std::move(engine))
     , UIRoot_(std::move(uiRoot))
     , Token_(std::move(token))
 { }
 
 TRoutes::TRoutes(std::shared_ptr<TDatabases> databases, std::filesystem::path uiRoot, std::string token)
-    : Databases_(std::move(databases))
+    : Scans_(std::make_shared<TScans>())
+    , Databases_(std::move(databases))
     , UIRoot_(std::move(uiRoot))
     , Token_(std::move(token))
-{ }
+{
+    std::weak_ptr<TScans> weak = Scans_;
+    Databases_->SetScanCanceller([weak](const std::string& database) {
+        if (const auto scans = weak.lock()) {
+            scans->Clear(database);
+        }
+    });
+}
 
 bool TRoutes::IsAuthorized(const TRequest& request) const
 {
@@ -115,7 +96,9 @@ TResponse TRoutes::Handle(const TRequest& request) const
         if (!IsAuthorized(request)) {
             return ErrorResponse(401, "UNAUTHORIZED", "bearer token required");
         }
-        return Route(request);
+        auto response = Route(request);
+        Require(response.Body.size() <= MaxResponseBytes, "response exceeds transport limit", "RESOURCE_EXHAUSTED");
+        return response;
     } catch (const TFailure& error) {
         return {ErrorStatus(error.Detail.code), EncodeError(error.Detail).dump()};
     } catch (const detail::Failure& error) {
@@ -155,6 +138,8 @@ TResponse TRoutes::Route(const TRequest& request) const
                 {{"database_management", static_cast<bool>(Databases_)},
                     {"append", true},
                     {"scan", true},
+                    {"scan_pagination", true},
+                    {"scan_cancel", true},
                     {"arrow_export", true},
                     {"stats", false},
                     {"snapshots", false},
@@ -167,8 +152,10 @@ TResponse TRoutes::Route(const TRequest& request) const
                 {{"request_bytes", MaxRequestBytes},
                     {"response_bytes", MaxResponseBytes},
                     {"append_rows", 10000},
-                    {"scan_rows", 100000},
-                    {"batch_rows", 1024}}}});
+                    {"scan_page_rows", 10000},
+                    {"scan_sessions", 8},
+                    {"scan_idle_seconds", 60},
+                    {"batch_rows", 65536}}}});
     }
     TJson body;
     if (request.Method == "POST") {
@@ -196,8 +183,7 @@ TResponse TRoutes::Route(const TRequest& request) const
         if (parts.size() == 3 && request.Method == "POST" &&
             (parts[2] == "open" || parts[2] == "close" || parts[2] == "reconcile"))
         {
-            CheckKeys(body, {});
-            return JsonResponse(Databases_->Change(parts[1], parts[2]));
+            return JsonResponse(Databases_->Change(parts[1], parts[2], body));
         }
         Require(parts.size() >= 3 &&
                 (parts[2] == "collections" || parts[2] == "collections:resolve" || parts[2] == "capabilities"),
@@ -211,7 +197,11 @@ TResponse TRoutes::Route(const TRequest& request) const
         auto scoped = request;
         scoped.Target = request.Target.substr(second);
         return Databases_->Use(parts[1], [&](const auto& engine) {
-            return TRoutes(engine, UIRoot_, Token_).Handle(scoped);
+            auto routes = *this;
+            routes.Engine_ = engine;
+            routes.Databases_.reset();
+            routes.DatabaseID_ = parts[1];
+            return routes.Handle(scoped);
         });
     }
     Require(static_cast<bool>(Engine_), "select a database using /databases/{id}", "DATABASE_REQUIRED");
@@ -261,8 +251,14 @@ TResponse TRoutes::Route(const TRequest& request) const
         }
         return OutcomeResponse(json_adapter::ToJson(*outcome));
     }
-    const auto info = Unwrap(Engine_->GetCollection(id));
     const std::string action = parts.size() >= 3 ? parts[2] : "";
+    if (request.Method == "POST" && parts.size() == 4 && action == "scan" && parts[3] == "cancel") {
+        // Releasing a scoped cursor must remain possible when an unrelated
+        // core failure has fenced catalog reads pending reconciliation.
+        Require(query.empty(), "unknown query parameter");
+        return Scans_->Cancel(DatabaseID_, id, body);
+    }
+    const auto info = Unwrap(Engine_->GetCollection(id));
     if ((action == "stats" || action == "snapshots" || action == "files" || action == "explain")) {
         throw TFailure({"UNSUPPORTED_OPERATION", "native metadata/explain API is not available; inspect capabilities"});
     }
@@ -275,8 +271,8 @@ TResponse TRoutes::Route(const TRequest& request) const
             return JsonResponse(Collection(info).at("schema"));
         }
     }
-    if (request.Method == "POST" && parts.size() == 3) {
-        if (action == "append") {
+    if (request.Method == "POST" && (parts.size() == 3 || (parts.size() == 4 && action == "scan"))) {
+        if (action == "append" && parts.size() == 3) {
             CheckKeys(body, {"operation_id", "rows", "expected_snapshot"});
             AppendRequest append;
             append.collection_id = id;
@@ -290,78 +286,30 @@ TResponse TRoutes::Route(const TRequest& request) const
             return OutcomeResponse(json_adapter::ToJson(Engine_->AppendDurable(append)));
         }
         if (action == "scan") {
+            Require(parts.size() == 3 || parts[3] == "open", "route not found", "NOT_FOUND");
             const auto accept = request.Headers.find("accept");
             const auto media = accept == request.Headers.end() ? "application/json" : accept->second;
             if (media != "application/json" && media != "*/*" && media != "application/vnd.apache.arrow.stream") {
                 return ErrorResponse(406, "NOT_ACCEPTABLE", "use JSON or Arrow stream");
             }
-            return Scan(id, body, media == "application/vnd.apache.arrow.stream");
+            return Scans_->Open(Engine_,
+                DatabaseID_,
+                id,
+                body,
+                media == "application/vnd.apache.arrow.stream",
+                parts.size() == 4);
         }
     }
     return ErrorResponse(404, "NOT_FOUND", "route not found");
 }
 
-TResponse TRoutes::Scan(const std::string& collectionID, const TJson& body, bool arrow) const
+void TRoutes::CancelScans() const
 {
-    const auto info = Unwrap(Engine_->GetCollection(collectionID));
-    auto cursor = Unwrap(Engine_->Scan(ParseScan(collectionID, info.schema, body)));
-    struct TCancel
-    {
-        std::shared_ptr<ScanCursor> Cursor;
-        ~TCancel()
-        {
-            Cursor->Cancel();
-        }
-    } cancel{cursor};
-    const auto& fixed = cursor->Info();
-    const auto snapshot = fixed.identity.current_snapshot_id
-        ? TJson(std::to_string(*fixed.identity.current_snapshot_id))
-        : TJson(nullptr);
-    auto sink = std::make_shared<TBoundedOutput>();
-    std::shared_ptr<arrow::ipc::RecordBatchWriter> writer;
-    if (arrow) {
-        const auto created =
-            arrow::ipc::MakeStreamWriter(sink, std::const_pointer_cast<arrow::Schema>(fixed.output_schema));
-        Require(created.ok(), "cannot create Arrow stream", "RESOURCE_EXHAUSTED");
-        writer = *created;
-    }
-    auto rows = TJson::array();
-    size_t rowCount = 0, jsonBytes = 0;
-    while (auto batch = Unwrap(cursor->Next())) {
-        rowCount += static_cast<size_t>(batch->num_rows());
-        Require(rowCount <= 100000, "scan exceeds row limit; use limit or predicate", "RESOURCE_EXHAUSTED");
-        if (arrow) {
-            Require(writer->WriteRecordBatch(*batch).ok(), "Arrow response too large", "RESOURCE_EXHAUSTED");
-        } else {
-            auto items = EncodeRows(*batch);
-            jsonBytes += items.dump().size();
-            Require(jsonBytes <= MaxResponseBytes, "JSON response too large", "RESOURCE_EXHAUSTED");
-            for (auto& item : items) {
-                rows.push_back(std::move(item));
-            }
-        }
-    }
-    if (arrow) {
-        Require(writer->Close().ok(), "Arrow response too large", "RESOURCE_EXHAUSTED");
-        TResponse response{200, std::move(sink->Bytes), "application/vnd.apache.arrow.stream"};
-        response.Headers["X-GlamDB-Snapshot-Id"] = snapshot.is_null() ? "initial" : snapshot.get<std::string>();
-        response.Headers["X-Content-SHA256"] = detail::Sha256(response.Body);
-        return response;
-    }
-    // Stable field IDs come from the fixed collection schema, including projected fields.
-    auto schema = EncodeSchema(*fixed.output_schema);
-    for (auto& field : schema["fields"]) {
-        for (size_t i = 0; i < info.schema.fields.size(); ++i) {
-            if (field["name"] == info.schema.fields[i].name) {
-                field["field_id"] = i + 1;
-            }
-        }
-    }
-    return JsonResponse({{"schema", schema},
-        {"snapshot_id", snapshot},
-        {"rows", rows},
-        {"identity", EncodeIdentity(fixed.identity)},
-        {"profile", {{"rows_returned", std::to_string(rowCount)}}}});
+    Scans_->Clear();
+}
+void TRoutes::CancelScans(const std::string& database) const
+{
+    Scans_->Clear(database);
 }
 
 TResponse TRoutes::StaticFile(const std::string& path) const

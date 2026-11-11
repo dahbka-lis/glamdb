@@ -1,6 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <sqlite3.h>
 #include <string>
 
@@ -17,6 +20,9 @@ public:
     JournalFaultVfs& operator=(const JournalFaultVfs&) = delete;
     void Arm(int journal_delete_number, bool after_unlink);
     void Disarm();
+    void PauseBeforeDelete(int journal_delete_number);
+    bool WaitUntilPaused(std::chrono::milliseconds timeout);
+    void Release();
     const std::string& Name() const
     {
         return name_;
@@ -29,6 +35,11 @@ private:
     std::string name_;
     std::atomic<int> remaining_{0};
     bool after_unlink_ = false;
+    std::atomic<int> pause_remaining_{0};
+    std::mutex pause_mutex_;
+    std::condition_variable pause_changed_;
+    bool paused_ = false;
+    bool released_ = true;
 };
 
 } // namespace glamdb::test

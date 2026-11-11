@@ -11,9 +11,10 @@ import sys
 import tempfile
 import unittest
 import uuid
+from urllib.parse import quote
 
 SERVER, CLI, UI = sys.argv[1:4]
-del sys.argv[1:]
+del sys.argv[1:4]
 TOKEN = 'native-test-secret'
 
 
@@ -52,7 +53,10 @@ class NativeHTTP(unittest.TestCase):
     def request(self, path, body=None, token=TOKEN, accept='application/json', method=None):
         if path.startswith(('/collections', '/%63ollections')):
             path = '/databases/' + self.store_id + path
-        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+        # Normal API calls may use the core's 60-second append deadline.
+        # Leave room for transport overhead, including instrumented builds;
+        # explicit framing/deadline tests keep their separate short budgets.
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=65)
         headers = {'Accept': accept}
         if token is not None:
             headers['Authorization'] = 'Bearer ' + token
@@ -196,6 +200,18 @@ class NativeHTTP(unittest.TestCase):
         for path in ('/collections', '/collections:resolve?name=events', '/capabilities', '/%63ollections'):
             self.assertEqual(self.request(path, token='wrong')[0], 401)
             self.assertEqual(self.request(path, token=None)[0], 401)
+        cid = str(uuid.uuid4())
+        collection = '/collections/' + cid
+        for path, body in [('/databases', {}), ('/databases/' + self.store_id, None),
+                           *[('/databases/' + self.store_id + '/' + action, {}) for action in ('open', 'close', 'reconcile')],
+                           ('/collections', {}), (collection, None), (collection + '/schema', None),
+                           (collection + '/append', {}), (collection + '/scan', {}),
+                           (collection + '/scan/open', {}), (collection + '/scan/cancel', {}),
+                           (collection + '/operations/' + str(uuid.uuid4()), None),
+                           *[(collection + '/' + action, None) for action in ('stats', 'snapshots', 'files')],
+                           (collection + '/explain', {})]:
+            with self.subTest(unauthenticated=path):
+                self.assertEqual(self.request(path, body, token=None)[0], 401)
         self.assertEqual(self.request('/v0/collections')[0], 404)
         self.assertEqual(self.request('/')[0], 200)
         self.assertEqual(self.request('/workbench/config')[0], 200)
@@ -234,6 +250,153 @@ class NativeHTTP(unittest.TestCase):
         self.assertEqual(headers['X-GlamDB-Snapshot-Id'], 'initial')
         self.assertTrue(data.endswith(b'\xff\xff\xff\xff\x00\x00\x00\x00'))
         self.api(path + '/operations/' + str(uuid.uuid4()), status=404)
+
+    def test_exact_names_round_trip_and_utf8_byte_boundaries(self):
+        for name in ('line\nbreak', 'tab\tname', 'delete\x7fname', 'a+b&c=d/%', 'я' * 64):
+            with self.subTest(name=name):
+                cid = str(uuid.uuid4())
+                created = self.api('/collections', {'collection_id': cid, 'name': name,
+                    'schema': {'fields': [{'name': 'key', 'type': 'string'}]}})
+                self.assertEqual(self.api('/collections:resolve?name=' + quote(name, safe='')), created)
+        self.api('/collections', {'collection_id': str(uuid.uuid4()), 'name': 'я' * 64 + 'x',
+            'schema': {'fields': [{'name': 'key', 'type': 'string'}]}}, status=400)
+        self.api('/databases', {'name': 'я' * 64})
+        self.api('/databases', {'name': 'я' * 64 + 'x'}, status=400)
+        for name in ('a\0b', 'a/b', 'a\\b'):
+            self.api('/databases', {'name': name}, status=400)
+        for path in ('/collections%0a', '/collections:resolve?na%09me=x', '/collections:resolve?name=x%00y'):
+            self.api(path, status=400)
+
+    def test_input_rejections_do_not_bind_append_ids(self):
+        cid = str(uuid.uuid4())
+        path = '/collections/' + cid
+        schema = {'fields': [{'name': 'key', 'type': 'string'},
+            {'name': 'n', 'type': 'int64', 'nullable': True},
+            {'name': 'b', 'type': 'bool', 'nullable': True},
+            {'name': 'f', 'type': 'float64', 'nullable': True},
+            {'name': 't', 'type': 'timestamp_us_utc', 'nullable': True}]}
+        self.api('/collections', {'collection_id': cid, 'name': 'typed', 'schema': schema})
+        invalid_rows = [[], [None], [{}], [{'key': None}], [{'key': True}],
+            [{'key': 'x', 'extra': 1}], [{'key': 'x', 'n': 1}], [{'key': 'x', 'n': True}],
+            [{'key': 'x', 'n': '-9223372036854775809'}], [{'key': 'x', 'b': 1}],
+            [{'key': 'x', 'f': True}], [{'key': 'x', 'f': '1.5'}],
+            [{'key': 'x', 't': '2026-02-30T00:00:00Z'}], [{'key': 'x', 't': '0001-01-01T00:00:00+01:00'}],
+            [{'key': 'x' * 1025}], [{'key': 'x'}] * 10001]
+        for rows in invalid_rows:
+            operation = str(uuid.uuid4())
+            with self.subTest(rows=str(rows)[:90]):
+                self.api(path + '/append', {'operation_id': operation, 'rows': rows}, status=400)
+                self.api(path + '/operations/' + operation, status=404)
+        operation = str(uuid.uuid4())
+        for body in ({'rows': [{'key': 'x'}]}, {'operation_id': operation},
+                     {'operation_id': operation, 'rows': [{'key': 'x'}], 'unknown': 1},
+                     {'operation_id': False, 'rows': [{'key': 'x'}]},
+                     {'operation_id': '../bad', 'rows': [{'key': 'x'}]}):
+            self.api(path + '/append', body, status=400)
+        self.api(path + '/operations/' + operation, status=404)
+        rows = [{'key': 'я' * 512, 'n': '-9223372036854775808', 'b': False, 'f': 1.5,
+                 't': '0001-01-01T00:00:00Z'}, {'key': 'nullable'}]
+        self.api(path + '/append', {'operation_id': operation, 'rows': rows})
+        scanned = self.api(path + '/scan', {})['rows']
+        self.assertEqual(scanned[0], dict(rows[0], t='0001-01-01T00:00:00.000000Z'))
+        self.assertEqual(scanned[1], {'key': 'nullable', 'n': None, 'b': None, 'f': None, 't': None})
+
+    def test_schema_and_database_input_matrix(self):
+        for body in ({}, {'name': None}, {'name': False}, {'name': 'x', 'database_id': 'bad'},
+                     {'name': 'x', 'database_id': None}, {'name': 'x', 'unknown': 1}):
+            self.api('/databases', body, status=400)
+        for action in ('open', 'close', 'reconcile'):
+            self.api('/databases/' + self.store_id + '/' + action, {'unexpected': 1}, status=400)
+        for database in ('bad', str(uuid.uuid4())):
+            self.api('/databases/' + database, status=400 if database == 'bad' else 404)
+        base = {'collection_id': str(uuid.uuid4()), 'name': 'invalid-schema'}
+        for fields in ([], [{'name': 'key', 'type': 'integer'}],
+                       [{'name': 'key', 'type': 'string', 'nullable': True}],
+                       [{'name': 'key', 'type': 'int64'}],
+                       [{'name': 'key', 'type': 'string', 'field_id': 2}],
+                       [{'name': 'key', 'type': 'string', 'field_id': True}],
+                       [{'name': 'key', 'type': 'string', 'nullable': 'false'}],
+                       [{'name': 'key', 'type': 'string'}] * 2,
+                       [{'name': 'key', 'type': 'string'}, {'name': 'я' * 65, 'type': 'string'}],
+                       [{'name': 'key', 'type': 'string'}] + [{'name': f'n{i}', 'type': 'int64'} for i in range(64)]):
+            with self.subTest(fields=fields):
+                self.api('/collections', dict(base, schema={'fields': fields}), status=400)
+        self.assertEqual(self.api('/collections')['items'], [])
+        valid = dict(base, schema={'fields': [{'name': 'key', 'type': 'string', 'field_id': 1}]})
+        for body in ({}, dict(valid, collection_id='bad'), dict(valid, name=False), dict(valid, unexpected=1)):
+            self.api('/collections', body, status=400)
+        self.api('/collections', dict(valid, mode='upsert'), status=501)
+        self.api('/collections', valid)
+
+    def test_preconditions_and_operation_ids_are_durable_and_isolated(self):
+        path = self.collection()
+        operation = str(uuid.uuid4())
+        body = {'operation_id': operation, 'rows': [{'key': 'first'}], 'expected_snapshot': None}
+        first = self.api(path + '/append', body)
+        rejected = dict(body, operation_id=str(uuid.uuid4()), rows=[{'key': 'rejected'}])
+        failure = self.api(path + '/append', rejected, status=412)
+        self.assertEqual(failure['outcome'], 'definitely_not_committed')
+        self.assertEqual(self.api(path + '/operations/' + rejected['operation_id'], status=412), failure)
+        self.api(path + '/append', {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'next'}],
+            'expected_snapshot': first['result']['snapshot_id']})
+        self.assertEqual(self.api(path + '/append', body), first)
+
+        other = self.api('/databases', {'name': 'other'})['database_id']
+        cid = path.rsplit('/', 1)[-1]
+        other_path = '/databases/' + other + path
+        self.api('/databases/' + other + '/collections', {'collection_id': cid, 'name': 'events',
+            'schema': {'fields': [{'name': 'key', 'type': 'string'}]}})
+        self.api(other_path + '/operations/' + operation, status=404)
+        self.api(other_path + '/append', {'operation_id': operation, 'rows': [{'key': 'other'}]})
+        self.assertEqual(self.api(other_path + '/scan', {})['rows'], [{'key': 'other'}])
+        self.stop()
+        self.start()
+        self.assertEqual(self.api(path + '/append', rejected, status=412), failure)
+        self.assertEqual(self.api(path + '/append', body), first)
+
+    def test_append_row_and_string_byte_boundaries(self):
+        cid = str(uuid.uuid4())
+        path = '/collections/' + cid
+        self.api('/collections', {'collection_id': cid, 'name': 'byte-limits', 'schema': {'fields': [
+            {'name': 'key', 'type': 'string'}, {'name': 'a', 'type': 'string', 'nullable': True},
+            {'name': 'b', 'type': 'string', 'nullable': True}]}})
+        # Canonical row bytes: three null tags + three 4-byte lengths + key byte.
+        exact = {'key': 'x', 'a': 'a' * 1048576, 'b': 'b' * 1048560}
+        operation = str(uuid.uuid4())
+        self.api(path + '/append', {'operation_id': operation, 'rows': [exact]})
+        self.assertEqual(self.api(path + '/scan', {})['rows'], [exact])
+        for row, status in ((dict(exact, b=exact['b'] + 'b'), 429),
+                            ({'key': 'x', 'a': 'a' * 1048577}, 400)):
+            rejected = str(uuid.uuid4())
+            self.api(path + '/append', {'operation_id': rejected, 'rows': [row]}, status=status)
+            self.api(path + '/operations/' + rejected, status=404)
+        rows_path = self.collection()
+        body = {'operation_id': str(uuid.uuid4()), 'rows': [{'key': 'duplicate'}] * 10000}
+        result = self.api(rows_path + '/append', body)
+        self.assertEqual(result['result']['rows_appended'], '10000')
+        rows = self.api(rows_path + '/scan', {})['rows']
+        self.assertEqual(len(rows), 10000)
+        self.assertTrue(all(row['key'] == 'duplicate' for row in rows))
+
+    def test_raw_json_and_response_diagnostics_are_bounded(self):
+        for wire in (b'{', b'[]', b'{"name":"a","name":"b"}', b'{"name":"\xff"}',
+                     b'{"name":' + b'[' * 34 + b'0' + b']' * 34 + b'}'):
+            conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+            conn.request('POST', '/databases', wire,
+                         {'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json'})
+            response = conn.getresponse()
+            self.assertEqual(response.status, 400, response.read())
+            conn.close()
+        wire = b'{"' + b'x' * (16 * 1024 * 1024 - 7) + b'":0}'
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=30)
+        conn.request('POST', '/databases', wire,
+                     {'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json'})
+        response = conn.getresponse()
+        data = response.read()
+        self.assertEqual(response.status, 400)
+        self.assertLess(len(data), 16384)
+        self.assertEqual(json.loads(data)['error']['code'], 'INVALID_ARGUMENT')
+        conn.close()
 
     def test_concurrent_appends_and_idle_shutdown(self):
         from concurrent.futures import ThreadPoolExecutor
@@ -306,16 +469,21 @@ class NativeHTTP(unittest.TestCase):
 
         for route in fixture['routes']:
             path = route['path'].format(**fixture)
+            request = route.get('request')
+            if request and isinstance(request.get('cursor'), str):
+                request = dict(request, cursor=request['cursor'].format(**fixture))
             with self.subTest(path=path, method=route['method']):
                 if validator and 'request_schema' in route:
-                    validator(dict(wire_schema, **{'$ref': '#/$defs/' + route['request_schema']})).validate(route['request'])
-                status, headers, data = self.request(path, route.get('request'), method=route['method'], accept=route.get('accept', 'application/json'))
+                    validator(dict(wire_schema, **{'$ref': '#/$defs/' + route['request_schema']})).validate(request)
+                status, headers, data = self.request(path, request, method=route['method'], accept=route.get('accept', 'application/json'))
                 self.assertEqual(status, route['status'], data)
                 if route.get('accept'):
                     self.assertEqual(headers['Content-Type'], route['accept'])
                     self.assertEqual(headers['X-Content-SHA256'], hashlib.sha256(data).hexdigest())
                     continue
                 value = json.loads(data)
+                for variable, field in route.get('capture', {}).items():
+                    fixture[variable] = value[field]
                 if validator:
                     validator(dict(wire_schema, **{'$ref': '#/$defs/' + route['response_schema']})).validate(value)
                 for name, kind in route['response_fields'].items():
@@ -327,6 +495,8 @@ class NativeHTTP(unittest.TestCase):
         try:
             from glamdb_sdk import Client
         except ImportError:
+            if os.environ.get('GLAMDB_REQUIRE_NATIVE_CLIENTS') == '1':
+                raise
             self.skipTest('SDK dependencies are tested in the workbench environment')
         path = self.collection()
         cid = path.rsplit('/', 1)[1]
@@ -351,7 +521,8 @@ class NativeHTTP(unittest.TestCase):
                                env=self.env, capture_output=True, text=True, timeout=10)
         self.assertNotEqual(owner.returncode, 0)
         self.assertIn('STATE_IN_USE', owner.stderr)
-        second = subprocess.run([CLI, 'inspect-store', '--root', self.root, '--store-id', self.store_id], capture_output=True, text=True)
+        second = subprocess.run([SERVER, '--root', self.root, '--store-id', self.store_id, '--port', '0'],
+                                env=self.env, capture_output=True, text=True, timeout=10)
         self.assertNotEqual(second.returncode, 0)
         self.assertIn('STATE_IN_USE', second.stderr)
         self.assertEqual(self.request('/%63ollections', token='wrong')[0], 401)

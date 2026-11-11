@@ -26,5 +26,4 @@ TResponse ErrorResponse(int status, std::string_view code, std::string_view mess
 std::string DecodeUrl(std::string_view text);
 std::pair<std::string, std::map<std::string, std::string>> ParseTarget(std::string_view target);
 std::string ReadToken();
-TResponse SendRequest(std::string_view host, uint16_t port, const TRequest& request);
 } // namespace glamdb::NTransport

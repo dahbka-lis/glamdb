@@ -55,4 +55,87 @@ TEST(Transport, RejectsUnknownFieldsAndUnsupportedQueries)
     EXPECT_THROW(ParseTarget("/collections?name=a&name=b"), TFailure);
     EXPECT_THROW(ParseTarget("/%0a"), TFailure);
 }
+TEST(Transport, QueryValuesPreserveAcceptedNamesWithoutRelaxingPaths)
+{
+    EXPECT_EQ(ParseTarget("/collections:resolve?name=a%0Ab%09c%7Fd%2B%26%3D").second.at("name"),
+        "a\nb\tc\x7F"
+        "d+&=");
+    EXPECT_THROW(ParseTarget("/collections%0A?name=a"), TFailure);
+    EXPECT_THROW(ParseTarget("/collections?na%0Ame=a"), TFailure);
+    EXPECT_THROW(ParseTarget("/collections?name=a%00b"), TFailure);
+}
+TEST(Transport, ErrorDiagnosticsStayBoundedAndUtf8Valid)
+{
+    const auto error = EncodeError({"INVALID_ARGUMENT", std::string(MaxRequestBytes, 'x') + "я"});
+    EXPECT_LT(error.dump().size(), 16384U);
+    EXPECT_EQ(error.at("error").at("code"), "INVALID_ARGUMENT");
+    EXPECT_EQ(error.at("error").at("retry_hint"), "FixInput");
+    EXPECT_NO_THROW(ParseJson(EncodeError({"IO_ERROR", std::string(2047, 'x') + "я"}).dump()));
+}
+TEST(Transport, ScanAcceptsCoreBoundsWithoutUnsignedOverflow)
+{
+    const SchemaSpec schema{{{"key", FieldType::String, false}}};
+    EXPECT_EQ(ParseScan("id", schema, ParseJson(R"({"batch_rows":65536})")).batch_rows, 65536);
+    EXPECT_THROW(ParseScan("id", schema, ParseJson(R"({"batch_rows":65537})")), TFailure);
+    EXPECT_EQ(ParseScan("id", schema, ParseJson(R"({"limit":100001})")).limit, 100001);
+    EXPECT_EQ(ParseScan("id", schema, ParseJson(R"({"limit":9223372036854775807})")).limit,
+        std::numeric_limits<int64_t>::max());
+    EXPECT_THROW(ParseScan("id", schema, ParseJson(R"({"limit":9223372036854775808})")), TFailure);
+    EXPECT_THROW(ParseScan("id", schema, ParseJson(R"({"batch_rows":18446744073709551615})")), TFailure);
+}
+TEST(Transport, ParsesLargeObjectArrayWithoutChangingScalars)
+{
+    constexpr std::string_view Row =
+        R"({"key":"same","n":9007199254740993,"f":1.25,"b":true,"nil":null,"s":"\u0430","a":[0,false]})";
+    std::string input = "[";
+    for (size_t i = 0; i < 10000; ++i) {
+        if (i != 0) {
+            input += ',';
+        }
+        input += Row;
+    }
+    input += ']';
+    const auto rows = ParseJson(input);
+    ASSERT_EQ(rows.size(), 10000U);
+    EXPECT_EQ(rows.front(), rows.back());
+    EXPECT_EQ(rows.back()["n"].get<int64_t>(), 9007199254740993LL);
+    EXPECT_EQ(rows.back()["s"], "а");
+    EXPECT_EQ(rows.back()["a"], TJson::array({0, false}));
+    EXPECT_TRUE(rows.back()["nil"].is_null());
+}
+TEST(Transport, RejectsLateDecodedDuplicateKeyInLargeArray)
+{
+    std::string input = "[";
+    for (size_t i = 0; i < 10000; ++i) {
+        input += R"({"key":"same"},)";
+    }
+    input += R"({"outer":[{"key":1,"\u006bey":2}] }])";
+    EXPECT_THROW(ParseJson(input), TFailure);
+    EXPECT_EQ(ParseJson(R"([{"key":1},{"key":2,"nested":{"key":3}}])").size(), 2U);
+}
+TEST(Transport, PreservesJsonDepthAndEventBoundaries)
+{
+    EXPECT_NO_THROW(ParseJson(std::string(32, '[') + "0" + std::string(32, ']')));
+    EXPECT_THROW(ParseJson(std::string(33, '[') + "0" + std::string(33, ']')), TFailure);
+    EXPECT_NO_THROW(ParseJson(std::string(33, '[') + std::string(33, ']')));
+    EXPECT_THROW(ParseJson(std::string(34, '[') + std::string(34, ']')), TFailure);
+    // Container start/end each count once, exactly like the original callback.
+    std::string input = "[0";
+    for (size_t i = 1; i < 999998; ++i) {
+        input += ",0";
+    }
+    EXPECT_EQ(ParseJson(input + "]").size(), 999998U);
+    EXPECT_THROW(ParseJson(input + ",0]"), TFailure);
+}
+TEST(Transport, RejectsInvalidUtf8AndMalformedJsonTokens)
+{
+    for (const auto& input : {std::string("[\"") + char(0xFF) + "\"]",
+             std::string(R"({"x":"\ud800"})"),
+             std::string("[1,]"),
+             std::string("{} {}"),
+             std::string("[1e9999]")})
+    {
+        EXPECT_ANY_THROW(ParseJson(input));
+    }
+}
 } // namespace glamdb::NTransport

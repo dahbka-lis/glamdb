@@ -1,14 +1,97 @@
 #include "apps/transport/codec.h"
+#include "core/api/canonical.h"
 
 #include <charconv>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <regex>
 #include <set>
 
 namespace glamdb::NTransport {
 namespace {
 const std::vector<std::string> TypeNames{"string", "bool", "int64", "float64", "timestamp_us_utc"};
+
+// Validate the stream without constructing or filtering a DOM. The pinned
+// callback DOM parser rescans the parent array after each object, making even
+// an always-true callback quadratic for append batches. A separate SAX pass
+// preserves the original event/depth limits and decoded-key checks.
+class TJsonValidator final : public nlohmann::json_sax<TJson>
+{
+public:
+    bool null() override
+    {
+        return Visit();
+    }
+    bool boolean(bool) override
+    {
+        return Visit();
+    }
+    bool number_integer(number_integer_t) override
+    {
+        return Visit();
+    }
+    bool number_unsigned(number_unsigned_t) override
+    {
+        return Visit();
+    }
+    bool number_float(number_float_t, const string_t&) override
+    {
+        return Visit();
+    }
+    bool string(string_t&) override
+    {
+        return Visit();
+    }
+    bool binary(binary_t&) override
+    {
+        return Visit();
+    }
+    bool start_object(size_t) override
+    {
+        Visit();
+        ++Depth_;
+        Objects_.emplace_back();
+        return true;
+    }
+    bool key(string_t& value) override
+    {
+        Visit();
+        Require(Objects_.back().insert(value).second, "duplicate JSON key");
+        return true;
+    }
+    bool end_object() override
+    {
+        --Depth_;
+        Objects_.pop_back();
+        return Visit();
+    }
+    bool start_array(size_t) override
+    {
+        Visit();
+        ++Depth_;
+        return true;
+    }
+    bool end_array() override
+    {
+        --Depth_;
+        return Visit();
+    }
+    bool parse_error(size_t, const std::string&, const TJson::exception&) override
+    {
+        return false;
+    }
+
+private:
+    bool Visit()
+    {
+        Require(Depth_ <= 32 && ++Nodes_ <= 1000000, "JSON complexity limit exceeded");
+        return true;
+    }
+    size_t Depth_ = 0;
+    size_t Nodes_ = 0;
+    std::vector<std::set<std::string>> Objects_;
+};
 
 int64_t ParseTimestamp(const TJson& value)
 {
@@ -108,28 +191,16 @@ void CheckArrow(const arrow::Status& status)
 void Require(bool condition, std::string_view message, std::string_view code)
 {
     if (!condition) {
-        throw TFailure({std::string(code), std::string(message)});
+        throw TFailure({std::string(code), detail::BoundedDiagnostic(message)});
     }
 }
 
 TJson ParseJson(std::string_view bytes)
 {
     Require(bytes.size() <= MaxRequestBytes, "request is too large", "RESOURCE_EXHAUSTED");
-    std::vector<std::set<std::string>> objects;
-    size_t nodes = 0;
-    return TJson::parse(bytes, [&](int depth, TJson::parse_event_t event, TJson& parsed) {
-        Require(depth <= 32 && ++nodes <= 1000000, "JSON complexity limit exceeded");
-        if (event == TJson::parse_event_t::object_start) {
-            objects.emplace_back();
-        }
-        if (event == TJson::parse_event_t::key) {
-            Require(objects.back().insert(parsed.get<std::string>()).second, "duplicate JSON key");
-        }
-        if (event == TJson::parse_event_t::object_end) {
-            objects.pop_back();
-        }
-        return true;
-    });
+    TJsonValidator validator;
+    Require(TJson::sax_parse(bytes, &validator), "invalid JSON request");
+    return TJson::parse(bytes);
 }
 
 void CheckKeys(const TJson& value, std::initializer_list<std::string_view> keys)
@@ -137,7 +208,8 @@ void CheckKeys(const TJson& value, std::initializer_list<std::string_view> keys)
     Require(value.is_object(), "expected JSON object");
     for (const auto& [key, ignored] : value.items()) {
         (void)ignored;
-        Require(std::find(keys.begin(), keys.end(), key) != keys.end(), "unknown request field: " + key);
+        Require(std::find(keys.begin(), keys.end(), key) != keys.end(),
+            "unknown request field: " + detail::BoundedDiagnostic(key));
     }
 }
 
@@ -234,12 +306,13 @@ ScanRequest ParseScan(std::string collectionID, const SchemaSpec& schema, const 
         if (!body.contains(key)) {
             continue;
         }
-        Require(body[key].is_number_integer() && body[key] >= 0 && body[key] <= 100000, "invalid scan bound");
+        Require(body[key].is_number_integer() && body[key] >= 0 && body[key] <= std::numeric_limits<int64_t>::max(),
+            "invalid scan bound");
         const auto value = body[key].get<int64_t>();
         if (std::string_view(key) == "limit") {
             result.limit = value;
         } else {
-            Require(value >= 1 && value <= 1024, "batch_rows must be 1..1024");
+            Require(value >= 1 && value <= 65536, "batch_rows must be 1..65536");
             result.batch_rows = value;
         }
     }
@@ -378,7 +451,7 @@ TJson EncodeError(const ErrorDetail& error)
     const std::vector<std::string> hints{"SameIdAfterReconcile", "NewOperationId", "FixInput", "OperatorAction"};
     return {{"error",
         {{"code", error.code},
-            {"message", error.message},
+            {"message", detail::BoundedDiagnostic(error.message)},
             {"retry_hint", hints.at(static_cast<size_t>(error.retry_hint))}}}};
 }
 
