@@ -8,6 +8,17 @@ from native_http_test import NativeHTTP, TOKEN
 
 
 class HTTPReview(NativeHTTP):
+    def test_complete_request_after_write_side_half_close_receives_response(self):
+        with socket.create_connection(('127.0.0.1', self.port), timeout=5) as stream:
+            stream.sendall((f'GET /databases HTTP/1.1\r\nHost: local\r\n'
+                f'Authorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n').encode())
+            stream.shutdown(socket.SHUT_WR)
+            response = http.client.HTTPResponse(stream)
+            response.begin()
+            body = response.read()
+            self.assertEqual(response.status, 200, body)
+            self.assertEqual(json.loads(body)['items'][0]['database_id'], self.store_id)
+
     def test_capabilities_report_the_production_scan_policy(self):
         for path in ('/capabilities', '/databases/' + self.store_id + '/capabilities'):
             limits = self.api(path)['limits']

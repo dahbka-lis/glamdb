@@ -111,9 +111,7 @@ public:
         }
         // The cancellation callback may still be queued when a worker frees.
         // Peek without Asio's synchronous retry loop before entering core.
-        char byte = 0;
-        const auto received = recv(Socket_.native_handle(), &byte, 1, MSG_PEEK | MSG_DONTWAIT);
-        if (received >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
+        if (PeerAborted()) {
             Finish();
             return;
         }
@@ -390,7 +388,7 @@ private:
                 if (error || (self->Closed_ && !self->Active_) || generation != self->Generation_) {
                     return;
                 }
-                if (self->WorkerFailed_.load() || (!self->Closed_ && self->PeerDisconnected())) {
+                if (self->WorkerFailed_.load() || (!self->Closed_ && self->PeerAborted())) {
                     self->Finish();
                 } else if (self->Closed_ && self->WorkerDone_.load()) {
                     self->CompleteCall();
@@ -400,11 +398,13 @@ private:
             });
         });
     }
-    bool PeerDisconnected()
+    bool PeerAborted()
     {
+        // Read EOF closes only the peer's send side; it can still read our reply.
+        // Extra input is unsupported pipelining in this one-request session.
         char byte = 0;
         const auto received = recv(Socket_.native_handle(), &byte, 1, MSG_PEEK | MSG_DONTWAIT);
-        return received >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK);
+        return received > 0 || (received < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR);
     }
     void Dispatch()
     {
@@ -453,10 +453,11 @@ private:
         Deadline(State_.Timeout, true);
         Socket_.async_wait(TTcp::socket::wait_read, [self = shared_from_this()](const std::error_code& error) {
             self->Guard([&] {
-                if (self->Queued_ && error != asio::error::operation_aborted) {
-                    // EOF/pipelined input withdraws a call before it enters core.
+                if (self->Queued_ && error != asio::error::operation_aborted && (error || self->PeerAborted())) {
                     self->Finish();
                 }
+                // Do not rearm a readable EOF: complete half-closed requests
+                // retain their queue deadline and can still receive a response.
             });
         });
         queue.Pump();

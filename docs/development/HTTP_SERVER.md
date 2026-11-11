@@ -345,8 +345,10 @@ one per database), lifecycle (four workers, one per database), and controls/stat
 files (two workers, one per database). Each pool uses per-database FIFO queues and
 round-robin dispatch: at most 64 queued calls and 64 MiB of queued bodies per pool,
 with at most 16 calls and 32 MiB per database. Queue deadlines use
-`--request-timeout-ms`; expiry and observed disconnects remove calls before core
-entry. Active core calls finish independently of read/queue deadlines. Outcome
+`--request-timeout-ms`; expiry and observed TCP resets or socket errors remove
+calls before core entry. A complete request remains valid after the client closes
+its send side; queued and active calls retain their response socket. Active core
+calls finish independently of read/queue deadlines. Outcome
 lookup never waits on an in-progress catalog publication. Health and capabilities
 run on the I/O thread. Core retains its single serialized writer.
 
@@ -457,8 +459,9 @@ producer path corruption, descriptor exhaustion, close waiting for an admitted
 native append, and SIGTERM draining publication after a shutdown deadline while
 an independent embedded open still fails. Fresh-process restart resolves uncertain
 COMMIT results and retains original receipts and duplicate rows.
-`glamdb.http_review` checks HTTP error responses, Expect handshakes,
-idle-header admission, media negotiation and canonical scoped dispatch.
+`glamdb.http_review` checks HTTP error responses, complete half-closed requests,
+Expect handshakes, idle-header admission, media negotiation and canonical scoped
+dispatch.
 `glamdb.scan_http` covers fixed-view pages beyond 100000 rows and 16 MiB, response
 replay, scope, cancellation, expiry, resource capacity, small-batch IPC, abandoned
 SDK iterators and real read corruption. Scan session tests also pause a real Parquet
@@ -467,10 +470,11 @@ and closed scan admission, and enforce the shared replay byte budget.
 These deterministic checks are separate from physical power-loss qualification.
 
 Admission regressions additionally cover six queued appends, pre-execution queue
-expiry, disconnected queued/active clients, two paused stores with healthy reads
-and lifecycle calls elsewhere, and 32/64 concurrent fixed-view sessions. Slow page
-I/O is activity rather than idle time. Runtime capabilities use the same scan policy
-constants as admission (`scan_lifetime_seconds:0` means no absolute lifetime).
+expiry, reset queued/active clients, half-closed queued/active appends, two paused
+stores with healthy reads and lifecycle calls elsewhere, and 32/64 concurrent
+fixed-view sessions. Slow page I/O is activity rather than idle time. Runtime
+capabilities use the same scan policy constants as admission
+(`scan_lifetime_seconds:0` means no absolute lifetime).
 
 A Release run on Linux x86-64 (clang 18/libc++, `-O3 -DNDEBUG`) used four databases
 with one million two-field rows each, projection `key,c1`, and a 1,000-row limit.

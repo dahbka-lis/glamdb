@@ -3,6 +3,7 @@ import http.client
 import json
 import select
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -319,7 +320,45 @@ class NativeFaultHTTP(unittest.TestCase):
                     stream.close()
             self.assertEqual(append.result(timeout=10)['outcome'], 'committed')
 
-    def test_queued_append_disconnect_never_executes(self):
+    def test_half_closed_active_and_queued_appends_receive_committed_responses(self):
+        path = self.collection()
+        operations = [str(uuid.uuid4()), str(uuid.uuid4())]
+        streams = []
+        self.arm('pause', 2, False)
+        try:
+            try:
+                for index, operation in enumerate(operations):
+                    stream = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+                    streams.append(stream)
+                    body = json.dumps({'operation_id': operation, 'rows': [{'key': str(index)}]})
+                    stream.sendall((f'POST {path}/append HTTP/1.1\r\nHost: local\r\n'
+                        f'Authorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\n'
+                        f'Connection: close\r\nContent-Length: {len(body)}\r\n\r\n{body}').encode())
+                    if index == 0:
+                        self.wait_for_publication()
+                    stream.shutdown(socket.SHUT_WR)
+                self.assertFalse(select.select(streams, [], [], 0.25)[0],
+                    'half-closed requests lost their response socket before publication')
+            finally:
+                self.arm('release', 0, False)
+            outcomes = []
+            for stream, operation in zip(streams, operations):
+                response = http.client.HTTPResponse(stream)
+                response.begin()
+                body = response.read()
+                self.assertEqual(response.status, 200, body)
+                outcome = json.loads(body)
+                self.assertEqual(outcome['operation_id'], operation)
+                self.assertEqual(outcome['outcome'], 'committed')
+                outcomes.append(outcome)
+            for outcome in outcomes:
+                self.assertEqual(self.api(path + '/operations/' + outcome['operation_id']), outcome)
+        finally:
+            for stream in streams:
+                stream.close()
+        self.assertCountEqual(self.api(path + '/scan', {})['rows'], [{'key': '0'}, {'key': '1'}])
+
+    def test_queued_append_reset_never_executes(self):
         path = self.collection()
         operation = str(uuid.uuid4())
         self.arm('pause', 2, False)
@@ -333,9 +372,9 @@ class NativeFaultHTTP(unittest.TestCase):
                 stream.sendall((f'POST {path}/append HTTP/1.1\r\nHost: local\r\n'
                     f'Authorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\n'
                     f'Content-Length: {len(body)}\r\n\r\n{body}').encode())
-                stream.shutdown(socket.SHUT_WR)
+                stream.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
                 stream.close()
-                # A descriptor round trip ensures the I/O loop observes the EOF.
+                # Allow the I/O loop to observe the reset while publication waits.
                 self.assertEqual(self.api(self.base)['state'], 'open')
                 time.sleep(0.1)
             finally:
@@ -379,6 +418,7 @@ class NativeFaultHTTP(unittest.TestCase):
                 f'Authorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\n'
                 f'Content-Length: {len(body)}\r\n\r\n{body}').encode())
             self.wait_for_publication()
+            stream.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
             stream.close()
             refused = self.api(path + '/append',
                 {'operation_id': second, 'rows': [{'key': 'expired'}]}, status=408)
