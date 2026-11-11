@@ -85,7 +85,7 @@ private:
     size_t Nodes_ = 0;
     void Visit()
     {
-        // Accommodate all 10,000 rows of the maximum 256-field schema.
+        // Accommodate all 10,000 rows of the maximum 64-field schema.
         Require(Stack_.size() <= 32 && ++Nodes_ <= MaxJsonEvents, "JSON complexity limit exceeded");
     }
     bool Start(TJson value)
@@ -416,7 +416,7 @@ TJson EncodeSchema(const arrow::Schema& schema)
                 type = "timestamp_us_utc";
                 break;
             default:
-                throw TFailure({"INTERNAL", "unsupported output type"});
+                throw TFailure({"INTERNAL", "unsupported output type", RetryHint::OperatorAction});
         }
         TJson item{{"name", field->name()}, {"type", type}, {"nullable", field->nullable()}};
         if (field->metadata()) {
