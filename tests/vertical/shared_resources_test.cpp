@@ -63,7 +63,8 @@ TEST(SharedResources, RetainedSliceAndExportKeepAllocationChargesAfterClose)
     ASSERT_EQ(engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}}).disposition,
         CommitDisposition::Committed);
     auto opened = engine->Scan({.collection_id = test::collection_id,
-        .predicate = Predicate::Compare("key", CompareOp::Eq, std::string("duplicate"))});
+        .predicate = Predicate::And(
+            {Predicate::In("key", {std::string("duplicate"), std::nullopt}), Predicate::IsNotNull("key")})});
     ASSERT_TRUE(opened) << opened.error().message;
     auto next = (*opened)->Next();
     ASSERT_TRUE(next) << next.error().message;
@@ -82,6 +83,56 @@ TEST(SharedResources, RetainedSliceAndExportKeepAllocationChargesAfterClose)
     EXPECT_EQ(owner->GetUsage().memory_bytes[0], 0);
     EXPECT_EQ(owner->GetUsage().device_reserved_bytes, 0);
     EXPECT_EQ(owner->GetUsage().memory_bytes[4], 0);
+}
+
+TEST(SharedResources, CompoundScanLiteralsRequireRetainedMetadataAdmission)
+{
+    test::TempDir temporary;
+    auto owner = std::make_shared<ResourceOwner>();
+    auto created = CreateStore(
+        {.store_id = test::store_id, .absolute_root = (temporary.path / "store").string(), .resources = owner});
+    ASSERT_TRUE(created) << created.error().message;
+    const SchemaSpec schema{{{"key", FieldType::String, false}, {"label", FieldType::String, true}}};
+    ASSERT_EQ((*created)->CreateCollection({test::collection_id, "events", schema}).disposition,
+        CommitDisposition::Committed);
+    std::vector<OptionalLiteral> values;
+    values.reserve(32);
+    for (size_t index = 0; index < 32; ++index) {
+        std::string text(1ULL << 20, 'x');
+        text[0] = static_cast<char>('A' + index);
+        values.emplace_back(std::move(text));
+    }
+    const ScanRequest request{.collection_id = test::collection_id,
+        .predicate = Predicate::And({Predicate::In("label", std::move(values)), Predicate::IsNotNull("key")})};
+    const auto baseline = owner->GetUsage().memory_bytes[1];
+    auto cursor = (*created)->Scan(request);
+    ASSERT_TRUE(cursor) << cursor.error().message;
+    EXPECT_GE(owner->GetUsage().memory_bytes[1] - baseline, 32ULL << 20);
+    cursor->reset();
+    EXPECT_EQ(owner->GetUsage().memory_bytes[1], baseline);
+    // Leave room for planning and the old fixed cursor allowance, but not for
+    // copying and retaining this predicate's string set.
+    auto pressure = owner->Reserve(ResourceClass::Metadata,
+        owner->GetLimits().memory_bytes[1] - baseline - detail::MetadataWorkBytes - (17ULL << 20));
+    ASSERT_TRUE(pressure);
+    auto refused = (*created)->Scan(request);
+    EXPECT_FALSE(refused);
+    if (!refused) {
+        EXPECT_EQ(refused.error().code, "RESOURCE_EXHAUSTED");
+        EXPECT_EQ(owner->GetUsage().memory_bytes[1], baseline + (*pressure)->GetBytes());
+    }
+    EXPECT_TRUE((*created)->GetHealth().read_available);
+    pressure->reset();
+    auto explanation = (*created)->ExplainScan(request);
+    ASSERT_TRUE(explanation) << explanation.error().message;
+    auto subtree = explanation->predicate.children().front();
+    explanation = ScanExplanation{};
+    ASSERT_TRUE((*created)->Shutdown(1000ms));
+    created->reset();
+    EXPECT_GT(owner->GetUsage().memory_bytes[1], 32ULL << 20);
+    EXPECT_EQ(subtree.values().size(), 32);
+    subtree = {};
+    EXPECT_EQ(owner->GetUsage().memory_bytes[1], 0);
 }
 
 TEST(SharedResources, UnknownRetainsCompletionAndDiskUntilReconciliation)

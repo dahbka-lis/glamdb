@@ -2,12 +2,14 @@
 
 #include "core/api/binary.h"
 #include "core/api/canonical.h"
+#include "core/scan/predicate.h"
 #include "core/scan/scan_planner.h"
 
 #include <iceberg/snapshot.h>
 #include <iceberg/table_metadata.h>
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <map>
 
@@ -119,12 +121,26 @@ ScanExplanation ExplainScan(const TScanContext& context, const ScanRequest& requ
     result.predicate = request.predicate;
     result.limit = request.limit;
     result.batch_rows = request.batch_rows;
+    // OpenScan has already validated the tree. Collect field references without
+    // compiling another copy of its potentially large literal sets.
+    std::vector<std::string_view> referencedFields;
+    std::array<const Predicate*, MaxPredicateNodes> pending{};
+    pending[0] = &request.predicate;
+    size_t pendingCount = 1;
+    while (pendingCount != 0) {
+        const auto& predicate = *pending[--pendingCount];
+        if (!predicate.field().empty()) {
+            referencedFields.push_back(predicate.field());
+        }
+        for (const auto& child : predicate.children()) {
+            pending[pendingCount++] = &child;
+        }
+    }
     for (const auto& field : context.Collection.schema.fields) {
         const bool projected =
             !request.projection || std::ranges::find(*request.projection, field.name) != request.projection->end();
-        if (projected ||
-            (request.predicate.kind() == Predicate::Kind::Compare && request.predicate.field() == field.name))
-        {
+        const bool referenced = std::ranges::find(referencedFields, field.name) != referencedFields.end();
+        if (projected || referenced) {
             result.read_fields.push_back(field.name);
         }
     }

@@ -31,8 +31,13 @@ and footer/manifest work before parsing;
 Arrow decoder allocations are charged separately. These deliberately coarse
 reservations can reject work before physical memory is scarce. They require
 recalibration if upstream dependencies or the fixed schema/file limits change.
+Compound scan predicates reserve metadata before compilation: 4 MiB plus twice
+the measured tree capacity covers compiled vectors, literal copies and transient
+work. The compiled program retains that reservation until cursor destruction.
 Original history/statistics/explanation and file metadata results retain
-capacity-sized leases, including extracted explanation schemas. DTO reservations
+capacity-sized leases, including extracted explanation schemas and predicate
+subtrees. Explanations copy their admitted predicate tree into nodes sharing the
+result lease; node, vector and string capacities are included. DTO reservations
 include 128 bytes per allocation and another 4 KiB for capacities of at least
 4 KiB to cover allocator headers and rounding in this profile. Independently copied caller DTOs belong
 to the host budget. These envelopes do not establish a universal RSS upper bound

@@ -1,5 +1,7 @@
 #include "core/resources/metadata_result.h"
 
+#include "core/scan/predicate.h"
+
 #include <arrow/type.h>
 
 #include <limits>
@@ -110,10 +112,11 @@ Status RetainMetadata(const std::shared_ptr<ResourceOwner>& owner, ScanExplanati
     for (const auto& field : result.read_fields) {
         capacity.Add(field);
     }
-    capacity.Add(result.predicate.field());
-    if (const auto* text = std::get_if<std::string>(&result.predicate.value())) {
-        capacity.Add(*text);
+    const auto predicateBytes = TPredicateResources::Measure(result.predicate);
+    if (!predicateBytes) {
+        return std::unexpected(predicateBytes.error());
     }
+    capacity.Add(*predicateBytes);
     if (result.info.output_schema) {
         // Fixed flat schema: field/type/metadata objects plus owned names.
         capacity.Add(static_cast<uint64_t>(result.info.output_schema->num_fields()), 1024);
@@ -122,6 +125,9 @@ Status RetainMetadata(const std::shared_ptr<ResourceOwner>& owner, ScanExplanati
         }
     }
     auto status = Attach(owner, capacity.Bytes, result.resource_lease);
+    if (status) {
+        result.predicate = TPredicateResources::Retain(result.predicate, result.resource_lease);
+    }
     if (status && result.info.output_schema) {
         auto retained = std::make_shared<TSchemaLease>(result.resource_lease, result.info.output_schema);
         result.info.output_schema = std::shared_ptr<const arrow::Schema>(retained, retained->Schema.get());

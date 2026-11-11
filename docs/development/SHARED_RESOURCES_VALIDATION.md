@@ -1,20 +1,21 @@
 # Shared resource validation
 
 Recorded on 2026-11-11 for [issue #99](https://github.com/glamourdb/glamdb/issues/99).
+Checks updated on 2026-11-12 after integration with official main.
 Environment: Ubuntu 24.04.4, Linux x86-64, Clang 18.1.3, Debug builds,
 pinned libc++ 18 and repository dependencies. The test filesystem reports
 `ext2/ext3` through `stat -f`; this is not the dedicated G4 qualification volume.
-The final tree includes official main through `85bd283`.
+The final tree includes official main through `133a626`.
 
 ## Checks
 
 | Check | Result |
 | --- | --- |
-| Storage-enabled build and full native CTest suite | PASS: 610 passed, three skipped, one disabled; 614 discovered |
-| Resource owner/pool, shared-store, native route, file metadata, workspace recovery and HTTP profile tests under ASan/UBSan/LSan | PASS: 27 tests, leak detection enabled |
-| Storage-disabled resource tests and installed public consumer | PASS: eleven tests |
+| Storage-enabled build and full native CTest suite | PASS: 629 passed, three skipped, one disabled; 633 discovered |
+| Resource owner/pool, shared-store, compound predicate, native route, file metadata, workspace recovery and HTTP profile tests under ASan/UBSan/LSan | PASS: 58 tests, leak detection enabled |
+| Storage-disabled resource, predicate, transport, bootstrap and installed public consumer checks | PASS: 45 tests |
 | LLVM 18 formatting | PASS: 204 project files |
-| LLVM 18 static analysis with configured warnings as errors | PASS: all 24 changed translation units, including project headers |
+| LLVM 18 static analysis with configured warnings as errors | PASS: 24 original changed translation units; 14 merged/updated units rechecked, including project headers |
 | Quality negative checks and `git diff --check` | PASS |
 
 The skipped cases are the standalone `CapacityRecoveryChild.RejectsOverBudgetStore`,
@@ -34,11 +35,14 @@ described in [BUILDING.md](BUILDING.md):
 
 ```sh
 cmake --build build/local --parallel 2
-ctest --test-dir build/local --output-on-failure --parallel 2
-ctest --test-dir build/issue-43-asan --output-on-failure -V \
-  -R 'ResourceOwner|ResourcePool|MetadataResources|SharedResources|SharedPressure|TFileMetadataTest|RecoveryWorkspaces|glamdb.resource_profile'
+GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 \
+  ctest --test-dir build/local --output-on-failure --parallel 2
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+  UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 ARROW_DEFAULT_MEMORY_POOL=system \
+  ctest --test-dir build/issue-43-asan --output-on-failure -V --parallel 2 \
+  -R 'ResourceOwner|ResourcePool|MetadataResources|SharedResources|SharedPressure|TFileMetadataTest|RecoveryWorkspaces|ScanPredicate|ScanMockTest|Compound|glamdb.resource_profile'
 ctest --test-dir build/nostorage --output-on-failure \
-  -R 'ResourceOwner|ResourcePool|MetadataResources|^glamdb.installed_consumer$'
+  --parallel 2 -R 'ResourceOwner|ResourcePool|MetadataResources|ScanPredicate|Transport|EngineBootstrap|^glamdb.installed_consumer$'
 cmake --build build/local --target format-check quality-negative-check
 ctest --test-dir build/local --output-on-failure -V -R '^glamdb.resource_profile$'
 ```
@@ -98,6 +102,22 @@ preserves the original receipt and rows. Other cases check busy/wrong-identity
 stores, unrelated names, directories and symlinks, plus cleanup before device
 refusal and release of the refused open's reservations. These pass under
 ASan/UBSan/LSan as well as the native build. SIGKILL does not qualify power loss.
+
+## Main integration, 2026-11-12
+
+The compound predicate merge preserves tracked Arrow builders and SQL
+three-valued scan behavior. Independent review found that large compiled
+literal sets and nested explanation trees needed additional accounting.
+Compilation now reserves measured capacity before copying literals and keeps
+that lease with the program. Explanation nodes and deferred child lists retain
+their result lease through extracted subtrees. Explain does not compile a
+second literal set.
+
+Four regressions failed before these fixes and passed afterward. They cover
+nested literals, unused vector capacity, extracted subtree lifetime and a
+32 MiB predicate retained by a real engine cursor. The engine case also checks
+refusal without leaked reservations and an explanation subtree surviving engine
+close. The scoped independent review finished with no remaining findings.
 
 ## Measured HTTP profile
 
