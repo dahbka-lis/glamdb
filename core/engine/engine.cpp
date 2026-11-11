@@ -16,6 +16,7 @@
 #include <atomic>
 #include <map>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <string>
 #include <utility>
@@ -39,7 +40,9 @@ T Take(Result<T> result)
 
 ErrorDetail ExceptionError(const std::exception& error)
 {
-    return {"INTERNAL", BoundedDiagnostic(error.what()), RetryHint::OperatorAction};
+    return {dynamic_cast<const std::bad_alloc*>(&error) != nullptr ? "RESOURCE_EXHAUSTED" : "INTERNAL",
+        BoundedDiagnostic(error.what()),
+        RetryHint::OperatorAction};
 }
 
 AppendOutcome Rejected(std::string operation_id, CommitPhase phase, ErrorDetail error)
@@ -1149,7 +1152,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             impl->owned_input_bytes += reservation;
             admission.bytes = reservation;
         }
-        const auto input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches));
+        auto input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches));
         Require(input.payload_hash == payload_hash, "INVALID_ARGUMENT", "Arrow input changed during append");
         const auto base = impl->catalog->Base(request.collection_id);
         if (impl->backend) {

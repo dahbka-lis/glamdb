@@ -1,3 +1,4 @@
+#include "tests/support/checked.h"
 #include "tests/support/journal_fault_vfs.h"
 #include "tests/vertical/vertical_support.h"
 
@@ -38,6 +39,7 @@ protected:
         auto input = detail::NormalizeBatches(Schema, test::collection_id, {Batch(FirstRows)});
         ASSERT_TRUE(input);
         Input_ = std::move(*input);
+        ASSERT_TRUE(Backend_->CheckAppendAdmissible(Store_, View_.info, View_.base, Input_));
     }
 
     detail::BoundOperation Binding() const
@@ -50,6 +52,29 @@ protected:
             "00000000-0000-7000-8000-000000000034"};
     }
 };
+
+TEST_F(BackendPublicationTest, AdmittedBatchRetainsItsAllocatorAfterBackendRelease)
+{
+    auto pool = std::make_shared<arrow::ProxyMemoryPool>(arrow::default_memory_pool());
+    const std::weak_ptr<arrow::MemoryPool> lifetime = pool;
+    detail::TLocalStorageOptions options;
+    options.InputPool = pool;
+    Backend_.reset();
+    auto backend = detail::TLocalStorageBackend::Open(Root_, Store_, options);
+    ASSERT_TRUE(backend);
+    ASSERT_TRUE((*backend)->VerifyRetained(Store_, std::span(&View_, 1), {}));
+    ASSERT_TRUE((*backend)->CheckAppendAdmissible(Store_, View_.info, View_.base, Input_));
+    auto batch = Input_.writer_batch;
+    ASSERT_NE(batch, nullptr);
+    Input_ = {};
+    backend->reset();
+    options.InputPool.reset();
+    pool.reset();
+    EXPECT_FALSE(lifetime.expired());
+    EXPECT_TRUE(batch->ValidateFull().ok());
+    batch.reset();
+    EXPECT_TRUE(lifetime.expired());
+}
 
 // A caller presenting a tentative root must not authorize its promotion.
 TEST_F(BackendPublicationTest, TentativePointerCannotPromoteCandidate)
@@ -139,9 +164,9 @@ TEST_F(BackendPublicationTest, OnlySuccessfulOuterCommitPromotesCandidate)
     EXPECT_FALSE(Backend_->CheckAppendAdmissible(Store_, View_.info, View_.base, Input_));
     const auto operation = Catalog_->FindOperation(test::collection_id, FirstOperation);
     ASSERT_TRUE(operation);
-    ASSERT_TRUE(operation.value().outcome);
-    ASSERT_TRUE(operation.value().outcome.value().result);
-    EXPECT_EQ(operation.value().outcome.value().result.value(), receipt);
+    ASSERT_TRUE(test::Present(operation).outcome);
+    ASSERT_TRUE(test::Present(test::Present(operation).outcome).result);
+    EXPECT_EQ(test::Present(test::Present(test::Present(operation).outcome).result), receipt);
 }
 
 TEST_F(BackendPublicationTest, RolledBackOuterTransactionDiscardsCandidateAndPreservesBase)
@@ -171,7 +196,7 @@ TEST_F(BackendPublicationTest, RolledBackOuterTransactionDiscardsCandidateAndPre
     EXPECT_EQ(Catalog_->Base(test::collection_id), View_.base);
     const auto operation = Catalog_->FindOperation(test::collection_id, FirstOperation);
     ASSERT_TRUE(operation);
-    EXPECT_EQ(operation.value().state, detail::OperationState::Bound);
+    EXPECT_EQ(test::Present(operation).state, detail::OperationState::Bound);
     EXPECT_TRUE(Backend_->CheckAppendAdmissible(Store_, View_.info, View_.base, Input_));
     // A late, erroneous success handoff must not revive the discarded candidate.
     Backend_->PublicationFinished(test::collection_id, location, CommitDisposition::Committed);
@@ -251,7 +276,7 @@ TEST(BackendPublicationIntegration, LostCommitResultKeepsReadersOnConfirmedViewU
     const auto first = engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}});
     ASSERT_EQ(first.disposition, CommitDisposition::Committed);
     ASSERT_TRUE(first.result);
-    EXPECT_EQ(retry.result.value().parent_snapshot_id, first.result.value().snapshot_id);
+    EXPECT_EQ(test::Present(retry.result).parent_snapshot_id, test::Present(first.result).snapshot_id);
     EXPECT_EQ(read(), Expected({&FirstRows, &SecondRows}));
     EXPECT_EQ(engine->AppendDurable({test::collection_id, ThirdOperation, {}, {Batch(SecondRows)}}).disposition,
         CommitDisposition::Committed);
