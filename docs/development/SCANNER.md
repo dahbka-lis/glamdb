@@ -179,10 +179,15 @@ joins a writer attempt or holds a SQLite read transaction.
   non-projected filter columns) and limited. Batches have at most `batch_rows`
   rows and the exact `Info().output_schema`. `limit = 0` and empty views return
   `nullptr` from the first `Next()`.
-- Both the cursor and returned Arrow buffers retain the store lease until the
-  last dependent handle (including array slices and C Data exports) is
-  released. `Cancel()` or `Engine::Shutdown()` makes `Next()` return
-  `CANCELLED`; `Info()` remains valid. Detected corruption during `Next()`
+- The cursor and returned Arrow backing buffers retain the engine (including
+  the store lock), read-only FileIO and owned Arrow allocator/accounting pool
+  until the last batch, extracted array/buffer, slice or C Data export is
+  released. Decoding and filtered copies use the same per-scan resource pool,
+  which charges the shared data budget and retains any supplied upstream pool.
+  This does not bound total process memory. `Cancel()` or `Engine::Shutdown()`
+  makes `Next()` return `CANCELLED`; checks after I/O prevent further file reads, and checks before
+  delivery cover batches and EOS, including empty views and `limit = 0`.
+  `Info()` remains valid. Detected corruption during `Next()`
   closes engine readiness. Read failures are errors, never EOS.
 
 Not implemented: file/row-group pruning, reuse of the backend's parsed root by
@@ -199,6 +204,10 @@ sanitizers and a small multi-database HTTP/reopen campaign.
 
 ## Validation status
 
+These checks record evidence before this merge. Shared-resource results cover
+`a0b6e8f`; scan-lifetime results were reported by official main `103ea38`.
+No local builds, tests or analyzers were run after this merge, as requested.
+
 | Check | Status |
 | --- | --- |
 | `cmake --build --preset local` (Clang 18.1.3, `GLAMDB_BUILD_STORAGE=ON`) and `format-check`, `quality-negative-check` | PASS |
@@ -208,6 +217,8 @@ sanitizers and a small multi-database HTTP/reopen campaign.
 | Separate `GLAMDB_BUILD_STORAGE=OFF` build and CTest | PASS |
 | `tests/verification/test_oracle.py` against `glamdb_verify` | PASS |
 | Shared resource tests under ASan/UBSan/LSan | PASS; see the [resource validation report](SHARED_RESOURCES_VALIDATION.md) |
+| `TScanLifetimeTest` on official main `103ea38` (real files and production backend) | Reported PASS in normal and ASan/UBSan builds: batch/array/buffer/slice/C Data retention, final-release reopen, deterministic cancel/shutdown barriers before batch/EOS, empty and zero-limit views; not rerun after merge |
+| `ScanMockTest` on official main `103ea38` (in-memory FileIO, real Arrow/Parquet) | Reported PASS in normal and ASan/UBSan builds: extracted-buffer FileIO/owner retention, decoded/filtered Arrow pool accounting and compound predicates; not rerun after merge |
 | Full-repo `tidy-check`, full sanitizer presets, TSan, power-loss qualification | NOT RUN in this change |
 
 Value validation reads only decoded columns of the projection and predicate;

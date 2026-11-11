@@ -5,8 +5,9 @@ Checks updated on 2026-11-12 after integration with official main.
 Environment: Ubuntu 24.04.4, Linux x86-64, Clang 18.1.3, Debug builds,
 pinned libc++ 18 and repository dependencies. The test filesystem reports
 `ext2/ext3` through `stat -f`; this is not the dedicated G4 qualification volume.
-The checks below cover official main through `1f48601`. The later merge of
-`58c1b82` resolved documentation conflicts without local runs, as requested.
+The checks below cover official main through `1f48601`. Later merges through
+`103ea38` resolved documentation and scan ownership conflicts without local runs,
+as requested.
 
 ## Checks
 

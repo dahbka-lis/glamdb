@@ -18,7 +18,8 @@ Arrow input, Parquet decoding and selected-array builders charge allocation
 capacity before allocating. Reallocation reserves both old and replacement
 capacity until the upstream call finishes; refusal leaves the original buffer
 and its charge intact. Pool nodes and alignment padding are included. Returned
-buffers retain the pool and store lease through slices and Arrow C Data exports.
+buffers retain the pool, read-only FileIO and engine (including its store lease)
+through slices and Arrow C Data exports, including after filtering.
 Closing a database cannot refund an allocation still owned by its caller.
 
 For upstream allocations without allocator hooks, the fixed append profile uses

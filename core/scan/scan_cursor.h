@@ -6,6 +6,10 @@
 #include <functional>
 #include <memory>
 
+namespace arrow {
+class MemoryPool;
+} // namespace arrow
+
 namespace iceberg {
 class FileIO;
 } // namespace iceberg
@@ -22,9 +26,12 @@ struct TScanContext
     // Aliases the engine's closing flag and retains the engine state, its
     // catalog and store lease until the cursor is released.
     std::shared_ptr<const std::atomic<bool>> Closing;
-    // Retains the store lease in returned Arrow buffers so the store stays
-    // locked until the last returned batch, slice or C Data export is released.
+    // Retains engine resources and the store lock in returned Arrow buffers
+    // until the last batch, extracted buffer, slice or C Data export is released.
     std::shared_ptr<const void> Lease;
+    // Optional owned upstream allocator for decoded and filtered Arrow buffers.
+    // A per-scan resource pool wraps it; empty selects Arrow's default pool.
+    std::shared_ptr<arrow::MemoryPool> Pool{};
     std::function<void(const ErrorDetail&)> OnError;
 };
 

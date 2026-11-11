@@ -162,7 +162,7 @@ public:
 
 private:
     // Destroy Inner_ before Lease_ so buffer memory is freed while the
-    // store lease is still held.
+    // allocator and engine resources are still held.
     std::shared_ptr<const void> Lease_;
     std::shared_ptr<arrow::Buffer> Inner_;
 };
@@ -222,10 +222,10 @@ public:
         int64_t batchRows,
         std::optional<int64_t> limit)
         : Context_(std::move(context))
-        , Pool_(MakeResourcePool(Context_.Resources))
+        , Pool_(MakeResourcePool(Context_.Resources, Context_.Pool))
         , CursorMemory_(Take(Context_.Resources->Reserve(ResourceClass::Metadata, 16ULL << 20)))
         , SelectionMemory_(Take(Context_.Resources->Reserve(ResourceClass::Data, 1ULL << 20)))
-        , BufferLease_(std::make_shared<TBufferLease>(Context_.Lease, Pool_, CursorMemory_))
+        , BufferLease_(std::make_shared<TBufferLease>(Context_.Lease, Context_.FileIO, Pool_, CursorMemory_))
         , FileSchema_(std::move(fileSchema))
         , OutputSchema_(std::move(outputSchema))
         , Info_{OutputSchema_,
@@ -305,6 +305,7 @@ private:
     struct TBufferLease
     {
         std::shared_ptr<const void> Store;
+        std::shared_ptr<iceberg::FileIO> FileIO;
         std::shared_ptr<arrow::MemoryPool> Pool;
         std::shared_ptr<ResourceReservation> Metadata;
     };
@@ -370,6 +371,7 @@ private:
                     auto memory = Take(Context_.Resources->Reserve(ResourceClass::Metadata, 256ULL << 20));
                     auto files = Take(ManifestFiles(Context_.FileIO, Plan_, NextManifest_++));
                     ++ManifestsRead_;
+                    CheckActive();
                     PendingFiles_.insert(PendingFiles_.end(),
                         std::make_move_iterator(files.begin()),
                         std::make_move_iterator(files.end()));
@@ -390,6 +392,7 @@ private:
                 continue;
             }
             RowsDecoded_ += batch->num_rows();
+            CheckActive();
             if (auto produced = Produce(*batch)) {
                 CheckActive();
                 RowsReturned_ += produced->num_rows();
@@ -416,6 +419,7 @@ private:
             "read data file");
         ++DataFilesRead_;
         DataBytesRead_ += static_cast<int64_t>(bytes.size());
+        CheckActive();
         if (static_cast<int64_t>(bytes.size()) != file.SizeBytes) {
             Fail("CORRUPTION", "read data file", "file length differs from its manifest");
         }

@@ -488,7 +488,7 @@ Result<std::shared_ptr<arrow::Array>>
 TakeTyped(const arrow::Array& column, std::span<const int64_t> rows, arrow::MemoryPool* pool)
 {
     const auto& array = static_cast<const TArray&>(column);
-    TBuilder builder(column.type(), pool ? pool : arrow::default_memory_pool());
+    TBuilder builder(column.type(), pool);
     if (const auto status = builder.Reserve(static_cast<int64_t>(rows.size())); !status.ok()) {
         return std::unexpected(ArrowError(status, "cannot reserve selected rows"));
     }
@@ -686,8 +686,8 @@ BindPredicate(const Predicate& predicate, const SchemaSpec& schema, const std::s
                     }
                     bound.ReferencedFields.push_back(*fieldIndex);
                     const auto& field = schema.fields[*fieldIndex];
-                    const auto& value = current.optional_value();
-                    if (!value.has_value()) {
+                    const auto& comparisonValue = current.optional_value();
+                    if (!comparisonValue.has_value()) {
                         bound.Ops.push_back(TBoundOp{
                             .Kind = EBoundOpKind::PushCompareNull,
                             .FieldIndex = *fieldIndex,
@@ -696,7 +696,7 @@ BindPredicate(const Predicate& predicate, const SchemaSpec& schema, const std::s
                         });
                         break;
                     }
-                    auto literal = CheckLiteral(field, *value);
+                    auto literal = CheckLiteral(field, *comparisonValue);
                     if (!literal) {
                         return std::unexpected(literal.error());
                     }
@@ -990,6 +990,9 @@ Result<std::shared_ptr<arrow::Array>>
 TakeRows(const arrow::Array& column, std::span<const int64_t> rows, arrow::MemoryPool* pool)
 {
     try {
+        if (pool == nullptr) {
+            pool = arrow::default_memory_pool();
+        }
         switch (column.type_id()) {
             case arrow::Type::STRING:
                 return TakeTyped<arrow::StringArray, arrow::StringBuilder>(column, rows, pool);
