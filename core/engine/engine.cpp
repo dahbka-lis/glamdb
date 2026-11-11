@@ -496,7 +496,11 @@ struct Engine::Impl
         std::vector<CollectionView> views;
         views.reserve(current.size());
         for (const auto& collection : current) {
-            views.push_back({collection, catalog->Base(collection.collection_id)});
+            CollectionView view{collection, catalog->Base(collection.collection_id)};
+            if (backend) {
+                view.scan_state = Take(backend->VerifiedScanState(view.base));
+            }
+            views.push_back(std::move(view));
         }
         std::lock_guard lock(state_mutex);
         collections = std::move(current);
@@ -985,9 +989,13 @@ CreateOutcome Engine::CreateCollection(const CreateCollectionRequest& request)
                     *context->candidate_metadata_location,
                     CommitDisposition::Committed);
             }
+        }
+        // Pin the confirmed storage generation before corruption can revoke
+        // it after COMMIT. Revocation must not change a known committed result.
+        impl->RefreshCache();
+        if (gate.owns_lock()) {
             gate.unlock();
         }
-        impl->RefreshCache();
         return {CommitDisposition::Committed, CommitPhase::Complete, created, std::nullopt, std::nullopt};
     } catch (const Failure& error) {
         if (publication_started && context && context->candidate_metadata_location) {
@@ -1280,9 +1288,13 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
                     *context.candidate_metadata_location,
                     CommitDisposition::Committed);
             }
+        }
+        // Publish the matching index/view while the commit gate still protects
+        // the successful handoff from concurrent corruption invalidation.
+        impl->RefreshCache();
+        if (gate.owns_lock()) {
             gate.unlock();
         }
-        impl->RefreshCache();
         {
             std::lock_guard state_lock(impl->state_mutex);
             impl->active.reset();
@@ -1493,6 +1505,7 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
             });
             Require(view != impl->confirmed_views.end(), "CORRUPTION", "confirmed collection view is missing");
             context.Base = view->base;
+            context.VerifiedState = view->scan_state;
             ++impl->root_readers[context.Base.metadata_location];
             leased_root = context.Base.metadata_location;
         }
@@ -1504,7 +1517,8 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
             impl->CloseOnCorruption(error);
         };
         auto cursor = OpenScan(std::move(context), request);
-        // Planning has read the root; the cursor needs only files that are never removed.
+        // Planning pinned membership or read the uncached root. The cursor now
+        // needs only files that are never removed.
         release_root();
         if (!cursor) {
             impl->CloseOnCorruption(cursor.error());

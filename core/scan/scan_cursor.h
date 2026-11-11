@@ -10,6 +10,10 @@ namespace iceberg {
 class FileIO;
 } // namespace iceberg
 
+namespace NGlamDB::NStorage {
+struct TBaseState;
+}
+
 namespace glamdb::detail {
 
 struct TScanContext
@@ -25,6 +29,7 @@ struct TScanContext
     // locked until the last returned batch, slice or C Data export is released.
     std::shared_ptr<const void> Lease;
     std::function<void(const ErrorDetail&)> OnError;
+    std::shared_ptr<const NGlamDB::NStorage::TBaseState> VerifiedState{};
 };
 
 Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanRequest& request);

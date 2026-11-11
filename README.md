@@ -25,6 +25,9 @@ Tests cover real files, injected failures and fresh-process recovery.
 A storage backend connecting these primitives to the coordinator and a minimal
 scanner (`Engine::Scan`) are implemented and tested through `glamdb_vertical`;
 see [SCANNER.md](docs/development/SCANNER.md).
+Native scans reuse an immutable [verified membership index](docs/development/SCAN_INDEX.md)
+for fixed latest, historical and initial-empty views. Publication and reopen
+derive it from authoritative Iceberg metadata; healthy scan planning reads no manifests.
 The [installed public API consumer](docs/development/BUILDING.md#build-and-install)
 checks real A/B appends, fixed-view scans, persisted receipts and retries after
 reopening in a new process, with a separate storage-disabled contour.

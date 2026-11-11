@@ -782,6 +782,8 @@ Status TLocalStorageBackend::VerifyRetained(const StoreInfo& store,
     std::span<const CollectionView> collections,
     std::span<const OperationRecord> operations)
 {
+    // A failed rebuild must not leave the previous generation available.
+    InvalidateCache();
     return Guarded<Status>([&]() -> Status {
         // Verification only reads; a set write latch does not block it.
         CheckStore(store);
@@ -857,6 +859,16 @@ Result<std::shared_ptr<iceberg::FileIO>> TLocalStorageBackend::ReadOnlyFileIO()
             RetryHint::OperatorAction});
     }
     return std::shared_ptr<iceberg::FileIO>(std::move(*view));
+}
+
+Result<std::shared_ptr<const NStorage::TBaseState>> TLocalStorageBackend::VerifiedScanState(const BaseIdentity& base)
+{
+    return Guarded<Result<std::shared_ptr<const NStorage::TBaseState>>>([&] {
+        Require(base.store_id == Store_.store_id, "CORRUPTION", "scan index belongs to a different store");
+        auto state = ResolveBase(base);
+        Require(state->ScanIndex != nullptr, "CORRUPTION", "verified storage has no scan index");
+        return state;
+    });
 }
 
 void TLocalStorageBackend::RecordCandidate(std::string_view collectionID,

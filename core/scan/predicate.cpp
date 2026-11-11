@@ -173,7 +173,8 @@ CompareOp Predicate::op() const noexcept
 const Literal& Predicate::value() const noexcept
 {
     static const Literal EmptyLiteral{std::string{}};
-    return (node_ && node_->optional_value) ? *node_->optional_value : EmptyLiteral;
+    const auto& literal = optional_value();
+    return literal ? *literal : EmptyLiteral;
 }
 
 const OptionalLiteral& Predicate::optional_value() const noexcept
@@ -340,9 +341,10 @@ bool Matches(CompareOp op, const T& left, const T& right)
     return false;
 }
 
+// Arrow uses signed row offsets; strip lengths follow the output span's size.
 template <typename TArray, typename TValue>
 void EvalCompareTyped(const arrow::Array& column,
-    int64_t offset,
+    int64_t offset, // NOLINT(bugprone-easily-swappable-parameters)
     size_t count,
     CompareOp op,
     const TValue& literal,
@@ -396,9 +398,10 @@ void EvalCompareStrip(const arrow::Array& column,
     }
 }
 
+// Arrow uses signed row offsets; strip lengths follow the output span's size.
 template <typename TArray, typename TElement, typename TProject>
 void EvalInTyped(const arrow::Array& column,
-    int64_t offset,
+    int64_t offset, // NOLINT(bugprone-easily-swappable-parameters)
     size_t count,
     std::span<const TElement> sortedValues,
     bool hasNull,
@@ -571,7 +574,8 @@ Result<TBoundPredicate> BindPredicate(const Predicate& predicate, const SchemaSp
                     }
                     bound.ReferencedFields.push_back(*fieldIndex);
                     const auto& field = schema.fields[*fieldIndex];
-                    if (!current.optional_value().has_value()) {
+                    const auto& optionalValue = current.optional_value();
+                    if (!optionalValue.has_value()) {
                         bound.Ops.push_back(TBoundOp{
                             .Kind = EBoundOpKind::PushCompareNull,
                             .FieldIndex = *fieldIndex,
@@ -580,7 +584,7 @@ Result<TBoundPredicate> BindPredicate(const Predicate& predicate, const SchemaSp
                         });
                         break;
                     }
-                    auto literal = CheckLiteral(field, *current.optional_value());
+                    auto literal = CheckLiteral(field, *optionalValue);
                     if (!literal) {
                         return std::unexpected(literal.error());
                     }

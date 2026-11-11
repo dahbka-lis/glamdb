@@ -299,7 +299,8 @@ private:
     const std::shared_ptr<iceberg::Schema> FileSchema_;
     const std::shared_ptr<arrow::Schema> OutputSchema_;
     const ScanInfo Info_;
-    // Manifests are read on demand, so a limited scan opens only what it needs.
+    // Production plans pin verified membership; custom backends can retain
+    // on-demand manifest planning.
     const TScanManifests Plan_;
     const TBoundPredicate Predicate_;
     // Schema field indices in output order, and every field read from files.
@@ -317,6 +318,7 @@ private:
     std::atomic<bool> Cancelled_{false};
     std::optional<ErrorDetail> Failed_;
     size_t NextManifest_ = 0;
+    size_t NextIndexedFile_ = 0;
     std::deque<TScanFile> PendingFiles_;
     // A RecordBatchReader must not outlive its FileReader; members are
     // destroyed in reverse order.
@@ -346,6 +348,9 @@ private:
         while (!Remaining_ || *Remaining_ > 0) {
             CheckActive();
             if (!BatchReader_) {
+                if (Plan_.Index && NextIndexedFile_ < Plan_.FileCount) {
+                    PendingFiles_.push_back(Plan_.Index->Files[Plan_.FileCount - ++NextIndexedFile_]);
+                }
                 while (PendingFiles_.empty() && NextManifest_ < Plan_.Manifests.size()) {
                     CheckActive();
                     auto files = Take(ManifestFiles(Context_.FileIO, Plan_, NextManifest_++));
@@ -528,7 +533,9 @@ Result<std::shared_ptr<ScanCursor>> OpenScan(TScanContext context, const ScanReq
                 BoundedDiagnostic("collection schema profile: " + profile.error().message),
                 RetryHint::OperatorAction});
         }
-        auto plan = Take(PlanManifests(context.FileIO, context.Base, request.selector));
+        auto plan =
+            Take(context.VerifiedState ? PlanVerifiedScan(*context.VerifiedState, context.Base, request.selector)
+                                       : PlanManifests(context.FileIO, context.Base, request.selector));
         return std::make_shared<TScanCursor>(std::move(context),
             std::move(profile->Schema),
             arrow::schema(std::move(fields)),
