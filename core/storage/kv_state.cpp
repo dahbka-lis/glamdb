@@ -717,6 +717,7 @@ iceberg::Result<TBaseState> CheckKVTransition(const std::shared_ptr<iceberg::Fil
     }
     if (compact) {
         std::vector<const TScanDataFile*> orderedBase;
+        orderedBase.reserve(baseLive.size());
         for (const auto& path : baseLive) {
             orderedBase.push_back(&index.Files[proof.Known.at(path)]);
         }
@@ -736,6 +737,7 @@ iceberg::Result<TBaseState> CheckKVTransition(const std::shared_ptr<iceberg::Fil
             }
         }
         std::vector<const TScanDataFile*> removedFiles;
+        removedFiles.reserve(actualRemoved.size());
         std::vector<const TScanDataFile*> addedFiles;
         for (const auto& path : actualRemoved) {
             removedFiles.push_back(&index.Files[proof.Known.at(path)]);

@@ -14,6 +14,7 @@
 #include <iceberg/catalog/memory/in_memory_catalog.h>
 #include <iceberg/manifest/manifest_entry.h>
 #include <iceberg/manifest/manifest_list.h>
+#include <iceberg/manifest/manifest_reader.h>
 #include <iceberg/snapshot.h>
 #include <iceberg/table.h>
 #include <iceberg/transaction.h>
@@ -309,7 +310,8 @@ TEST_F(TKVClosureTest, RecoveryRetainsOldOriginsAndIntervalsAcrossSeveralManifes
     smallWorkspace.RecoveryWorkspaceBytes = 8192;
     const auto refused = VerifyReachable(IO_, (*state)->MetadataLocation, StoreID, CollectionID, smallWorkspace);
     ASSERT_FALSE(refused);
-    EXPECT_NE(refused.error().message.find("CAPACITY"), std::string::npos);
+    EXPECT_EQ(refused.error().kind, iceberg::ErrorKind::kValidationFailed);
+    EXPECT_EQ(refused.error().message, "Recovery metadata exceeds storage capacity.");
 }
 
 TEST_F(TKVClosureTest, RejectsUnsortedAndDuplicatePhysicalKeys)

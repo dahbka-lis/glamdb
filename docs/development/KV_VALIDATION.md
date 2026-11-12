@@ -59,29 +59,61 @@ exercise sample per size, with raw I/O and RSS. These are measurements, not
 random-write latency guarantees. Physical power loss, 1 TiB qualification,
 retention/GC, remote storage and multiwriter operation remain outside this work.
 
-## Recorded checks before upstream integration
+## Recorded checks after upstream integration
 
-On the feature implementation over reference `37b58fa`:
+The complete feature was rebased onto official main
+`8f615bc83b8ff026b4e313a714cd565c9aafcc77`. Integration preserves streamed HTTP
+bulk append, cached warehouse inventory, merge-append, streamed catalog history,
+configured reader admission, hardened footers and optional cache admission.
 
-- Full Release CTest: 1,159 enabled entries, zero failures, including native HTTP,
-  faults, admin, installed consumer and tooling. Twelve standalone child or
-  opt-in measurement entries skipped; four existing manual campaigns disabled.
-- Installed consumer with storage disabled: passed independent write/reopen
-  processes and explicit dependency-error expectations.
-- Python SDK: 919 passed. UI unit: 251 passed. Native Chromium: 13 passed.
-- Actual native KV HTTP/SDK/CLI/restart scenario: passed every scalar, precise
-  timestamps, canonical prepared identity and saved no-op retry.
-- Both 4/16 GiB component pairs and native campaigns completed; raw evidence and
-  scope are linked above.
-- Combined ASan/UBSan: 167 unit, 202 storage, 23 mock and 102 selected vertical
-  cases passed, with three expected standalone child/measurement skips. The
-  selected native set includes KV, bulk, fault, snapshot and input-lifetime tests.
-  Leak detection remained enabled and no sanitizer error was suppressed.
-- LLVM 18 formatting passed for all 313 project files; quality negative checks
-  rejected deliberate format/analyzer violations. New KV units and changed
-  runtime units passed individual tidy checks. The full-project tidy run also
-  reports existing diagnostics in transport, pruning, verifier, vendor code and
-  legacy tests (including the existing write-settings suite).
+- Full Release build and CTest: 1,227 enabled entries, zero failures. Thirteen
+  standalone child or opt-in measurement entries skipped; four existing manual
+  campaigns remain disabled. Native HTTP KV/all-scalar/restart, streamed HTTP
+  bulk, ordinary/bulk append, fault recovery, admin, tooling and the installed
+  consumer all passed.
+- Storage-disabled installed consumer: passed separate write/reopen processes
+  and explicit dependency-error expectations after rebuilding the public API.
+- Python SDK: 932 passed. UI unit: 251 passed. Native Chromium: 13 passed.
+- Combined ASan/UBSan with leak detection: 172 unit, 217 storage, 24 mock and
+  110 selected vertical cases passed. Three standalone child/measurement entries
+  skipped; parent fault tests invoke their recovery children separately. The
+  selected native set covers KV, bulk, faults, snapshots, scan/index admission
+  and owned-input lifetime. No runtime sanitizer error was suppressed.
+- Both 4/16 GiB native campaigns were rebuilt from scratch on the integrated
+  implementation; clustered mutation, historical full-row lookup, no-ops,
+  compaction and fresh-process reopen passed. The raw record identifies the
+  measured binary separately from subsequent analyzer-only cleanup.
+  The final rebuilt binary also reopened both large fixtures and passed a new
+  64 MiB build/exercise/reopen campaign.
+- LLVM 18 formatting passed across all 328 project files. Quality negative
+  checks rejected deliberate format/analyzer violations. Integrated KV
+  recovery, scan, producer, API, catalog, native server and CLI units and new
+  regressions passed individual tidy checks after resolving their diagnostics.
+  The earlier full-project tidy campaign was not green: it also reports
+  existing diagnostics in transport, pruning, verifier, vendor code and legacy
+  tests, including the existing write-settings suite. This work does not claim
+  a clean whole-project analyzer baseline.
+
+A fresh independent integration review also ran five native probes. Its longer
+probe executed 520 operations across catalog pages, retained 260 distinct no-op
+roots and receipts, held the original cursor across 259 COW transitions, and
+verified latest/history plus exact receipt replay after reopening. All probes
+passed, with no residual concrete finding in the bounded review.
+
+Integration regressions cover actual merged-manifest migration chronology,
+unknown metric fields and contradictory physical column sizes, the exact
+rewritten-input metadata budget, twelve recovery transitions retaining old
+origins/intervals, shared warehouse inventory reuse and route-copy admission
+before output files. The new history test's first run correctly refused its
+tiny recovery workspace through the shared capacity guard; its diagnostic
+assertion was corrected and rerun. The missing direct test reader include and
+three integrated analyzer diagnostics were also corrected before acceptance.
+
+The private recovery proof avoids copying all retained COW history per step;
+normal publication still copies the confirmed immutable interval index. Its
+Known/Live/provenance maps remain in memory under the fixed recovery envelope.
+The disk visited-path bound and the 520-operation probe do not qualify arbitrary
+enlarged history profiles for heap use or recovery latency.
 
 The native dependency prefix uses Clang 18/libc++ and pinned Arrow 25. For the
 combined ASan/UBSan profile with that uninstrumented prefix, follow the existing

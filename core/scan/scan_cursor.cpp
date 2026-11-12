@@ -889,9 +889,10 @@ void OrderChronologicalFiles(TScanManifests& plan, const TScanContext& context)
         }
         const auto leaf = std::string_view(file.Path).substr(file.Path.size() - 13);
         Require(ordinal < 256 && std::string_view(file.Path).substr(0, file.Path.size() - 13) == operationPrefix &&
-                leaf.substr(0, 5) == std::format("{:05}", ordinal++),
+                leaf.substr(0, 5) == std::format("{:05}", ordinal),
             "CORRUPTION",
             "chronological source has duplicate or missing producer file ordinals");
+        ++ordinal;
     }
     plan.FileCount = index->Files.size();
     plan.Index = std::move(index);
