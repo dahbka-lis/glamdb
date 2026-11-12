@@ -29,7 +29,7 @@ ENV = dict(os.environ, GLAMDB_TOKEN=TOKEN)
 
 
 @contextlib.contextmanager
-def raw_server(reply, delay=0, requests=None):
+def raw_server(reply, delay=0, requests=None, before_reply=None):
     with socket.socket() as listener:
         listener.bind(('127.0.0.1', 0))
         listener.listen()
@@ -56,6 +56,8 @@ def raw_server(reply, delay=0, requests=None):
                         data += chunk
                     if requests is not None:
                         requests.append(data)
+                    if before_reply is not None:
+                        before_reply()
                     time.sleep(delay)
                     conn.sendall(reply)
             except (BrokenPipeError, ConnectionResetError):
@@ -128,6 +130,45 @@ class Client(unittest.TestCase):
                                           '--collection-id', fixture['collection_id'], '--body', '-', input=b'{}')
                 self.assertEqual(result.returncode, expected[case['name']], result.stderr)
                 self.assertEqual(json.loads(result.stdout), case['response'])
+
+    def test_named_output_failure_preserves_unresolved_exit(self):
+        fixture = json.loads((Path(__file__).resolve().parents[2] / 'fixtures/http/outcomes-v0.json').read_text())
+        expected = {'committed': 4, 'registered_failure': 4, 'unknown_publication': 3, 'blocked_lookup': 3}
+        cases = [(case['name'], case['status'], case['response'], expected[case['name']])
+                 for case in fixture['cases'] if case['name'] in expected]
+        for code in ('OPERATION_IN_PROGRESS', 'RECOVERY_REQUIRED'):
+            cases.append((code, 503, {'error': {'code': code, 'message': 'lookup is blocked',
+                                              'retry_hint': 'SameIdAfterReconcile'}}, 3))
+        for name, status, response, exit_code in cases:
+            body = json.dumps(response).encode()
+            reply = (f'HTTP/1.1 {status} Result\r\nContent-Type: application/json\r\n'
+                     f'Content-Length: {len(body)}\r\n\r\n').encode() + body
+            for command in ('append', 'operation'):
+                for destination in ('stdout', '--output', '--headers'):
+                    with self.subTest(case=name, command=command, destination=destination), \
+                            tempfile.TemporaryDirectory(dir='/tmp') as tmp, open('/dev/full', 'wb') as sink:
+                        output = Path(tmp) / 'response.json'
+                        # Replace a valid destination only after output preflight and the HTTP request.
+                        before_reply = output.mkdir if destination != 'stdout' else None
+                        with raw_server(reply, before_reply=before_reply) as port:
+                            args = [command, '--url', f'http://localhost:{port}',
+                                    '--collection-id', fixture['collection_id']]
+                            if command == 'append':
+                                args += ['--body', '-']
+                            else:
+                                args += ['--operation-id', fixture['appends']['a']['operation_id']]
+                            if destination != 'stdout':
+                                args += [destination, str(output)]
+                            result = subprocess.run([CLI, *args], env=ENV,
+                                input=b'{}' if command == 'append' else None,
+                                stdout=sink if destination == 'stdout' else subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=12)
+                        self.assertEqual(result.returncode, exit_code, result.stderr)
+                        self.assertIn(b'output failed after complete HTTP', result.stderr)
+                        if destination != 'stdout':
+                            self.assertTrue(output.is_dir())
+                            self.assertEqual(result.stdout, b'')
+                            self.assertEqual(list(Path(tmp).glob('*.tmp.*')), [])
 
     def test_lost_named_scan_reply_is_a_read_failure(self):
         with raw_server(b'') as port:

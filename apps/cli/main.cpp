@@ -250,6 +250,8 @@ try {
     auto headerOutput = PrepareOutput(headers);
     const auto response =
         data.Command.empty() ? glamdb::NClient::SendRequest(input) : glamdb::NClient::SendDataRequest(input, data);
+    const auto result = data.Command.empty() ? (response.Status >= 200 && response.Status < 300 ? 0 : 1)
+                                             : glamdb::NClient::DataExitCode(response);
     try {
         if (!headers.empty()) {
             Write(headers, HeaderJson(response).dump(2) + '\n', headerOutput.get());
@@ -261,10 +263,9 @@ try {
             std::cerr << "; server operation may already have committed";
         }
         std::cerr << '\n';
-        return 4;
+        return result == 3 ? 3 : 4;
     }
-    return data.Command.empty() ? (response.Status >= 200 && response.Status < 300 ? 0 : 1)
-                                : glamdb::NClient::DataExitCode(response);
+    return result;
 } catch (const glamdb::NClient::TOutcomeUnknown& error) {
     std::cerr << error.what() << '\n';
     return 3;

@@ -3,9 +3,11 @@
 Issue #52 was implemented against upstream revision
 `135651d596e4efd4e477b6f42d3f7eedcd711e5e`, including the final PR #19 baseline
 and completed native server, codec and route dependencies (#48, #49, #51).
-The branch was subsequently rebased onto `ad323022e4f9f553047f5c061b713715b1d41c43`
-to retain concurrent client-conformance and capacity documentation; its runtime code is
-unchanged. CLI test selection for MSan is described below. Validation below was
+The branch was subsequently rebased onto `d7c6be128ab31b0f3429e1b7482d594b3bc8ea3e`
+to retain concurrent client-conformance, capacity and browser-lifecycle changes.
+Those upstream integrations do not change the CLI runtime implementation. The
+follow-up output-error correction is described below. CLI test selection for
+MSan is described below. Validation below was
 executed on Linux x86-64 with Clang 18 and the repository's
 pinned SQLite/Arrow/Parquet/Iceberg installation on 2026-11-12.
 
@@ -42,12 +44,15 @@ cannot downgrade an unresolved outcome. These are adapter control-flow tests;
 they do not inject an actual simultaneous native uncertain commit and failed
 shutdown. Native core uncertainty and recovery retain their separate fault suites.
 
-A separate read-only review checked the implementation, critiqued its design and
-considered failure cases and invariants. It found three issues, each reproduced
+Independent read-only reviews checked the implementation, critiqued its design and
+considered failure cases and invariants. They found four issues, each reproduced
 by a failing regression before correction: shutdown obscuring an operation
-response, repeated page envelopes counted against the final result, and scan
-disconnects classified as unresolved writes. The final implementation preserves
-outcomes, charges one output envelope, and treats failed scans as read failures.
+response, repeated page envelopes counted against the final result, scan
+disconnects classified as unresolved writes, and network output failures masking
+complete unresolved outcomes. The final implementation preserves outcomes and
+unresolved exit 3 through output failures, charges one output envelope, and treats
+failed scans as read failures. The follow-up reviewer inspected the output-error
+correction and found no remaining actionable issues.
 
 Complete bounded JSON was retained over a page-at-a-time default: it avoids
 successful partial output, while the existing `request` command remains available
@@ -59,13 +64,19 @@ Executed checks:
 
 - Full native Debug build with `GLAMDB_BUILD_ADMIN=ON`: PASS.
 - `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 ctest --test-dir
-  build/local --parallel 4 --output-on-failure`: zero failures out of 765 enabled
-  tests (767 discovered; two disabled, seven expected child/manual skips).
+  build/local --parallel 4 --output-on-failure`: zero failures out of 766 enabled
+  tests (768 discovered; 759 passed, two disabled, seven expected child/manual
+  skips). This full run includes the follow-up correction and final upstream rebase.
 - Standalone `cmake -S apps/cli -B build/client52 -G Ninja
   -DCMAKE_CXX_COMPILER=clang++-18`, build and native/wire suites: PASS
-  (eight native scenarios and 19 wire/TLS tests).
+  (eight native scenarios and 20 wire/TLS tests).
+- The output-error regression covers 36 combinations of append/operation lookup,
+  stdout/body-file/header-file failures, and unresolved/confirmed responses. It
+  first failed in all 24 unresolved combinations with exit 4 instead of 3, then
+  passed after the correction. Atomic temporary-file cleanup is checked too.
 - `cmake --build build/local --target format-check quality-negative-check`: PASS.
-- `clang-tidy-18 -p build/local` on all eight changed C++ translation units: PASS.
+- `clang-tidy-18 -p build/local` on all eight changed C++ translation units: PASS;
+  CLI main was rechecked after the follow-up correction.
 - After rebasing, the updated upstream tooling and CLI/outcome selection passed
   all seven selected CTest cases. The final CLI/outcome selection passed all six
   cases after separating native admin HTTP from the MSan profile.
