@@ -157,9 +157,13 @@ ceiling and exercises all public metadata APIs.
 
 ## Remaining growth cost
 
-Retained manifest lists still grow quadratically with per-collection append
-history. More available operation slots do not remove that cost. Incremental
-manifest structures or a normalized snapshot index would require additional
-publication/recovery invariants and compatibility work. Receipt expiration and
+The recorded campaign predates the bounded latest-manifest-list producer in
+[PR #183](https://github.com/glamourdb/glamdb/pull/183). Its quadratic list growth
+and ingest timings describe that earlier producer and do not predict the newer
+producer's growth. Retained snapshots and rewritten manifests still require
+explicit count and byte budgets.
+
+A normalized snapshot index could accelerate recovery, but would need its own
+publication/recovery invariant and compatibility work. Receipt expiration and
 silent request coalescing would change the contract and are not alternatives
 implemented by this profile. Physical durability qualification remains unchanged.

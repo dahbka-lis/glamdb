@@ -210,12 +210,15 @@ caps and the GCC atomic-shared-pointer fallback. The review
 checked the combined resource reservations and compatibility with legacy HTTP
 limits alongside the current registry format.
 
-Retained manifest lists still grow quadratically with per-collection history.
-Incremental manifest structures could reduce that cost; a normalized snapshot
-index would introduce another publication/recovery invariant and migration.
-Neither is necessary to qualify this finite profile. A dedicated equality query
-could also avoid scanning unrelated collections during filtered inventories;
-the current keyset query remains bounded and correct with at most 64 collections.
+The measured producer has quadratic retained manifest-list growth. The newer
+target branch includes [PR #183](https://github.com/glamourdb/glamdb/pull/183),
+which bounds latest manifest lists; the recorded measurements and earlier
+integration results do not qualify that newer producer's growth or performance.
+Retained snapshots and manifest rewrites still consume explicit budgets.
+A normalized snapshot index could accelerate recovery, but would introduce
+another publication/recovery invariant and migration. A dedicated equality query
+could avoid scanning unrelated collections during filtered inventories; the
+current keyset query remains bounded and correct with at most 64 collections.
 
 The measured state qualifies 8,661 ordinary commits and 8,669 permanent
 operations under this profile and workload. Configured headroom of 12,000
