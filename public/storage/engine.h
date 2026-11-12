@@ -32,7 +32,14 @@ public:
     // No catalog/file I/O and no writer wait; remains callable during recovery/shutdown.
     StoreHealth GetHealth() const;
     EngineCapabilities GetCapabilities() const;
+    // Bounded physical inventory; refuses while a writer/recovery owns the store.
+    Result<StorageFootprint> GetStorageFootprint() const;
     Result<SnapshotHistory> ListSnapshots(std::string_view collection_id) const;
+    Result<SnapshotRetentionPolicy> GetSnapshotRetention(std::string_view collection_id) const;
+    // Explicit metadata maintenance, serialized with appends. Already planned
+    // cursors continue reading. New reads/preconditions on expired IDs report
+    // SNAPSHOT_EXPIRED. An uncertain publication requires Reconcile and retry.
+    Result<SnapshotExpirationResult> ExpireSnapshots(const SnapshotExpirationRequest& request);
     Result<CollectionStatistics> GetStatistics(std::string_view collection_id,
         SnapshotSelector selector = SnapshotSelector::Latest()) const;
     Result<TFileListing> ListFiles(std::string_view collectionID,

@@ -5,7 +5,7 @@
   "status": "PASS",
   "cases_run": 2,
   "scope": "Real standalone CLI, native managed server and verified TLS proxy; one fully verified native SF0.01 target first completes normal two-process Arrow scans for all 22 queries, then is reused for SIGINT and SIGTERM. Every normal source alias count is checked against an independent source oracle. The proxy holds the first interrupted Arrow page after scan/open and never forwards that page. Native occupancy is sampled over loopback HTTP before fallback cleanup. Workload and cancellation requests use verified TLS; interruption summaries are mandatory.",
-  "base_commit": "784e2daa931e7faeb52e06e80867caa9a227238c",
+  "base_commit": "e1bacea4cc708245505aee3d541ba9bcd7d09eba",
   "python": "3.13.18",
   "platform": "Linux-5.4.210-39.1.pagevecsize-x86_64-with-glibc2.39",
   "installed_versions": {
@@ -19,11 +19,11 @@
   "binaries": {
     "cli": {
       "path": "/home/ditimizhev/glam/glamdb/build/client-standalone/glamdb-cli",
-      "sha256": "5eb0c2332ebf468667b7b585e673a4a8be846f03c2472e81563682eb6839e0c0"
+      "sha256": "2e82329b1f236d46d8524c563a881fb54cacb16cfce433883171f7b024122dbe"
     },
     "server": {
       "path": "/home/ditimizhev/glam/glamdb/build/release/apps/server/glamdb",
-      "sha256": "f709c150917ce79b2986198036ee7227bc7397d92e17eca4e31ae0784e1954fd"
+      "sha256": "ccd9110ace20ee53a2234985ae9cdb6dd076005a7177097f71000f5bc5c9342e"
     }
   },
   "driver": {
@@ -33,7 +33,7 @@
   "workload_sources": {
     "tools/workload/src/glamdb_workload/tpch_scan.py": "cf5fc63033a8a4153a9011bdf1dc592f6e0b0fdbba088468f92eb55e910a9b64",
     "tools/workload/src/glamdb_workload/tpch_locust.py": "83faad9b26e3d95cf25b0349b04c71d7713acab4ae743b3ad1bbd67c07517d59",
-    "sdk/python/src/glamdb_sdk/client.py": "71be2a9712834eaa492babed7b1ce7d4c6d9dd2294614425dad441b39649654d"
+    "sdk/python/src/glamdb_sdk/client.py": "1aabbc66b48b88599440d5b7063d862d7dce97eafa77a2ef5e320713d84de8ff"
   },
   "command": [
     "/home/ditimizhev/glam/glamdb/artifacts/issue157/venv313/bin/python",
@@ -43,7 +43,7 @@
     "--dataset",
     "artifacts/issue157/sf001-native",
     "--report-root",
-    "artifacts/issue157/acceptance-interruption-final"
+    "artifacts/issue157/acceptance-main-integration"
   ],
   "dataset": {
     "id": "sha256:9d7da1b31e4f07305a10466c355b4370e726d0ece6e300201be4f6263fcb37e1",
@@ -89,7 +89,7 @@
         "tpch",
         "scan",
         "--state",
-        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-interruption-final/interrupt_target/run/run.json",
+        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-main-integration/interrupt_target/run/run.json",
         "--queries",
         "1",
         "--mode",
@@ -109,14 +109,14 @@
         "--timeout",
         "20",
         "--report",
-        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-interruption-final/interrupt_target/sigint",
+        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-main-integration/interrupt_target/sigint",
         "--ca-file",
-        "/tmp/glamdb-tpch-30a_3j0t/tls/test-ca.pem"
+        "/tmp/glamdb-tpch-w9aaqlp0/tls/test-ca.pem"
       ],
       "format": "arrow",
       "status": "PASS",
       "returncode": 130,
-      "signal_to_exit_seconds": 0.2506474799956777,
+      "signal_to_exit_seconds": 0.27624386500247056,
       "held_cursor_count": 1,
       "proxy_cancel_requests": 1,
       "test_cleanup_cancellations": 0,
@@ -164,14 +164,14 @@
             "completed_replays": 8,
             "executing_calls": 0,
             "live_cursors": 0,
-            "replay_body_bytes": 314712,
+            "replay_body_bytes": 316336,
             "replay_reserved_bytes": 134217728
           },
           "database": {
             "completed_replays": 8,
             "executing_calls": 0,
             "live_cursors": 0,
-            "replay_body_bytes": 314712,
+            "replay_body_bytes": 316336,
             "replay_reserved_bytes": 134217728
           },
           "cancellations": 0,
@@ -182,14 +182,14 @@
             "completed_replays": 7,
             "executing_calls": 0,
             "live_cursors": 1,
-            "replay_body_bytes": 249688,
+            "replay_body_bytes": 311520,
             "replay_reserved_bytes": 134217728
           },
           "database": {
             "completed_replays": 7,
             "executing_calls": 0,
             "live_cursors": 1,
-            "replay_body_bytes": 249688,
+            "replay_body_bytes": 311520,
             "replay_reserved_bytes": 134217728
           },
           "cancellations": 0,
@@ -200,14 +200,14 @@
             "completed_replays": 7,
             "executing_calls": 0,
             "live_cursors": 0,
-            "replay_body_bytes": 249688,
+            "replay_body_bytes": 311520,
             "replay_reserved_bytes": 117440512
           },
           "database": {
             "completed_replays": 7,
             "executing_calls": 0,
             "live_cursors": 0,
-            "replay_body_bytes": 249688,
+            "replay_body_bytes": 311520,
             "replay_reserved_bytes": 117440512
           },
           "cancellations": 1,
@@ -218,14 +218,14 @@
             "completed_replays": 7,
             "executing_calls": 0,
             "live_cursors": 0,
-            "replay_body_bytes": 249688,
+            "replay_body_bytes": 311520,
             "replay_reserved_bytes": 117440512
           },
           "database": {
             "completed_replays": 7,
             "executing_calls": 0,
             "live_cursors": 0,
-            "replay_body_bytes": 249688,
+            "replay_body_bytes": 311520,
             "replay_reserved_bytes": 117440512
           },
           "cancellations": 1,
@@ -234,20 +234,20 @@
       },
       "observed_owned_processes": [
         {
-          "pid": 1429530,
-          "ppid": 1429529,
-          "created": 1794498740.08,
-          "pgid": 1429529,
-          "session_id": 1429529,
-          "rss_bytes": 79851520
+          "pid": 1473634,
+          "ppid": 1473633,
+          "created": 1794499720.91,
+          "pgid": 1473633,
+          "session_id": 1473633,
+          "rss_bytes": 79974400
         },
         {
-          "pid": 1429658,
-          "ppid": 1429530,
-          "created": 1794498743.38,
-          "pgid": 1429658,
-          "session_id": 1429658,
-          "rss_bytes": 98955264
+          "pid": 1473664,
+          "ppid": 1473634,
+          "created": 1794499724.01,
+          "pgid": 1473664,
+          "session_id": 1473664,
+          "rss_bytes": 98873344
         }
       ],
       "locust_stop_timeout_seconds": 0,
@@ -262,7 +262,7 @@
         "tpch",
         "scan",
         "--state",
-        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-interruption-final/interrupt_target/run/run.json",
+        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-main-integration/interrupt_target/run/run.json",
         "--queries",
         "1",
         "--mode",
@@ -282,14 +282,14 @@
         "--timeout",
         "20",
         "--report",
-        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-interruption-final/interrupt_target/sigterm",
+        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-main-integration/interrupt_target/sigterm",
         "--ca-file",
-        "/tmp/glamdb-tpch-30a_3j0t/tls/test-ca.pem"
+        "/tmp/glamdb-tpch-w9aaqlp0/tls/test-ca.pem"
       ],
       "format": "arrow",
       "status": "PASS",
       "returncode": 143,
-      "signal_to_exit_seconds": 0.27568900100595783,
+      "signal_to_exit_seconds": 0.2741588540011435,
       "held_cursor_count": 1,
       "proxy_cancel_requests": 1,
       "test_cleanup_cancellations": 0,
@@ -337,14 +337,14 @@
             "completed_replays": 7,
             "executing_calls": 0,
             "live_cursors": 0,
-            "replay_body_bytes": 249688,
+            "replay_body_bytes": 311520,
             "replay_reserved_bytes": 117440512
           },
           "database": {
             "completed_replays": 7,
             "executing_calls": 0,
             "live_cursors": 0,
-            "replay_body_bytes": 249688,
+            "replay_body_bytes": 311520,
             "replay_reserved_bytes": 117440512
           },
           "cancellations": 1,
@@ -355,14 +355,14 @@
             "completed_replays": 7,
             "executing_calls": 0,
             "live_cursors": 1,
-            "replay_body_bytes": 249688,
+            "replay_body_bytes": 311520,
             "replay_reserved_bytes": 134217728
           },
           "database": {
             "completed_replays": 7,
             "executing_calls": 0,
             "live_cursors": 1,
-            "replay_body_bytes": 249688,
+            "replay_body_bytes": 311520,
             "replay_reserved_bytes": 134217728
           },
           "cancellations": 1,
@@ -373,14 +373,14 @@
             "completed_replays": 7,
             "executing_calls": 0,
             "live_cursors": 0,
-            "replay_body_bytes": 249688,
+            "replay_body_bytes": 311520,
             "replay_reserved_bytes": 117440512
           },
           "database": {
             "completed_replays": 7,
             "executing_calls": 0,
             "live_cursors": 0,
-            "replay_body_bytes": 249688,
+            "replay_body_bytes": 311520,
             "replay_reserved_bytes": 117440512
           },
           "cancellations": 2,
@@ -391,14 +391,14 @@
             "completed_replays": 7,
             "executing_calls": 0,
             "live_cursors": 0,
-            "replay_body_bytes": 249688,
+            "replay_body_bytes": 311520,
             "replay_reserved_bytes": 117440512
           },
           "database": {
             "completed_replays": 7,
             "executing_calls": 0,
             "live_cursors": 0,
-            "replay_body_bytes": 249688,
+            "replay_body_bytes": 311520,
             "replay_reserved_bytes": 117440512
           },
           "cancellations": 2,
@@ -407,20 +407,20 @@
       },
       "observed_owned_processes": [
         {
-          "pid": 1429670,
-          "ppid": 1429669,
-          "created": 1794498744.31,
-          "pgid": 1429669,
-          "session_id": 1429669,
-          "rss_bytes": 79843328
+          "pid": 1473680,
+          "ppid": 1473679,
+          "created": 1794499725.05,
+          "pgid": 1473679,
+          "session_id": 1473679,
+          "rss_bytes": 80211968
         },
         {
-          "pid": 1429741,
-          "ppid": 1429670,
-          "created": 1794498747.18,
-          "pgid": 1429741,
-          "session_id": 1429741,
-          "rss_bytes": 98623488
+          "pid": 1473725,
+          "ppid": 1473680,
+          "created": 1794499728.25,
+          "pgid": 1473725,
+          "session_id": 1473725,
+          "rss_bytes": 99004416
         }
       ],
       "locust_stop_timeout_seconds": 0,
@@ -435,19 +435,19 @@
         "tpch",
         "init",
         "--url",
-        "https://localhost:43921",
+        "https://localhost:42201",
         "--dataset",
         "/home/ditimizhev/glam/glamdb/artifacts/issue157/sf001-native",
         "--name",
-        "tpch-acceptance-506b1e7e59",
+        "tpch-acceptance-3332d60381",
         "--state",
-        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-interruption-final/interrupt_target/run/run.json",
+        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-main-integration/interrupt_target/run/run.json",
         "--ca-file",
-        "/tmp/glamdb-tpch-30a_3j0t/tls/test-ca.pem"
+        "/tmp/glamdb-tpch-w9aaqlp0/tls/test-ca.pem"
       ],
       "returncode": 0,
-      "elapsed_seconds": 3.3337177380017238,
-      "child_cpu_seconds": 3.1965049999999997
+      "elapsed_seconds": 3.386622021003859,
+      "child_cpu_seconds": 3.205028
     },
     {
       "argv": [
@@ -456,17 +456,17 @@
         "tpch",
         "load",
         "--state",
-        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-interruption-final/interrupt_target/run/run.json",
+        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-main-integration/interrupt_target/run/run.json",
         "--workers",
         "3",
         "--batch-rows",
         "5000",
         "--ca-file",
-        "/tmp/glamdb-tpch-30a_3j0t/tls/test-ca.pem"
+        "/tmp/glamdb-tpch-w9aaqlp0/tls/test-ca.pem"
       ],
       "returncode": 0,
-      "elapsed_seconds": 39.59013213599974,
-      "child_cpu_seconds": 37.170341
+      "elapsed_seconds": 39.760013653001806,
+      "child_cpu_seconds": 37.337074
     },
     {
       "argv": [
@@ -475,7 +475,7 @@
         "tpch",
         "scan",
         "--state",
-        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-interruption-final/interrupt_target/run/run.json",
+        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-main-integration/interrupt_target/run/run.json",
         "--queries",
         "all",
         "--mode",
@@ -493,13 +493,13 @@
         "--repeat",
         "1",
         "--report",
-        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-interruption-final/interrupt_target/run-scan-arrow",
+        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-main-integration/interrupt_target/run-scan-arrow",
         "--ca-file",
-        "/tmp/glamdb-tpch-30a_3j0t/tls/test-ca.pem"
+        "/tmp/glamdb-tpch-w9aaqlp0/tls/test-ca.pem"
       ],
       "returncode": 0,
-      "elapsed_seconds": 10.442023493000306,
-      "child_cpu_seconds": 9.080886999999999
+      "elapsed_seconds": 10.355982904002303,
+      "child_cpu_seconds": 8.756866000000004
     },
     {
       "argv": [
@@ -508,30 +508,30 @@
         "tpch",
         "clean",
         "--state",
-        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-interruption-final/interrupt_target/run/run.json",
+        "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-main-integration/interrupt_target/run/run.json",
         "--ca-file",
-        "/tmp/glamdb-tpch-30a_3j0t/tls/test-ca.pem"
+        "/tmp/glamdb-tpch-w9aaqlp0/tls/test-ca.pem"
       ],
       "returncode": 0,
-      "elapsed_seconds": 0.3507964809978148,
-      "child_cpu_seconds": 0.3049209999999971
+      "elapsed_seconds": 0.40448077600012766,
+      "child_cpu_seconds": 0.334884999999995
     }
   ],
   "initial_load_metrics": {
-    "elapsed_seconds": 11.313008708006237,
-    "cpu_seconds": 9.443694139,
-    "peak_rss_kib": 159616,
+    "elapsed_seconds": 10.908189809997566,
+    "cpu_seconds": 8.999751273,
+    "peak_rss_kib": 160248,
     "journal_bytes": 31174656,
     "confirmed_rows_this_run": 86805,
     "workers": 3,
     "publication_concurrency": 1
   },
   "resources": {
-    "server_peak_rss_kib": 194896,
-    "store_file_peak_bytes": 3100758,
+    "server_peak_rss_kib": 180448,
+    "store_file_peak_bytes": 3100708,
     "store_allocated_peak_bytes": 3276800
   },
-  "elapsed_seconds": 66.03248390800582,
+  "elapsed_seconds": 66.27364734800358,
   "measurement_units": {
     "signal_to_exit_seconds": "Monotonic elapsed time from sending a signal only to the CLI PID until its wait completes; excludes source preflight, dataset load and evidence reads.",
     "server_peak_rss_kib": "Native server VmHWM, Linux KiB, sampled after commands.",
@@ -558,7 +558,7 @@
     },
     "boundary": "Locust previously allowed active tasks 3 seconds to stop, exceeding the controller process-group grace of 2 seconds. The blocked user was killed before its SDK cursor cancellation could run."
   },
-  "raw_evidence": "artifacts/issue157/acceptance-interruption-final/interruption.json",
+  "raw_evidence": "artifacts/issue157/acceptance-main-integration/interruption.json",
   "not_run_by_this_driver": [
     "JSON scan interruption",
     "distributed-worker interruption with a native held cursor",
@@ -590,8 +590,8 @@
     "expected_measured_queries": 44,
     "expected_workers": 2,
     "observed_workers": [
-      "71308c9a04b33e9e",
-      "fc39f402169390d8"
+      "92f2be70977409d9",
+      "9692aa4e1d455fd7"
     ],
     "independent_source_candidate_counts_verified": true,
     "stages": {
@@ -940,23 +940,23 @@
         "completed": 2
       }
     },
-    "elapsed_seconds": 4.057940481994592,
-    "measured_elapsed_seconds": 2.8675353430007817,
-    "rss_peak_bytes": 96591872,
+    "elapsed_seconds": 3.840286475002358,
+    "measured_elapsed_seconds": 2.658025919001375,
+    "rss_peak_bytes": 96907264,
     "client_cpu": {
       "saturation_threshold_percent": 85.0,
       "generator_saturated": false,
       "processes": [
         {
-          "worker": "71308c9a04b33e9e",
-          "cpu_seconds": 1.8499999999999999,
-          "cpu_percent_one_core": 62.07314689631964,
+          "worker": "92f2be70977409d9",
+          "cpu_seconds": 1.54,
+          "cpu_percent_one_core": 56.16158695382736,
           "saturated": false
         },
         {
-          "worker": "fc39f402169390d8",
-          "cpu_seconds": 1.68,
-          "cpu_percent_one_core": 56.429695541228156,
+          "worker": "9692aa4e1d455fd7",
+          "cpu_seconds": 1.5900000000000003,
+          "cpu_percent_one_core": 57.506264368935376,
           "saturated": false
         }
       ],
@@ -1005,20 +1005,33 @@
           "rejections_by_code": {},
           "errors_by_code": {}
         },
-        "elapsed_seconds": 4.057940481994592,
+        "elapsed_seconds": 3.840286475002358,
         "measurement_started": null,
         "measurement_ended": null,
-        "cpu_seconds": 0.13999999999999996,
-        "cpu_percent_one_core": 3.45002595827098,
+        "cpu_seconds": 0.10999999999999993,
+        "cpu_percent_one_core": 2.864369643150968,
         "locust_cpu_peak_percent": null,
-        "rss_peak_bytes": 96899072
+        "rss_peak_bytes": 96768000
       }
     },
-    "report": "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-interruption-final/interrupt_target/run-scan-arrow",
-    "summary_sha256": "c02e9c4adbf783d3a6130fca4bf3fef19a2914767dc19f7cd17f80ea1ba90151",
+    "report": "/home/ditimizhev/glam/glamdb/artifacts/issue157/acceptance-main-integration/interrupt_target/run-scan-arrow",
+    "summary_sha256": "8e1eb7fe3a56c3ec2214e893dea05e22f666d6b65fae141febeb31aac7f7014f",
     "locust_stop_timeout_seconds": 0
   },
-  "started_utc": "2026-11-12T15:51:23.851653+00:00",
-  "finished_utc": "2026-11-12T15:52:29.928449+00:00",
-  "raw_evidence_sha256": "21c7218be8af1ad08e550dec05187b228600dd19a43ebdf8209090f3121dc1f9"
+  "started_utc": "2026-11-12T16:07:44.696622+00:00",
+  "finished_utc": "2026-11-12T16:08:51.018506+00:00",
+  "raw_evidence_sha256": "b16ff7c52774045ba6c5598c6e43bfc56e62043614548b297d19681ccb2b5906",
+  "main_integration": {
+    "head_at_run_start": "e1bacea4cc708245505aee3d541ba9bcd7d09eba",
+    "merged_official_main": "8532c4966fa1da5ce03c54bb5e0067311648fa29",
+    "shared_routing_source_sha256": {
+      "apps/cli/workload.cpp": "30a343e35f9522a3a5fc5de14ee809b83de2fd91aa0c161d930178036739d86f",
+      "tools/workload/src/glamdb_workload/__main__.py": "37551b1b4c3989ef5bc85b3922ab7a3a938832fd038256c2091d8f2912be13d4"
+    }
+  },
+  "previous_verified_run": {
+    "evidence_commit": "e1bacea4cc708245505aee3d541ba9bcd7d09eba",
+    "raw_evidence": "artifacts/issue157/acceptance-interruption-final/interruption.json",
+    "raw_evidence_sha256": "21c7218be8af1ad08e550dec05187b228600dd19a43ebdf8209090f3121dc1f9"
+  }
 }

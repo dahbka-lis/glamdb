@@ -253,6 +253,8 @@ See the
 [workload guide](../../tools/workload/README.md) for installation, exact outcome
 journals, Locust reports and native E2E. Ordinary requests do not require Python.
 
+ClickBench commands and examples: [workload adapter](../../tools/workload/CLICKBENCH.md).
+
 ## Native bulk upload
 
 ```sh

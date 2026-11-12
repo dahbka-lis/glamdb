@@ -25,6 +25,7 @@ struct CollectionView
     // Pinned together with the engine's confirmed view. Custom backends may
     // omit this and use the uncached authoritative planner.
     std::shared_ptr<const NGlamDB::NStorage::TBaseState> scan_state{};
+    std::vector<ExpiredSnapshotRecord> expired_snapshots{};
 };
 
 class StagedCreate
@@ -52,6 +53,18 @@ public:
     virtual Status VerifyClosure(std::string_view final_metadata_location) = 0;
 };
 
+class StagedExpiration
+{
+public:
+    virtual ~StagedExpiration() = default;
+    virtual std::span<const ExpiredSnapshotRecord> Expired() const = 0;
+    virtual std::span<const std::string> Garbage() const = 0;
+    virtual SnapshotRetentionPolicy Policy() const = 0;
+    virtual bool Changed() const = 0;
+    virtual iceberg::Status Publish(iceberg::sql::CatalogStore& catalog) = 0;
+    virtual Status VerifyClosure(std::string_view location) = 0;
+};
+
 class StorageBackend
 {
 public:
@@ -62,6 +75,12 @@ public:
         bool write_failure_latched = false;
     };
     virtual ~StorageBackend() = default;
+    virtual Result<StorageFootprint> GetStorageFootprint()
+    {
+        return std::unexpected(ErrorDetail{"DEPENDENCY_UNAVAILABLE",
+            "physical store inventory is not installed",
+            RetryHint::OperatorAction});
+    }
     virtual EngineCapabilities GetCapabilities() const
     {
         return {.backend = BackendKind::Custom};
@@ -90,6 +109,19 @@ public:
         const CollectionInfo& collection,
         const NormalizedInput& input,
         std::chrono::steady_clock::time_point deadline) = 0;
+    virtual Result<std::unique_ptr<StagedExpiration>> PrepareExpiration(const StoreInfo&,
+        const CollectionInfo&,
+        const BaseIdentity&,
+        const std::optional<SnapshotRetentionPolicy>&)
+    {
+        return std::unexpected(
+            ErrorDetail{"DEPENDENCY_UNAVAILABLE", "snapshot maintenance is not installed", RetryHint::OperatorAction});
+    }
+    virtual Status RemoveExpiredMetadata(std::string_view, std::string_view)
+    {
+        return std::unexpected(
+            ErrorDetail{"DEPENDENCY_UNAVAILABLE", "metadata cleanup is not installed", RetryHint::OperatorAction});
+    }
     // Called only after the outer pointer/receipt transaction has resolved.
     // Committed promotes the exact candidate; DefinitelyNotCommitted discards
     // it; CommitUnknown revokes the verified generation until recovery.

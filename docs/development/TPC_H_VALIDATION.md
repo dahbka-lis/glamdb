@@ -3,7 +3,8 @@
 This records executed evidence for the command family in [TPC_H.md](TPC_H.md),
 on 2026-11-12. The original campaigns use native source baseline
 `5881c3bd1f8dd8c276f991771f39bf070c163241`; final integration and interruption
-checks rebuild against official main `8f615bc`. Each artifact retains the
+checks rebuild against official main `8f615bc`, followed by integration with
+`8532c49` and another native rerun. Each artifact retains the
 applicable binary/source hashes. It does not qualify the SF=1/SF=10 gates of
 [issue #157](https://github.com/glamourdb/glamdb/issues/157).
 
@@ -56,10 +57,16 @@ explicitly recorded invocations.
 
 ## Regression and supported-runtime checks
 
-The complete final repository suite passed on Python 3.13.18: **1,706 tests,
-39 skips and 12 subtests** in 224.16 seconds, with two dependency deprecation
+The complete final repository suite passed on Python 3.13.18: **1,757 tests,
+39 skips and 12 subtests** in 202.59 seconds, with two dependency deprecation
 warnings. This includes the final distributed completion and signal regressions;
 the focused scan suite also passed all **34 tests**.
+
+Integration with `8532c49` preserves both benchmark command families: 58 focused
+TPC-H/ClickBench routing checks pass. Server/standalone builds, the four native
+CLI/database CTests, formatting of 310 files, quality-negative checks and targeted
+clang-tidy pass again. A separate reviewer verified that the resolved dispatcher
+and merged C++ bridge retain the original TPC-H behavior.
 
 Native server, linked CLI and standalone client builds passed. The native
 `cli_workload_bridge`, `cli_network`, `database_drop` and `database_limits` CTest

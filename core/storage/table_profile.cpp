@@ -1,5 +1,6 @@
 #include "core/storage/table_profile.h"
 #include "core/storage/iceberg_error_boundary.h"
+#include "core/storage/snapshot_retention.h"
 
 #include <arrow/util/utf8.h>
 #include <iceberg/schema.h>
@@ -12,8 +13,6 @@
 namespace NGlamDB::NStorage {
 using iceberg::Error;
 namespace {
-
-constexpr std::size_t MaxSchemaFields = 64;
 
 std::shared_ptr<iceberg::Type> IcebergType(const TFieldSpec& field)
 {
@@ -43,7 +42,7 @@ iceberg::Result<TTableProfile> MakeTableProfile(const TSchemaSpec& spec)
     return CatchIcebergExceptions([&]() -> iceberg::Result<TTableProfile> {
         constexpr std::size_t maxNameBytes = 128;
         if (spec.Fields.empty() || spec.Fields.size() > MaxSchemaFields) {
-            return iceberg::InvalidArgument("Schema must contain 1..64 fields");
+            return iceberg::InvalidArgument("Schema must contain 1..128 fields");
         }
         arrow::util::InitializeUTF8();
         std::vector<iceberg::SchemaField> fields;
@@ -142,7 +141,9 @@ iceberg::Status CheckTableProfile(const TTableProfile& profile)
             spec.Fields.push_back(std::move(specField));
         }
         ICEBERG_ASSIGN_OR_RAISE(auto expected, MakeTableProfile(spec));
-        if (*profile.Schema != *expected.Schema || profile.Properties != expected.Properties) {
+        auto properties = profile.Properties;
+        ICEBERG_RETURN_UNEXPECTED(StripRetentionProperties(properties));
+        if (*profile.Schema != *expected.Schema || properties != expected.Properties) {
             return iceberg::ValidationFailed("Table profile differs from the fixed schema and properties.");
         }
         return {};
