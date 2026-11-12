@@ -185,7 +185,8 @@ Executed on Linux x86-64 with Clang 18/libc++ on 2026-11-12:
   failures across 781 enabled entries (seven helper/manual entries skipped;
   two benchmarks disabled).
 - Native SDK, backend harness and browser-process lifecycle conformance:
-  all 23 checks passed against the native server and physical file inspector.
+  the combined SDK and native conformance selection passed all 595 checks after
+  integrating the Arrow client changes; all 160 UI unit checks also passed.
 - ASan/UBSan with leak detection: all 27 focused session, rollback, quota and
   real native profile cases passed. LeakSanitizer discovery was rerun outside
   the restricted ptrace sandbox.
