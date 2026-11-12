@@ -470,6 +470,11 @@ calls finish independently of read/queue deadlines. Outcome
 lookup never waits on an in-progress catalog publication. Health and capabilities
 run on the I/O thread. Core retains its single serialized writer.
 
+Operation outcome lookup returns 503 `OPERATION_IN_PROGRESS` with
+`SameIdAfterReconcile` while the catalog lock is busy, including during another
+metadata read. This transient response does not replace the recorded receipt;
+look up the same operation ID again after the competing call finishes.
+
 `--http-readers` configures active reader workers globally (1–4, default 4);
 `--http-readers-per-database` configures active readers per database (1 through
 the global limit, default 2). Invalid profiles fail before opening the service
