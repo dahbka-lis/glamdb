@@ -77,4 +77,5 @@ docs/development/CLICKBENCH_VALIDATION.md and compact measured evidence.
       reproducibility, client/server measurement boundaries and actual evidence.
 - [x] Run relevant Python, C++ formatting/build, CLI and native E2E checks.
 - [x] Obtain independent whole-branch review and address actionable findings.
-- [ ] Commit, push to the user's fork and create an English pull request.
+- [x] Commit, push to the user's fork and create an English pull request.
+      Published as [PR #198](https://github.com/glamourdb/glamdb/pull/198).
