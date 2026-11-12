@@ -73,3 +73,13 @@ scheduling and attempt deduplication. A split request rejects any global LIMIT,
 including zero; ordinary serial scans retain their existing limit semantics.
 The view lifetime governs future split admissions, while admitted cursors and
 returned buffers retain independent leases. These methods have no HTTP routes.
+
+## Native scan negotiation
+
+Contract 1.3 [scan negotiation](SCAN_NEGOTIATION.md) classifies translated
+conjuncts as exact, necessary conditions or unsupported residuals. A necessary
+condition can eliminate rows and files while preserving the original expression
+for compute evaluation. Residual and operator inputs remain in the storage
+projection until compute finishes. Global limits stay in compute for split
+execution, residual filters or ordered results. Storage does not execute sorting,
+casts, functions or locale collations through this API.
