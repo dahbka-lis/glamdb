@@ -125,6 +125,25 @@ KV mutation support). KV upsert replaces full rows and deterministically applies
 last-wins duplicate input; keyed delete is safe for absent/repeated keys. This
 is not SQL MERGE or arbitrary update support. See [KV mode](KV_MODE.md).
 
+## Schema and field identity
+
+Field identity is scoped to a collection. Its full `SchemaSpec.fields`, returned
+in `CollectionInfo.schema` or by `SchemaForAppend`, assigns stable `FieldID`
+values **1..N in original field order**: zero-based ordinal `i` maps to
+`FieldID = i + 1`. Fixed schemas preserve this mapping across snapshots; the
+same numeric ID in another collection does not identify the same field.
+
+Correlate `TFileFieldMetrics.FieldID` from file metrics and
+`TColumnChunkMetadata.FieldID` from row-group columns with
+`collection.schema.fields[FieldID - 1]`. Match the resulting original field name
+to projected Arrow field names. The current public Arrow schema carries names,
+types and nullability but **no field-ID metadata**. A projection can omit or
+reorder fields, so its output ordinal must not be used to reconstruct IDs.
+For original fields `[key, n]`, projection `[n, key]` returns `n` first, but its
+stable ID remains 2 and `key` remains 1. Consumers must retain the full original
+collection name-to-ID mapping and collection identity when correlating metrics
+with projected batches. See [metadata](METADATA.md).
+
 ## Views, batches and lifetime
 
 `Scan` resolves Latest exactly once to a retained snapshot ID or
@@ -176,10 +195,13 @@ transport capability formats are unchanged by this native contract.
 `EffectiveLimits.Engine` copies the actual `Engine::GetLimits()` selection,
 including configured collection, operation, catalog, owned-input, writer wait,
 deadline and retained-history budgets. The additional fields expose current
-validation ceilings: 128 schema fields, 10,000 ordinary append rows, 16 MiB
-canonical decoded append bytes, 65,536 scan batch rows, 25,600,000 bulk rows,
-4 GiB bulk decoded bytes, 4,096 lookup keys and 10,000 delete keys. Operation
-ceilings are meaningful only when the corresponding operation is advertised.
+validation ceilings: 128 schema fields, 10,000 ordinary append/upsert input rows,
+16 MiB canonical decoded append/upsert input bytes, 65,536 scan batch rows,
+25,600,000 bulk rows, 4 GiB bulk decoded bytes, 4,096 lookup keys and 10,000 delete
+keys. `AppendRows` and `AppendDecodedBytes` constrain ordinary `AppendDurable`
+and `UpsertDurable` input before KV duplicate resolution. They remain applicable
+in KV mode when `Upsert` is advertised, even though `Append` is not advertised.
+Other operation ceilings apply when their corresponding operation is advertised.
 Bulk sources still obey their per-batch 10,000-row/16 MiB bounds, per-file limits
 and replay/lifetime rules in `BulkAppendLimits` and the bulk guide. These limits
 are not wire-body limits and do not promise that every combination fits shared

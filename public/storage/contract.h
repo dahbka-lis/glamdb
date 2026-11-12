@@ -73,12 +73,14 @@ struct TStorageContractRequest
     std::vector<EStorageFeature> RequiredFeatures{};
 };
 
-// Validation ceilings, not reservations or guaranteed available capacity. Operation
-// ceilings apply only when that operation is advertised; shared admission still applies.
+// Validation ceilings, not reservations or guaranteed available capacity. Ceilings
+// apply to supported operations as described below; shared admission still applies.
 struct TStorageContractLimits
 {
     Limits Engine{};
     int64_t SchemaFields = 0;
+    // Shared ordinary AppendDurable/UpsertDurable input ceilings, before KV
+    // duplicate resolution. Apply when Upsert is advertised even if Append is not.
     int64_t AppendRows = 0;
     int64_t AppendDecodedBytes = 0;
     int64_t ScanBatchRows = 0;
