@@ -1,8 +1,10 @@
 # TPC-H workload validation and review
 
 This records executed evidence for the command family in [TPC_H.md](TPC_H.md),
-against native source baseline `5881c3bd1f8dd8c276f991771f39bf070c163241` on
-2026-11-12. It does not qualify the complete SF=1/SF=10 acceptance gates of
+on 2026-11-12. The original campaigns use native source baseline
+`5881c3bd1f8dd8c276f991771f39bf070c163241`; final integration and interruption
+checks rebuild against official main `8f615bc`. Each artifact retains the
+applicable binary/source hashes. It does not qualify the SF=1/SF=10 gates of
 [issue #157](https://github.com/glamourdb/glamdb/issues/157).
 
 ## Native development-scale evidence
@@ -54,9 +56,10 @@ explicitly recorded invocations.
 
 ## Regression and supported-runtime checks
 
-The complete repository Python suite passed **1,693 tests, 31 skips and 12
-subtests**, with two dependency deprecation warnings. A subsequent final signal
-edge-case regression increased the scan suite to **33 passing tests**.
+The complete final repository suite passed on Python 3.13.18: **1,706 tests,
+39 skips and 12 subtests** in 224.16 seconds, with two dependency deprecation
+warnings. This includes the final distributed completion and signal regressions;
+the focused scan suite also passed all **34 tests**.
 
 Native server, linked CLI and standalone client builds passed. The native
 `cli_workload_bridge`, `cli_network`, `database_drop` and `database_limits` CTest
@@ -68,8 +71,9 @@ requirements, with no dependency or lockfile changes. The standalone bridge
 passed all ten tests; the existing generic native TLS workload passed all four
 cases, including interruption and lost-reply resolution.
 
-All **1,148 workload/SDK tests pass on Python 3.13.18**, including the final
-ignored-signal regression. A fresh native verified-TLS TPC-H lifecycle also
+A separate targeted run passed **1,148 workload/SDK tests on Python 3.13.18**,
+including the ignored-signal regression; the final complete suite above covers
+the subsequent integration and report-drain fix. A fresh native verified-TLS TPC-H lifecycle also
 passes: all eight tables, full JSON/Arrow verification, Q1–Q22 candidate counts,
 exact Q1/Q6, two processes, restart/resume, clean and reload. Its [separate
 evidence](evidence/tpch-python313-2026-11-12.json) records the actual final
@@ -82,7 +86,7 @@ projections or isolated storage throughput.
 ## Independent review, critique and alternatives
 
 A separate read-only reviewer inspected the implementation, native contracts,
-reference query templates and recorded evidence. Five important defects were
+reference query templates and recorded evidence. Seven important defects were
 reproduced and corrected; no critical defect was established. The final pass
 also tested strict manifest parsing and actual compiled-CLI process ownership.
 
@@ -93,6 +97,8 @@ also tested strict manifest parsing and actual compiled-CLI process ownership.
 | A refused POST may leave its operation unbound | Preserve a lookup-required state and per-attempt outcome evidence. Only authoritative lookup seals a bound failure or permits explicit retry after absence. Real TLS refusal/restored-limit recovery passes. |
 | Full verification requires every original receipt | Cross-check frozen state/journal plan digests, inventory bijection, body hashes and cached counters. Removing an earlier chunk/receipt or altering counters now fails. Native initial/first/final snapshots and original receipts pass. |
 | CLI exit must stop its process descendants | Scoped termination unwinding and bounded private-group cleanup handle leader-first exit, stubborn workers, repeated signals and launch handoff. Actual CLI tests verify exits 130/143 and no live child/grandchild. |
+| A reachable native cursor must be cancelled before forced process shutdown | A held-page native test reproduced a three-second Locust user-stop wait exceeding the controller's two-second grace period. Stop users immediately so SDK cursor contexts unwind first. Both real TLS interruption cases now cancel the native cursor before CLI exit and retain cancelled-query reports. |
+| Normal distributed completion must collect terminal worker statistics | Immediate user stop must not shorten report collection. A reproduced two-worker refusal case completed all six queries but returned INCOMPLETE. A separate five-second drain and six-second outer bound preserve acknowledgements; production-zero local/distributed success and refusal regressions pass. |
 
 Minor corrections reject duplicate JSON keys, boolean versions and contradictory
 recorded generator provenance; distinguish advertised capabilities from server
@@ -112,6 +118,19 @@ have recorded them; the later Python 3.13 lifecycle records them explicitly.
 
 The review supports the corrected architecture within the executed development
 profile. It does not prove the absence of bugs at unmeasured scales.
+
+The [native interruption evidence](evidence/tpch-interruption-2026-11-12.json)
+uses the rebuilt current-main binaries and Python 3.13.18. Its normal TLS Arrow
+round completes 44 queries across two processes, returning 1,985,072 rows with
+all 86 stage counts independently checked. It then holds an
+Arrow page after the native cursor opens and signals only the compiled CLI.
+SIGINT exits 130 and SIGTERM exits 143 within the native bridge deadline. Each
+cursor changes from live=1 to live=0 via an actual `/scan/cancel`, without a TTL
+expiry or fallback test cancellation. No live or zombie descendants remain;
+the saved state and request journal are unchanged. Both partial summaries are
+INCOMPLETE with one offered/cancelled query and zero completed queries; the
+driver requires those summaries to exist. The separate
+`tpch_interrupt_test.py` driver preserves this behavioral regression.
 
 ## Open qualification gates
 

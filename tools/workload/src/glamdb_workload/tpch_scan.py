@@ -331,7 +331,9 @@ def run(state, *, queries="all", mode="scan", format="arrow", consume="batches",
               "timeout": timeout, "ca_file": ca_file, "queries": queries, "plans": plans,
               "mode": mode, "format": format, "consume": consume,
               "users": users, "processes": processes, "warmup": warmup, "repeat": repeat,
-              "report": str(Path(report).resolve()), "stop_timeout": 3,
+              # Interrupted users must unwind SDK cursor contexts before the
+              # supervisor's two-second process-group termination deadline.
+              "report": str(Path(report).resolve()), "stop_timeout": 0,
               "master_host": "127.0.0.1", "dataset": str(dataset.path),
               "dataset_sha256": digest, "dataset_id": dataset.manifest.get("dataset_id"),
               "scale_factor": dataset.scale_factor, "type_profile": dataset.profile,

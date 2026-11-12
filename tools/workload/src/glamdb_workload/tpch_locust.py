@@ -79,6 +79,9 @@ from glamdb_workload.tpch_scan import PageCountingTransport, execute_query
 
 
 STATE = None
+# Worker quit sends terminal statistics after stop() fires test_stop. Keep the
+# master RPC receiver alive for that acknowledgement independently of task grace.
+REPORT_DRAIN_SECONDS = 5
 
 
 def _population():
@@ -216,7 +219,7 @@ def on_stopping(environment, **kwargs):
     clients = {client.id for client in environment.runner.clients.all}
     for client in clients:
         environment.runner.send_message("quit", client_id=client)
-    until = time.monotonic() + state.config["stop_timeout"] + 1
+    until = time.monotonic() + REPORT_DRAIN_SECONDS
     while not clients.issubset(state.finished_clients) and time.monotonic() < until:
         gevent.sleep(0.02)
     state.drain_complete = len(clients) == state.config["processes"] and clients.issubset(state.finished_clients)
@@ -233,7 +236,8 @@ def on_quitting(environment, **kwargs):
     state = STATE
     if state is None: return
     if state.master:
-        with gevent.Timeout(state.config["stop_timeout"] + 1, False):
+        # Leave time to record the inner drain outcome before this outer bound.
+        with gevent.Timeout(REPORT_DRAIN_SECONDS + 1, False):
             environment.runner.stop()
     else:
         environment.runner.stop()

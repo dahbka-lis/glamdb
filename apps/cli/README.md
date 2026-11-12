@@ -297,6 +297,7 @@ TPC-H network commands take credentials exclusively from `GLAMDB_TOKEN`, accept
 `--ca-file`, and require verified HTTPS outside loopback. Their SDK deadline is
 `--timeout 30` seconds by default, or 300 for verify/scan. Workload exits are
 `0` PASS, `1` FAIL, `2` invalid configuration/usage, `3` INCOMPLETE, `4` missing
-interpreter/dependency, and `130` interrupted. Generation returns `0` only after
+interpreter/dependency, `130` interrupted by SIGINT, and `143` by SIGTERM.
+Generation returns `0` only after
 publishing a completed manifest; cleanup validates the exact saved deletion
 identity before returning success.

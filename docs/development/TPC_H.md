@@ -309,9 +309,13 @@ that invocation. Physical store allocation and server build/resources require
 separate supervisor measurements, as in the native acceptance evidence.
 
 The controller owns a private process group for Locust. CLI SIGINT/SIGTERM
-unwinds the controller, terminates its workers with a bounded grace period and
+unwinds the controller and stops users immediately so SDK cursor cancellation
+runs before the process group's two-second termination deadline. It
 reaps the child before the native bridge's five-second allowance. Repeated
 signals cannot bypass that cleanup.
+Normal distributed completion has a separate five-second terminal-report drain
+and a six-second outer stop bound. This keeps the master's receiver alive for
+worker statistics without delaying user cancellation.
 
 ## Exact cleanup
 

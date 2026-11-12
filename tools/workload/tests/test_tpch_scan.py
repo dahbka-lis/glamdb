@@ -173,7 +173,7 @@ class MetricsDouble(BaseHTTPRequestHandler):
         return self.reply(200, dict(metadata(), rows=[{"l_extendedprice": "100.00", "l_discount": "0.06"}], next_cursor="second" if body["cursor"] == "first" else None, profile={}))
 
 
-@pytest.mark.parametrize("processes,users,warmup,refuse", [(1, 2, 1, 0), (2, 3, 0, 3)])
+@pytest.mark.parametrize("processes,users,warmup,refuse", [(1, 2, 1, 0), (2, 3, 0, 0), (2, 3, 0, 3)])
 def test_locust_owns_finite_repetitions_and_merges_refusal_histograms(tmp_path, processes, users, warmup, refuse):
     server = ThreadingHTTPServer(("127.0.0.1", 0), MetricsDouble)
     server.counter_lock, server.offered, server.refuse_every = threading.Lock(), 0, refuse
@@ -184,7 +184,7 @@ def test_locust_owns_finite_repetitions_and_merges_refusal_histograms(tmp_path, 
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         master_port = probe.getsockname()[1]
-    config = dict(url=f"http://127.0.0.1:{server.server_port}", database="11111111-1111-4111-8111-111111111111", timeout=10, ca_file=None, plans=[bound_plan()], mode="reduce", format="json", consume="rows", users=users, processes=processes, warmup=warmup, repeat=2, report=str(report), reference_results={"6": {"revenue": "12.00"}}, master_host="127.0.0.1", master_port=master_port, stop_timeout=3)
+    config = dict(url=f"http://127.0.0.1:{server.server_port}", database="11111111-1111-4111-8111-111111111111", timeout=10, ca_file=None, plans=[bound_plan()], mode="reduce", format="json", consume="rows", users=users, processes=processes, warmup=warmup, repeat=2, report=str(report), reference_results={"6": {"revenue": "12.00"}}, master_host="127.0.0.1", master_port=master_port, stop_timeout=0)
     path = report / "run.json"
     path.write_text(json.dumps(config))
     try:
