@@ -72,24 +72,33 @@ class CmakeConfigurationTest(unittest.TestCase):
         self.assertFalse(list(self.build.rglob("glamdb")))
 
     def test_nested_configure_preserves_active_language_flags(self):
+        c_flags = " ".join(filter(None, (
+            os.environ.get("GLAMDB_TEST_C_FLAGS"), "-Wno-unused-parameter",
+        )))
+        cxx_flags = " ".join(filter(None, (
+            os.environ.get("GLAMDB_TEST_CXX_FLAGS"), "-Wno-unused-variable",
+        )))
         with mock.patch.dict(os.environ, {
-            "GLAMDB_TEST_C_FLAGS": "-Wno-unused-parameter",
-            "GLAMDB_TEST_CXX_FLAGS": "-Wno-unused-variable",
+            "GLAMDB_TEST_C_FLAGS": c_flags,
+            "GLAMDB_TEST_CXX_FLAGS": cxx_flags,
         }):
             result = self.configure("-DBUILD_TESTING=OFF")
         self.assertEqual(result.returncode, 0, result.stdout)
         cache = (self.build / "CMakeCache.txt").read_text()
-        self.assertIn("CMAKE_C_FLAGS:STRING=-Wno-unused-parameter", cache)
-        self.assertIn("CMAKE_CXX_FLAGS:STRING=-Wno-unused-variable", cache)
+        self.assertIn(f"CMAKE_C_FLAGS:STRING={c_flags}", cache)
+        self.assertIn(f"CMAKE_CXX_FLAGS:STRING={cxx_flags}", cache)
 
     def test_nested_configure_preserves_active_executable_linker_flags(self):
+        linker_flags = " ".join(filter(None, (
+            os.environ.get("GLAMDB_TEST_EXE_LINKER_FLAGS"), "-Wl,--as-needed",
+        )))
         with mock.patch.dict(os.environ, {
-            "GLAMDB_TEST_EXE_LINKER_FLAGS": "-Wl,--as-needed",
+            "GLAMDB_TEST_EXE_LINKER_FLAGS": linker_flags,
         }):
             result = self.configure("-DBUILD_TESTING=OFF")
         self.assertEqual(result.returncode, 0, result.stdout)
         cache = (self.build / "CMakeCache.txt").read_text()
-        self.assertIn("CMAKE_EXE_LINKER_FLAGS:STRING=-Wl,--as-needed", cache)
+        self.assertIn(f"CMAKE_EXE_LINKER_FLAGS:STRING={linker_flags}", cache)
 
     def test_missing_logging_dependency_explains_initialization(self):
         (self.source / "third_party/quill").unlink()
