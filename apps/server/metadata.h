@@ -1,5 +1,6 @@
 #pragma once
 
+#include "apps/server/scans.h"
 #include "apps/transport/http.h"
 
 #include <chrono>
@@ -11,7 +12,8 @@ EngineCapabilities InstalledCapabilities();
 NTransport::TJson CapabilitiesJson(const EngineCapabilities& capabilities,
     const std::optional<StoreHealth>& health,
     bool databaseManagement,
-    const std::string& storeID = {});
+    const std::string& storeID = {},
+    const TScanLimits& scans = {});
 SnapshotSelector MetadataSelector(const std::map<std::string, std::string>& query);
 NTransport::TJson
 StatisticsJson(const Engine& engine, const std::string& collection, const std::map<std::string, std::string>& query);
@@ -21,7 +23,10 @@ NTransport::TJson FileJson(const Engine& engine,
     const std::string& collection,
     const std::string& file,
     const std::map<std::string, std::string>& query);
-NTransport::TJson ExplainJson(const Engine& engine, const std::string& collection, const NTransport::TJson& body);
+NTransport::TJson ExplainJson(const Engine& engine,
+    const std::string& collection,
+    const NTransport::TJson& body,
+    const TScanLimits& scans = {});
 
 // Bounded, expiring value pages. The first public-facade result and resolved
 // identity are retained, so concurrent appends cannot change later pages.
