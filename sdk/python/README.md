@@ -376,7 +376,8 @@ They cover calendar years 0001–9999 and decode to `date`. Arrow scans require
 `decimal128(precision, scale)` and `date32`; unsupported widths, scales, decimal
 coefficients outside the declared precision, and dates outside the calendar
 range are rejected. Schemas containing decimal/date use canonical schema
-version 2, while the append/hash/receipt version remains 1. Existing schema and
+version 2, while append/hash and ordinary append result receipts remain version 1.
+Bulk operation lookups may return result receipt version 2. Existing schema and
 append hashes retain their original bytes.
 
 `col(name, logical_type)` provides `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `in_`,

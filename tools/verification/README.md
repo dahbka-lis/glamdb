@@ -83,8 +83,8 @@ Unicode normalization, Arrow chunk boundaries, operation ID, or snapshot selecto
 Schemas containing decimal/date use schema version 2; old schemas retain v1
 exactly. Decimal cells contain a signed128 little-endian coefficient and date
 cells a signed32 little-endian count of days since 1970-01-01, after the presence
-byte. Their non-null canonical sizes are 17 and 5 bytes. Append/hash and receipt
-versions remain 1.
+byte. Their non-null canonical sizes are 17 and 5 bytes. Append/hash and ordinary
+append result receipts remain version 1; bulk result receipts use version 2.
 
 The checked-in JSON fixtures and adjacent `.hex` files cover all seven types,
 min/max timestamps and int64 values, int64 above 2^53, nulls, UTF-8, negative zero,
@@ -140,7 +140,7 @@ do not constitute an independent comparison against a C++ scanner or pruning.
 ## Receipts, fault schedules, and evidence
 
 `validate_receipt` checks the full C-RESULT AppendResult shape, UUIDs, supported
-hash/receipt version, digest, exact counters, one-file append mode, and retained
+hash/receipt version, digest, exact counters, ordinary one-file or bounded bulk mode, and retained
 snapshot creation time in whole milliseconds. `canonical_receipt` is the
 controller's deterministic JSON serialization; it makes no claim to define the
 future engine's persisted receipt bytes.

@@ -77,7 +77,9 @@ create receipts; a mismatched precision or scale keeps the write unresolved.
 The legacy disposable mock rejects both native-only types before collection
 creation because its Arrow encoder supports only the existing scalar domain.
 
-Append header, hash, receipt and catalog versions remain unchanged. The schema
+Native scalar types do not change append header, hash or catalog versions.
+Ordinary appends retain result receipt version 1; `BulkAppendDurable` uses
+[result receipt version 2](BULK_INGESTION.md) for its extended counts. The schema
 fingerprint distinguishes the extended domain. A non-NULL decimal encodes its
 coefficient in 16 little-endian two's-complement bytes; a date encodes signed
 int32 epoch days in little endian. Existing presence bytes, scalar encodings,

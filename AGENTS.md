@@ -238,7 +238,8 @@ Preserve these boundaries when adding or changing engine behavior:
   substitutes. See [scalar types](docs/development/SCALAR_TYPES.md) for JSON,
   typed predicates, native file annotations and schema-version compatibility.
   Scalar-only schema/hash fixtures remain byte-for-byte version 1; extended
-  schemas use version 2 while append/hash/receipt formats remain unchanged.
+  schemas use version 2 while append/hash formats remain unchanged. Ordinary
+  append result receipts remain version 1; bulk result receipts use version 2.
   Check decimal bounds against signed limits: absolute-value precision checks
   can overflow for the minimum physical signed 128-bit coefficient.
 - **Bounded resources and retained data.** Account for data, metadata, and
