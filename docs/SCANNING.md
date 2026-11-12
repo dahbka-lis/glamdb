@@ -58,3 +58,18 @@ The [HTTP API](HTTP_SERVER.md) exposes fixed-view JSON/Arrow pages with replay
 and cancellation. The [Python SDK](../sdk/python/README.md) drains those pages
 through context-managed iterators. [Scan session policy](SCAN_SESSIONS.md)
 describes quotas, expiry and retained replay bytes.
+
+## Native read views and scan splits
+
+Contract 1.1 [read views](READ_VIEWS.md) capture an ordered snapshot vector from
+one store for repeated or delayed scans. They retain original verified state
+across publication and explicit append retention. Trusted adapters supply the
+same authorization scope on every use; view handles remain process-local.
+
+Contract 1.2 [scan splits](SCAN_SPLITS.md) page bounded whole-file descriptors
+from one captured entry. Different splits cover disjoint physical membership;
+replaying a descriptor reproduces its selected row multiset. Compute owns
+scheduling and attempt deduplication. A split request rejects any global LIMIT,
+including zero; ordinary serial scans retain their existing limit semantics.
+The view lifetime governs future split admissions, while admitted cursors and
+returned buffers retain independent leases. These methods have no HTTP routes.

@@ -94,6 +94,35 @@ returned pages retain independent leases after engine close. Independently copie
 caller DTOs belong to the host budget. These envelopes do not establish a universal RSS upper bound
 for arbitrary corrupt files.
 
+Native [query read views](READ_VIEWS.md) add three separate ownership layers.
+Each surviving handle/state reserves 4 KiB of ordinary Control, including after
+expiry, cancellation, release or shutdown until its caller drops the terminal
+handle. Registry/capture/immutable entry information reserves 4 KiB plus 256 KiB
+per ordered entry of Metadata; externally retained `TReadViewInfo` keeps that
+reservation after registry removal. The original verified generation keeps its
+existing root/index reservation through aliasing ownership, and each captured
+entry increments a root reader before the state mutex is released. Duplicate
+entries count toward quota but share their original generation's memory charge.
+
+Limits are 32 active views per engine, 8 per exact authorization scope, 64 entries
+per view and 256 total entries; scope strings have at most 256 bytes. Active
+registry/info envelopes are bounded to 64 MiB + 128 KiB per engine, while
+externally retained info and terminal handles remain bounded by their shared
+Metadata/Control parents. They are admission envelopes rather than measured RSS.
+TTL defaults to 30 seconds and renewal cannot extend beyond acquisition + five
+minutes. Acquisition sweeps expired pins **before** shared memory admission,
+then repeats expiry/readiness/quota checks at coherent capture. This can reclaim
+the expired registry's ownership, never externally retained info or terminal
+handles. Partial admission failures release their reservations.
+
+No timer thread reclaims idle expired views. Public view operations and writer
+cleanup sweep expiry; explicit release/cancel, final handle destruction, facade
+destruction and shutdown also remove pins. Physical root/retention unlink stays
+on the writer. Facade destruction preserves admitted cursors; shutdown uses their
+existing cancellation flag. Cursors and retained Arrow output own independent
+leases. See [read-view lifetime](READ_VIEWS.md#ownership-bounds-and-lifetime)
+for scope checks, admission limits and release boundaries.
+
 New appends return a known original receipt before acquiring new execution
 capacity. Before binding a new ID, the coordinator reserves data, metadata,
 ordinary control, completion and device growth. A known result releases the
@@ -157,3 +186,14 @@ reservations; uncertain attempts retain the appropriate envelope until recovery.
 root/manifest/list/footer and recovery budgets. Public larger root limits also
 reach metadata readers and their temporary memory envelopes; default admission
 units remain compatible.
+
+## Native split owners
+
+Contract 1.2 [scan splits](SCAN_SPLITS.md) share the original read-view pin and
+charge plan requests, retained output schema and opaque descriptors independently.
+Plans reserve 4 KiB Control plus 256 KiB + twice measured predicate capacity in
+Metadata, and retain the scanner schema’s 16 MiB Metadata envelope. Each descriptor
+reserves 4 KiB Control including its page-vector slot; no inventory is copied.
+Failed pages refund partial allocations before any position advance. Explicit
+view termination releases registry pins; surviving handles keep their own charges
+until final destruction. See [scan split ownership](SCAN_SPLITS.md#resource-ownership).

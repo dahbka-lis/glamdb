@@ -114,3 +114,14 @@ and list bytes against `max_commit_bytes` before publication. A policy-only chan
 can exceed this budget even when no snapshots expire. Maintenance conservatively
 preserves that verification charge; reclaimed rewrite inputs can remain charged
 until reconciliation rebuilds the retained checkpoint.
+
+## Pinned query views
+
+A native [read view](READ_VIEWS.md) acquired before maintenance retains the
+verified generation and a root reader for each captured entry. Its first scan
+can be planned after expiration and still select the captured history. Expired
+snapshot IDs remain unavailable to new acquisitions. Root retirement and pending
+metadata cleanup wait for these pins just as for existing planners; view
+expiration is swept on writer cleanup. Explicit release, cancellation, final
+handle destruction and shutdown release the pins. Physical unlink remains on
+the writer, and current data files remain retained by the existing profile.

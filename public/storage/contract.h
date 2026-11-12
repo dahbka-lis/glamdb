@@ -1,6 +1,8 @@
 #pragma once
 
 #include "storage/metadata.h"
+#include "storage/read_view.h"
+#include "storage/scan_split.h"
 
 #include <compare>
 #include <cstdint>
@@ -38,7 +40,17 @@ enum class EStorageOperation : uint16_t {
     MigrateAppendToKV,
     Reconcile,
     StorageFootprint,
-    Shutdown
+    Shutdown,
+    AcquireReadView,
+    ReadViewInfo,
+    ScanReadView,
+    RenewReadView,
+    ReleaseReadView,
+    CancelReadView,
+    PlanScan,
+    NextScanSplits,
+    ReadSplit,
+    CancelScanPlan
 };
 
 enum class EStorageFeature : uint16_t {
@@ -48,9 +60,11 @@ enum class EStorageFeature : uint16_t {
     AuthoritativeOutcomes,
     SnapshotPreconditions,
     DurableNoOp,
-    // Proposed capabilities: never advertised by contract 1.0.
+    // Native read views are advertised only from contract 1.1.
     IndependentReadView,
+    // Native splits are advertised only from contract 1.2.
     ScanSplits,
+    // Proposed capabilities: never advertised by contracts 1.0 through 1.2.
     StagedWrites,
     StableCAbi,
     ArrowFlight,
@@ -88,6 +102,9 @@ struct TStorageContractLimits
     int64_t BulkDecodedBytes = 0;
     int64_t LookupKeys = 0;
     int64_t DeleteKeys = 0;
+    // Present only when native IndependentReadView is advertised.
+    std::optional<TReadViewLimits> ReadViews{};
+    std::optional<TScanSplitLimits> ScanSplits{};
 };
 
 struct TStorageContract
