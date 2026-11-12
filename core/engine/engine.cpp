@@ -588,7 +588,7 @@ struct Engine::Impl
 
 #if GLAMDB_HAS_STORAGE
     template <class T, class TRead>
-    Result<T> ReadView(std::string_view id, TRead&& read)
+    Result<T> ReadView(std::string_view id, TRead&& read, bool useCache = true)
     {
         std::string root;
         bool leased = false;
@@ -615,8 +615,12 @@ struct Engine::Impl
             }
             Require(backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
             auto memory = Take(resources->Reserve(ResourceClass::Metadata, MetadataWorkBytes));
+            const auto capabilities = backend->GetCapabilities();
             context.Resources = resources;
             context.FileIO = Take(backend->ReadOnlyFileIO());
+            context.Cache = useCache ? backend->ReadMetadataCache() : nullptr;
+            context.EnableFilePruning = capabilities.file_pruning;
+            context.EnableRowGroupPruning = capabilities.row_group_pruning;
             auto result = read(context);
             if (const auto retained = RetainMetadata(resources, result); !retained) {
                 throw Failure(retained.error());
@@ -875,6 +879,7 @@ EngineFactory::Open(const OpenStoreRequest& request, std::shared_ptr<StorageBack
 Result<std::shared_ptr<Engine>>
 EngineFactory::CreateWith(const CreateStoreRequest& request, const BackendFactory& backend, std::string sqlite_vfs)
 {
+    NGlamDB::NTelemetry::TReadOperationScope metrics(NGlamDB::NTelemetry::EReadOperation::CreateStore);
     try {
         auto impl = std::make_shared<Engine::Impl>();
         impl->info = {request.store_id, request.profile_id, 1};
@@ -890,17 +895,21 @@ EngineFactory::CreateWith(const CreateStoreRequest& request, const BackendFactor
             std::move(sqlite_vfs));
         impl->Recover(false);
         impl->lease->MarkReady(impl->info);
-        return std::shared_ptr<Engine>(new Engine(std::move(impl)));
+        return metrics.Finish(Result<std::shared_ptr<Engine>>(std::shared_ptr<Engine>(new Engine(std::move(impl)))));
     } catch (const Failure& error) {
+        metrics.Error(error.detail.code);
         return std::unexpected(error.detail);
     } catch (const std::exception& error) {
-        return std::unexpected(ExceptionError(error));
+        const auto detail = ExceptionError(error);
+        metrics.Error(detail.code);
+        return std::unexpected(detail);
     }
 }
 
 Result<std::shared_ptr<Engine>>
 EngineFactory::OpenWith(const OpenStoreRequest& request, const BackendFactory& backend, std::string sqlite_vfs)
 {
+    NGlamDB::NTelemetry::TReadOperationScope metrics(NGlamDB::NTelemetry::EReadOperation::OpenStore);
     try {
         auto impl = std::make_shared<Engine::Impl>();
         impl->info = {request.expected_store_id, request.profile_id, 1};
@@ -917,11 +926,14 @@ EngineFactory::OpenWith(const OpenStoreRequest& request, const BackendFactory& b
             impl->limits,
             std::move(sqlite_vfs));
         impl->Recover(false);
-        return std::shared_ptr<Engine>(new Engine(std::move(impl)));
+        return metrics.Finish(Result<std::shared_ptr<Engine>>(std::shared_ptr<Engine>(new Engine(std::move(impl)))));
     } catch (const Failure& error) {
+        metrics.Error(error.detail.code);
         return std::unexpected(error.detail);
     } catch (const std::exception& error) {
-        return std::unexpected(ExceptionError(error));
+        const auto detail = ExceptionError(error);
+        metrics.Error(detail.code);
+        return std::unexpected(detail);
     }
 }
 
@@ -1406,9 +1418,14 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
                 "bulk append requires a bounded source, row count and timeout");
             deadline = started + bulk->timeout;
         }
-        const auto payload_hash = bulk
-            ? Take(FingerprintBulkSource(collection.schema, *bulk, deadline))
-            : Take(FingerprintBatches(collection.schema, request.collection_id, request.batches));
+        TFingerprintedInput fingerprinted;
+        if (bulk) {
+            fingerprinted.PayloadHash = Take(FingerprintBulkSource(collection.schema, *bulk, deadline));
+            fingerprinted.Reservation = static_cast<size_t>(BulkAppendLimits::MemoryBytes);
+        } else {
+            fingerprinted = Take(FingerprintInput(collection.schema, request.collection_id, request.batches));
+        }
+        const auto& payload_hash = fingerprinted.PayloadHash;
         if (unresolved) {
             return metrics.Finish(UnresolvedAppend(*unresolved, payload_hash));
         }
@@ -1523,8 +1540,7 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
         }
         // Only a new operation needs owned payload memory. A retry has already
         // returned its original terminal receipt, even under a lower input cap.
-        const auto reservation = bulk ? static_cast<size_t>(BulkAppendLimits::MemoryBytes)
-                                      : Take(InputReservation(collection.schema, request.batches));
+        const auto reservation = fingerprinted.Reservation;
         {
             std::lock_guard lock(impl->state_mutex);
             impl->CheckHealthy(expected_generation);
@@ -1545,7 +1561,7 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
                     return impl->PublicationHealth(expected_generation);
                 }));
         } else {
-            input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches));
+            input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches, reservation));
         }
         Require(input.payload_hash == payload_hash, "INVALID_ARGUMENT", "Arrow input changed during append");
         const auto base = impl->catalog->Base(request.collection_id);
@@ -1607,7 +1623,7 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
             std::nullopt,
             std::nullopt};
         Require(ValidateOutcome(committed).has_value() &&
-                receipt.rows_appended == (input.bulk ? input.bulk->Rows : static_cast<int64_t>(input.rows.size())),
+                receipt.rows_appended == (input.bulk ? input.bulk->Rows : static_cast<int64_t>(input.GetRowCount())),
             "IO_ERROR",
             "producer returned an invalid receipt or row count");
         {
@@ -1654,6 +1670,10 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
             [&] {
                 return staged->Publish(*impl->catalog);
             });
+        // Count a confirmed new publication once. Receipt replay paths never
+        // reach this boundary; a lost/unknown COMMIT response is not counted.
+        NGlamDB::NTelemetry::RecordPublished(static_cast<std::uint64_t>(receipt.rows_appended),
+            static_cast<std::uint64_t>(receipt.compressed_data_bytes_added));
         phase = CommitPhase::Complete;
         if (gate.owns_lock()) {
             if (context.candidate_metadata_location) {
@@ -1775,15 +1795,18 @@ Result<SnapshotHistory> Engine::ListSnapshots(std::string_view id) const
 {
     const auto impl = impl_;
 #if GLAMDB_HAS_STORAGE
-    return impl->ReadView<SnapshotHistory>(id, [&](const TScanContext& context) {
-        std::vector<AppendResult> receipts;
-        for (const auto& record : impl->catalog->Operations()) {
-            if (record.state == OperationState::Committed && record.outcome && record.outcome->result) {
-                receipts.push_back(*record.outcome->result);
+    return impl->ReadView<SnapshotHistory>(
+        id,
+        [&](const TScanContext& context) {
+            std::vector<AppendResult> receipts;
+            for (const auto& record : impl->catalog->Operations()) {
+                if (record.state == OperationState::Committed && record.outcome && record.outcome->result) {
+                    receipts.push_back(*record.outcome->result);
+                }
             }
-        }
-        return ReadHistory(context, receipts);
-    });
+            return ReadHistory(context, receipts);
+        },
+        false);
 #else
     (void)id;
     return std::unexpected(
@@ -1826,9 +1849,12 @@ Result<TFileDetails>
 Engine::GetFileDetails(std::string_view collectionID, std::string_view fileID, SnapshotSelector selector) const
 {
 #if GLAMDB_HAS_STORAGE
-    return impl_->ReadView<TFileDetails>(collectionID, [&](const TScanContext& context) {
-        return ReadFileDetails(context, fileID, selector);
-    });
+    return impl_->ReadView<TFileDetails>(
+        collectionID,
+        [&](const TScanContext& context) {
+            return ReadFileDetails(context, fileID, selector);
+        },
+        false);
 #else
     (void)collectionID;
     (void)fileID;
@@ -1855,6 +1881,7 @@ Result<ScanExplanation> Engine::ExplainScan(const ScanRequest& request) const
 
 Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) const
 {
+    NGlamDB::NTelemetry::TReadOperationScope metrics(NGlamDB::NTelemetry::EReadOperation::ScanOpen);
     const auto impl = impl_;
     // The root this scan resolved; held until planning has read it, so a
     // concurrent append does not remove it underneath the scan.
@@ -1884,8 +1911,12 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
             leased_root = context.Base.metadata_location;
         }
         Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
+        const auto capabilities = impl->backend->GetCapabilities();
         context.Resources = impl->resources;
         context.FileIO = Take(impl->backend->ReadOnlyFileIO());
+        context.Cache = impl->backend->ReadMetadataCache();
+        context.EnableFilePruning = capabilities.file_pruning;
+        context.EnableRowGroupPruning = capabilities.row_group_pruning;
         context.Closing = std::shared_ptr<const std::atomic<bool>>(impl, &impl->closing);
         context.Lease = impl;
         context.OnError = [impl](const ErrorDetail& error) {
@@ -1898,46 +1929,57 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
         if (!cursor) {
             impl->CloseOnCorruption(cursor.error());
         }
-        return cursor;
+        return metrics.Finish(std::move(cursor));
 #else
         throw Failure({"DEPENDENCY_UNAVAILABLE", "storage scanner is not built", RetryHint::OperatorAction});
 #endif
     } catch (const Failure& error) {
         release_root();
         impl->CloseOnCorruption(error.detail);
+        metrics.Error(error.detail.code);
         return std::unexpected(error.detail);
     } catch (const std::exception& error) {
         release_root();
-        return std::unexpected(ExceptionError(error));
+        const auto detail = ExceptionError(error);
+        metrics.Error(detail.code);
+        return std::unexpected(detail);
     }
 }
 
 Status Engine::Reconcile()
 {
+    NGlamDB::NTelemetry::TReadOperationScope metrics(NGlamDB::NTelemetry::EReadOperation::Reconcile);
     const auto impl = impl_;
     std::unique_lock lock(impl->writer, std::try_to_lock);
     if (!lock.owns_lock()) {
+        metrics.Error("OPERATION_IN_PROGRESS");
         return std::unexpected(
             ErrorDetail{"OPERATION_IN_PROGRESS", "writer is still executing", RetryHint::SameIdAfterReconcile});
     }
     try {
         Require(!impl->closed, "CANCELLED", "engine is closed");
         impl->Recover(true);
+        metrics.Finish();
         return {};
     } catch (const Failure& error) {
+        metrics.Error(error.detail.code);
         return std::unexpected(error.detail);
     } catch (const std::exception& error) {
-        return std::unexpected(ExceptionError(error));
+        const auto detail = ExceptionError(error);
+        metrics.Error(detail.code);
+        return std::unexpected(detail);
     }
 }
 
 Status Engine::Shutdown(std::chrono::milliseconds timeout)
 {
+    NGlamDB::NTelemetry::TReadOperationScope metrics(NGlamDB::NTelemetry::EReadOperation::CloseStore);
     const auto impl = impl_;
     impl->closing = true;
     impl->metadata_pages.Clear();
     std::unique_lock lock(impl->writer, std::defer_lock);
     if (!lock.try_lock_for(std::max(timeout, std::chrono::milliseconds(0)))) {
+        metrics.Error("DEADLINE_EXCEEDED");
         return std::unexpected(ErrorDetail{"DEADLINE_EXCEEDED",
             "writer has not finished; resources remain owned",
             RetryHint::OperatorAction});
@@ -1947,6 +1989,7 @@ Status Engine::Shutdown(std::chrono::milliseconds timeout)
         {
             std::lock_guard state_lock(impl->state_mutex);
             if (impl->closed) {
+                metrics.Finish();
                 return {};
             }
             ready = impl->ready;
@@ -1956,15 +1999,22 @@ Status Engine::Shutdown(std::chrono::milliseconds timeout)
         }
         // Roots whose scans finished after the last append.
         impl->RemoveReleasedRoots();
+        if (impl->backend) {
+            impl->backend->InvalidateCache();
+        }
         impl->catalog->Close();
         std::lock_guard state_lock(impl->state_mutex);
         impl->ready = false;
         impl->closed = true;
+        metrics.Finish();
         return {};
     } catch (const Failure& error) {
+        metrics.Error(error.detail.code);
         return std::unexpected(error.detail);
     } catch (const std::exception& error) {
-        return std::unexpected(ExceptionError(error));
+        const auto detail = ExceptionError(error);
+        metrics.Error(detail.code);
+        return std::unexpected(detail);
     }
 }
 

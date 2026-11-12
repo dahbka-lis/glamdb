@@ -190,7 +190,7 @@ separate, broader development profile.
 | `GET .../snapshots` | `ListSnapshots` | Receipt-backed history, bounded fixed-view pages |
 | `GET .../files` | `ListFiles` | Manifest membership and opaque file IDs, bounded pages |
 | `GET .../files/{file}` | `GetFileDetails` | Selected-view membership plus actual Parquet footer/row groups |
-| `POST .../explain` | `ExplainScan` | Fixed-view plan, unsupported pruning remains false |
+| `POST .../explain` | `ExplainScan` | Fixed-view plan; advertises file/row-group pruning on local storage while page/Bloom pruning remains false |
 
 CLI mapping: `create-store` → `POST /databases`; `request` exposes every route
 in the tables above. Offline `glamdb-admin` uses `CreateStore` / `OpenExisting`.
@@ -219,7 +219,8 @@ The readiness body contains `state`, `read_available`, `write_ready`,
 `storage_failure_latched`, `durability_qualified`, and the existing `backend`,
 `mock`, `durability_validation` identity fields. The same object appears as
 `health` in scoped `/databases/{id}/capabilities` and legacy `/capabilities`.
-Managed root `/capabilities` has `health: null`; it advertises installed features,
+Managed root `/capabilities` has `health: null`; it advertises installed features
+(including `file_pruning` and `row_group_pruning` when built with local storage),
 not current store admission. Scoped capabilities return 200 even when the store
 is unavailable, so clients can inspect health without attempting a write.
 
@@ -286,6 +287,26 @@ from another codec. Unknown fields, codecs, duplicate columns, empty column
 entries, levels outside the range or for codecs without levels are rejected
 before anything is bound. Collections return the canonical (schema-ordered)
 `write_settings` and `write_settings_version` (decimal string; `"0"` = never set).
+
+The same object chooses **Parquet value encodings**, independent of both
+compression codecs and HTTP coding: `parquet.dictionary` and a column's
+`dictionary` are `auto` (default: dictionary pages for every type but `bool`),
+`enabled` (the same, but rejected for `bool` columns) or `disabled`;
+`parquet.dictionary_page_size_limit` (decimal string, 4 KiB–8 MiB, default
+1 MiB) bounds each column chunk's dictionary, checked after every 1,024 values.
+A dictionary that outgrows it is written as the dictionary page and the
+remaining data pages fall back to `plain`, so one column chunk can then hold
+both `rle_dictionary` and `plain` data pages. A column's `encoding` selects its
+non-dictionary value encoding: `plain` for every type; `delta_binary_packed`
+for `int64`/`timestamp_us_utc`; `delta_length_byte_array` and
+`delta_byte_array` for `string`; `byte_stream_split` for `int64`, `float64`
+and `timestamp_us_utc`; `rle` for `bool`. An explicit encoding turns that
+column's dictionary off and overrides the collection policy; combining it with
+`enabled` (or with `auto` on a non-`bool` column) is rejected, because the
+pinned writer would ignore it. `parquet.encodings` and `parquet.dictionary` in
+capabilities publish these combinations. File details report the actual
+`encodings` of every column chunk and `encoding_stats` (pages per page type
+and encoding), lower-case like the settings.
 
 `POST /collections/{id}/write-settings` takes
 `{expected_version:"N",write_settings:{...}}` and returns the collection. It

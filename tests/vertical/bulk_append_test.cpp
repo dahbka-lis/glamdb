@@ -218,8 +218,8 @@ TEST_F(TBulkAppendTest, StreamsBoundedFilesIntoOneSnapshotAndPreservesOldReceipt
 
 TEST_F(TBulkAppendTest, CollectionCompressionAppliesToEveryBulkFileAndRetriesKeepOriginalSettings)
 {
-    const WriteSettings settings{ParquetCompression{ParquetCodec::Gzip, 6},
-        {{"key", ParquetCompression{ParquetCodec::Uncompressed, std::nullopt}}}};
+    const WriteSettings settings{.compression = ParquetCompression{ParquetCodec::Gzip, 6},
+        .columns = {{.field = "key", .compression = ParquetCompression{ParquetCodec::Uncompressed, std::nullopt}}}};
     ASSERT_TRUE(Engine_->UpdateWriteSettings({test::collection_id, 0, settings}));
     const auto source = std::make_shared<TGeneratedBulkSource>();
     const auto request = Request(source);
@@ -253,7 +253,7 @@ TEST_F(TBulkAppendTest, CollectionCompressionAppliesToEveryBulkFileAndRetriesKee
         EXPECT_EQ(files, result.data_files_added);
     };
     verifyFooters();
-    const WriteSettings laterSettings{ParquetCompression{ParquetCodec::Snappy, std::nullopt}, {}};
+    const WriteSettings laterSettings{.compression = ParquetCompression{ParquetCodec::Snappy, std::nullopt}};
     ASSERT_TRUE(Engine_->UpdateWriteSettings({test::collection_id, 1, laterSettings}));
     EXPECT_EQ(Engine_->BulkAppendDurable(request), committed);
     EXPECT_EQ(Read(), source->Rows);
@@ -265,6 +265,64 @@ TEST_F(TBulkAppendTest, CollectionCompressionAppliesToEveryBulkFileAndRetriesKee
     EXPECT_EQ(Engine_->BulkAppendDurable(request), committed);
     EXPECT_EQ(Read(), source->Rows);
     verifyFooters();
+}
+
+TEST_F(TBulkAppendTest, RetainedFileMetricsStayChargedAcrossReconciliationAndReopen)
+{
+    const auto rootBytes = [&] {
+        uint64_t bytes = 0;
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(Root_ / "warehouse")) {
+            if (entry.path().filename().string().ends_with(".metadata.json")) {
+                bytes = std::max(bytes, entry.file_size());
+            }
+        }
+        return bytes;
+    };
+    const auto owner = Engine_->GetResourceOwner();
+    const auto before = owner->GetUsage().memory_bytes[1];
+    const auto oldRootBytes = rootBytes();
+    const auto source = std::make_shared<TGeneratedBulkSource>();
+    source->Rows = 28'000;
+    const auto committed = Engine_->BulkAppendDurable(Request(source));
+    ASSERT_EQ(committed.disposition, CommitDisposition::Committed)
+        << (committed.error ? test::Present(committed.error).message : std::string());
+    ASSERT_TRUE(committed.result);
+    ASSERT_EQ(test::Present(committed.result).data_files_added, 3);
+    const auto secondSource = std::make_shared<TGeneratedBulkSource>();
+    secondSource->Rows = 14'000;
+    auto secondRequest = Request(secondSource);
+    secondRequest.operation_id = SecondOperation;
+    const auto second = Engine_->BulkAppendDurable(secondRequest);
+    ASSERT_EQ(second.disposition, CommitDisposition::Committed)
+        << (second.error ? test::Present(second.error).message : std::string());
+    ASSERT_TRUE(second.result);
+    ASSERT_EQ(test::Present(second.result).data_files_added, 2);
+    const auto files = test::Present(committed.result).data_files_added + test::Present(second.result).data_files_added;
+    // Every persisted file retains at least the column-size and value-count
+    // map values for every field, beyond the existing JSON root envelope.
+    const auto minimumMaps =
+        static_cast<uint64_t>(files) * Schema.fields.size() * 2 * sizeof(std::pair<int32_t, int64_t>);
+    const auto minimumCharge = before + (rootBytes() - oldRootBytes) * 32 + minimumMaps;
+    EXPECT_GE(owner->GetUsage().memory_bytes[1], minimumCharge);
+    auto pressure =
+        owner->Reserve(ResourceClass::Metadata, owner->GetLimits().memory_bytes[1] - owner->GetUsage().memory_bytes[1]);
+    ASSERT_TRUE(pressure) << pressure.error().message;
+    const auto reconciled = Engine_->Reconcile();
+    ASSERT_TRUE(reconciled) << reconciled.error().message;
+    pressure->reset();
+    EXPECT_GE(owner->GetUsage().memory_bytes[1], minimumCharge);
+    EXPECT_EQ(Engine_->BulkAppendDurable(Request(source)), committed);
+    EXPECT_EQ(Engine_->BulkAppendDurable(secondRequest), second);
+    ASSERT_TRUE(Engine_->Shutdown(1000ms));
+    Engine_.reset();
+    Hooks_.reset();
+    const auto reopened = OpenExisting({Root_.string(), test::store_id, "local-delete-extra-v1", {}, owner});
+    ASSERT_TRUE(reopened) << reopened.error().message;
+    Engine_ = *reopened;
+    EXPECT_GE(owner->GetUsage().memory_bytes[1], minimumCharge);
+    EXPECT_EQ(Engine_->BulkAppendDurable(Request(source)), committed);
+    EXPECT_EQ(Engine_->BulkAppendDurable(secondRequest), second);
+    EXPECT_EQ(Read(), source->Rows + secondSource->Rows);
 }
 
 TEST_F(TBulkAppendTest, ChangedProductionStreamHasPermanentFailureAndNoPartialVisibility)

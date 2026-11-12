@@ -210,7 +210,7 @@ iceberg::Result<TStorageUsage> CheckManifest(const std::shared_ptr<iceberg::File
         counts.Bytes += static_cast<std::uint64_t>(file.file_size_in_bytes);
         manifestRows += static_cast<std::uint64_t>(file.record_count);
         if (scanIndex) {
-            scanIndex->Files.push_back({file.file_path, file.file_size_in_bytes, file.record_count});
+            scanIndex->Files.push_back({file.file_path, file.file_size_in_bytes, file.record_count, entry.data_file});
         }
     }
     if (manifest.added_rows_count != static_cast<std::int64_t>(manifestRows)) {

@@ -169,6 +169,15 @@ TJson File(const TDataFileMetadata& file, const SchemaSpec& schema)
         {"backend", "local"},
         {"mock", false}};
 }
+// Page counts per type and Parquet value encoding, independent of compression.
+TJson EncodingStatsJson(const std::vector<TPageEncodingCount>& stats)
+{
+    auto value = TJson::array();
+    for (const auto& item : stats) {
+        value.push_back({{"page_type", item.PageType}, {"encoding", item.Encoding}, {"count", item.Count}});
+    }
+    return value;
+}
 TJson Columns(const std::vector<TColumnChunkMetadata>& columns, const SchemaSpec& schema)
 {
     auto value = TJson::array();
@@ -181,6 +190,8 @@ TJson Columns(const std::vector<TColumnChunkMetadata>& columns, const SchemaSpec
             {"data_page_offset", std::to_string(column.DataPageOffset)},
             {"dictionary_page_offset", OptionalInteger(column.DictionaryPageOffset)},
             {"compression", column.Compression},
+            {"encodings", column.Encodings},
+            {"encoding_stats", EncodingStatsJson(column.EncodingStats)},
             {"indexes",
                 {{"page", column.HasColumnIndex || column.HasOffsetIndex},
                     {"column", column.HasColumnIndex},
@@ -303,8 +314,9 @@ TJson FileJson(const Engine& engine,
         {"column", columnIndex},
         {"offset", offsetIndex},
         {"bloom", nullptr}};
-    value["execution_capabilities"] = {{"file_pruning", false},
-        {"row_group_pruning", false},
+    const auto capabilities = engine.GetCapabilities();
+    value["execution_capabilities"] = {{"file_pruning", capabilities.file_pruning},
+        {"row_group_pruning", capabilities.row_group_pruning},
         {"page_pruning", false},
         {"bloom_pruning", false}};
     return value;

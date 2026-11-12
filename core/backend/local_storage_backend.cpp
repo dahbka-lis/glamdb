@@ -18,9 +18,12 @@
 #include "core/storage/table_profile.h"
 
 #include "core/resources/arrow_pool.h"
+#include "core/scan/metadata_cache.h"
 #include "storage/resources.h"
 
+#include <arrow/array/array_binary.h>
 #include <arrow/record_batch.h>
+#include <arrow/type.h>
 #include <arrow/util/byte_size.h>
 #include <arrow/util/compression.h>
 #include <iceberg/constants.h>
@@ -70,14 +73,81 @@ struct TRetainedState
     std::shared_ptr<const NStorage::TBaseState> State;
 };
 
-std::shared_ptr<ResourceReservation> ReserveRoot(const std::shared_ptr<ResourceOwner>& owner, uint64_t bytes)
+void AddMemory(uint64_t& bytes, uint64_t count, uint64_t width = 1)
 {
-    // Parsed maps, strings, snapshots, current manifests and scan membership.
-    // Serialized input is capped before this multiplication.
+    if (count > (std::numeric_limits<uint64_t>::max() - bytes) / width) {
+        throw Failure({"RESOURCE_EXHAUSTED", "retained metadata size overflows", RetryHint::OperatorAction});
+    }
+    bytes += count * width;
+}
+
+uint64_t DataFileMemory(const iceberg::DataFile& file)
+{
+    // Conservative map-node/control-block allowance for the pinned standard
+    // library, plus the actual capacities of every retained variable buffer.
+    uint64_t bytes = sizeof(file) + 256;
+    AddMemory(bytes, file.file_path.capacity() + 1);
+    for (const auto count : {file.column_sizes.size(),
+             file.value_counts.size(),
+             file.null_value_counts.size(),
+             file.nan_value_counts.size()})
+    {
+        AddMemory(bytes, count, 96);
+    }
+    for (const auto* bounds : {&file.lower_bounds, &file.upper_bounds}) {
+        AddMemory(bytes, bounds->size(), 96);
+        for (const auto& [field, value] : *bounds) {
+            (void)field;
+            AddMemory(bytes, value.capacity());
+        }
+    }
+    AddMemory(bytes, file.key_metadata.capacity());
+    AddMemory(bytes, file.split_offsets.capacity(), sizeof(int64_t));
+    AddMemory(bytes, file.equality_ids.capacity(), sizeof(int32_t));
+    if (file.referenced_data_file) {
+        AddMemory(bytes, file.referenced_data_file->capacity() + 1);
+    }
+    return bytes;
+}
+
+uint64_t ScanIndexMemory(const NStorage::TBaseState& state)
+{
+    if (!state.ScanIndex) {
+        return 0;
+    }
+    const auto& index = *state.ScanIndex;
+    uint64_t bytes = sizeof(index);
+    // Copy-and-grow publication and reserve-and-grow recovery can give the
+    // same history different vector capacities. Both are bounded by twice
+    // the final element count in the pinned standard library. Charge that
+    // stable envelope so reconciliation can reuse its admitted reservation.
+    AddMemory(bytes, index.Files.size(), 2 * sizeof(NStorage::TScanDataFile));
+    AddMemory(bytes, index.Snapshots.size(), 2 * sizeof(NStorage::TSnapshotBoundary));
+    for (const auto& file : index.Files) {
+        AddMemory(bytes, file.Path.capacity() + 1);
+        if (file.DataFile) {
+            AddMemory(bytes, DataFileMemory(*file.DataFile));
+        }
+    }
+    return bytes;
+}
+
+uint64_t RootMemoryBytes(uint64_t bytes, uint64_t indexBytes)
+{
+    // Snapshot JSON does not bound the number or metric maps of bulk files.
+    // Charge those independently and pin both charges to the generation.
     if (bytes > (64ULL << 20)) {
         throw Failure({"RESOURCE_EXHAUSTED", "root exceeds the metadata profile", RetryHint::OperatorAction});
     }
-    auto memory = owner->Reserve(ResourceClass::Metadata, bytes * 32 + (4ULL << 20));
+    uint64_t total = bytes * 32 + (4ULL << 20);
+    AddMemory(total, indexBytes);
+    return total;
+}
+
+std::shared_ptr<ResourceReservation>
+ReserveRoot(const std::shared_ptr<ResourceOwner>& owner, uint64_t bytes, uint64_t indexBytes)
+{
+    auto memory = owner->Reserve(ResourceClass::Metadata, RootMemoryBytes(bytes, indexBytes));
     if (!memory) {
         throw Failure(memory.error());
     }
@@ -269,20 +339,56 @@ arrow::Compression::type ArrowCodec(ParquetCodec codec)
     Fail("INVALID_ARGUMENT", "write settings", "unknown Parquet codec");
 }
 
+parquet::Encoding::type ParquetValueEncoding(ParquetEncoding encoding)
+{
+    switch (encoding) {
+        case ParquetEncoding::Plain:
+            return parquet::Encoding::PLAIN;
+        case ParquetEncoding::DeltaBinaryPacked:
+            return parquet::Encoding::DELTA_BINARY_PACKED;
+        case ParquetEncoding::DeltaLengthByteArray:
+            return parquet::Encoding::DELTA_LENGTH_BYTE_ARRAY;
+        case ParquetEncoding::DeltaByteArray:
+            return parquet::Encoding::DELTA_BYTE_ARRAY;
+        case ParquetEncoding::ByteStreamSplit:
+            return parquet::Encoding::BYTE_STREAM_SPLIT;
+        case ParquetEncoding::Rle:
+            return parquet::Encoding::RLE;
+    }
+    Fail("INVALID_ARGUMENT", "write settings", "unknown Parquet encoding");
+}
+
 // Settings the coordinator read with the collection before binding; empty
-// settings leave the writer defaults untouched.
-NStorage::TParquetWriteSpec WriterSpec(const WriteSettings& settings)
+// settings leave the writer defaults untouched. An explicit column encoding
+// turns that column's dictionary off; bool columns never take a dictionary.
+NStorage::TParquetWriteSpec WriterSpec(const SchemaSpec& schema, const WriteSettings& settings)
 {
     NStorage::TParquetWriteSpec spec;
     if (settings.compression) {
         spec.Compression =
             NStorage::TParquetCompressionSpec{ArrowCodec(settings.compression->codec), settings.compression->level};
     }
+    if (settings.dictionary == DictionaryPolicy::Disabled) {
+        spec.Dictionary = false;
+    }
+    spec.DictionaryPageSizeLimit = settings.dictionary_page_size_limit;
     for (const auto& column : settings.columns) {
+        const auto field = std::ranges::find(schema.fields, column.field, &FieldSpec::name);
+        Require(field != schema.fields.end(), "INVALID_ARGUMENT", "write settings name an unknown column");
+        NStorage::TParquetColumnSpec item{column.field};
         if (column.compression) {
-            spec.Columns.emplace_back(column.field,
-                NStorage::TParquetCompressionSpec{ArrowCodec(column.compression->codec), column.compression->level});
+            item.Compression =
+                NStorage::TParquetCompressionSpec{ArrowCodec(column.compression->codec), column.compression->level};
         }
+        if (column.dictionary == DictionaryPolicy::Disabled || (column.encoding && !column.dictionary)) {
+            item.Dictionary = false;
+        } else if (column.dictionary && field->type != FieldType::Bool) {
+            item.Dictionary = true;
+        }
+        if (column.encoding) {
+            item.Encoding = ParquetValueEncoding(*column.encoding);
+        }
+        spec.Columns.push_back(std::move(item));
     }
     return spec;
 }
@@ -292,26 +398,52 @@ void CheckWriterInput(const SchemaSpec& schema, const NormalizedInput& input, co
     if (limits.MaxInputBytes <= 0 || limits.MaxRows <= 0 || limits.MaxRowGroupBytes <= 0 || limits.MaxFileBytes <= 0) {
         Fail("INVALID_ARGUMENT", "append", "data writer limits must be positive");
     }
-    if (input.rows.empty() || static_cast<int64_t>(input.rows.size()) > limits.MaxRows) {
+    const auto rows = input.GetRowCount();
+    if (rows == 0 || static_cast<int64_t>(rows) > limits.MaxRows) {
         Fail("INVALID_ARGUMENT", "append", std::format("an append must contain 1..{} rows", limits.MaxRows));
     }
-    int64_t maxRowBytes = 1;
-    for (const auto& row : input.rows) {
-        if (row.size() != schema.fields.size()) {
-            Fail("INVALID_ARGUMENT", "append", "row field count does not match the collection schema");
+    int64_t fixedRowBytes = 0;
+    for (const auto& field : schema.fields) {
+        fixedRowBytes += 1 + (field.type == FieldType::String ? 4 : field.type == FieldType::Bool ? 1 : 8);
+    }
+    // Per row: the fixed slots plus the string bytes.
+    std::vector<int64_t> rowBytes(rows, fixedRowBytes);
+    if (input.Columns != nullptr) {
+        if (input.Columns->num_columns() != static_cast<int>(schema.fields.size()) ||
+            !input.Columns->schema()->Equals(*MakeArrowSchema(schema)))
+        {
+            Fail("INVALID_ARGUMENT", "append", "input columns do not match the collection schema");
         }
-        int64_t rowBytes = 0;
         for (size_t column = 0; column < schema.fields.size(); ++column) {
-            const auto type = schema.fields[column].type;
-            rowBytes += 1 + (type == FieldType::String ? 4 : type == FieldType::Bool ? 1 : 8);
-            if (const auto* text = std::get_if<std::string>(&row[column])) {
-                rowBytes += static_cast<int64_t>(text->size());
+            if (schema.fields[column].type != FieldType::String) {
+                continue;
+            }
+            const auto& strings =
+                static_cast<const arrow::StringArray&>(*input.Columns->column(static_cast<int>(column)));
+            for (size_t row = 0; row < rows; ++row) {
+                if (strings.IsValid(static_cast<int64_t>(row))) {
+                    rowBytes[row] += strings.value_length(static_cast<int64_t>(row));
+                }
             }
         }
-        if (rowBytes > (2LL << 20)) {
+    } else {
+        for (size_t row = 0; row < rows; ++row) {
+            if (input.rows[row].size() != schema.fields.size()) {
+                Fail("INVALID_ARGUMENT", "append", "row field count does not match the collection schema");
+            }
+            for (const auto& cell : input.rows[row]) {
+                if (const auto* text = std::get_if<std::string>(&cell)) {
+                    rowBytes[row] += static_cast<int64_t>(text->size());
+                }
+            }
+        }
+    }
+    int64_t maxRowBytes = 1;
+    for (const auto bytes : rowBytes) {
+        if (bytes > (2LL << 20)) {
             throw Failure({"RESOURCE_EXHAUSTED", "append: Row exceeds its byte limit.", RetryHint::FixInput});
         }
-        maxRowBytes = std::max(maxRowBytes, rowBytes);
+        maxRowBytes = std::max(maxRowBytes, bytes);
     }
     const auto offsetBytes = 4 * static_cast<int64_t>(std::ranges::count_if(schema.fields, [](const auto& field) {
         return field.type == FieldType::String;
@@ -321,7 +453,8 @@ void CheckWriterInput(const SchemaSpec& schema, const NormalizedInput& input, co
     }
     // An upper bound of the Arrow buffers WriteDataFile receives, so the
     // writer cannot reject what this preflight admitted.
-    const auto totalBytes = EstimateRecordBatchBytes(schema, input.rows);
+    const auto totalBytes = input.Columns != nullptr ? EstimateRecordBatchBytes(schema, *input.Columns)
+                                                     : EstimateRecordBatchBytes(schema, input.rows);
     if (totalBytes < 0 || totalBytes > limits.MaxInputBytes) {
         throw Failure({"RESOURCE_EXHAUSTED", "append: Input buffers exceed their byte limit.", RetryHint::FixInput});
     }
@@ -330,7 +463,7 @@ void CheckWriterInput(const SchemaSpec& schema, const NormalizedInput& input, co
 void CheckBulkInput(const NormalizedInput& input, const NStorage::TDataWriterLimits& limits)
 {
     Require(input.bulk && input.bulk->Next && input.bulk->Rows > 0 && input.bulk->Rows <= BulkAppendLimits::MaxRows &&
-            input.rows.empty() && !input.writer_batch,
+            input.rows.empty() && !input.Columns && !input.writer_batch,
         "INVALID_ARGUMENT",
         "bulk append requires a bounded declared row count and a streaming source");
     Require(limits.MaxInputBytes > 0 && limits.MaxRows > 0 && limits.MaxRowGroupBytes > 0 && limits.MaxFileBytes > 0,
@@ -549,22 +682,28 @@ private:
 TLocalStorageBackend::TLocalStorageBackend(StoreInfo store,
     TLocalStorageOptions options,
     std::shared_ptr<NIO::TStoreDirs> dirs,
-    std::shared_ptr<NStorage::TDurableLocalFileIO> fileIO)
+    std::shared_ptr<NStorage::TDurableLocalFileIO> fileIO,
+    std::shared_ptr<TSnapshotMetadataCache> readCache)
     : Store_(std::move(store))
     , Options_(std::move(options))
     , Dirs_(std::move(dirs))
     , FileIO_(std::move(fileIO))
     , Catalog_(std::make_shared<TInertCatalog>())
+    , ReadCache_(std::move(readCache))
 { }
 
 EngineCapabilities TLocalStorageBackend::GetCapabilities() const
 {
-    return {.backend = BackendKind::LocalStorage,
+    EngineCapabilities capabilities{.backend = BackendKind::LocalStorage,
         .append = true,
         .scan = true,
         .metadata = true,
+        .file_pruning = Options_.EnablePruning,
+        .row_group_pruning = Options_.EnablePruning,
         .write_settings = true,
         .parquet_codecs = ParquetCodecCapabilities()};
+    AddEncodingCapabilities(capabilities);
+    return capabilities;
 }
 
 StorageBackend::Health TLocalStorageBackend::GetHealth() const
@@ -580,6 +719,15 @@ TLocalStorageBackend::Open(const std::filesystem::path& root, const StoreInfo& s
         [&]() -> Result<std::shared_ptr<TLocalStorageBackend>> {
             options.Resources = options.Resources ? options.Resources : ResourceOwner::ProcessDefault();
             options.InputPool = MakeResourcePool(options.Resources, options.InputPool);
+            std::shared_ptr<TSnapshotMetadataCache> readCache;
+            if (options.ReadCacheBytes > 0) {
+                auto cacheMemory = options.Resources->Reserve(ResourceClass::Metadata, options.ReadCacheBytes);
+                if (!cacheMemory) {
+                    throw Failure(cacheMemory.error());
+                }
+                readCache = std::make_shared<TSnapshotMetadataCache>(std::move(*cacheMemory),
+                    TSnapshotMetadataCacheOptions{.MaxBytes = options.ReadCacheBytes});
+            }
             auto fs = options.Fs ? options.Fs : std::make_shared<NIO::TPosixLocalFS>();
             auto dirs = TakeIO(NIO::TStoreDirs::Open(std::move(fs), root, std::make_shared<NIO::TWriteLatch>()),
                 EStoragePath::Preflight,
@@ -588,7 +736,7 @@ TLocalStorageBackend::Open(const std::filesystem::path& root, const StoreInfo& s
                 "IO_ERROR",
                 "open durable FileIO");
             return std::shared_ptr<TLocalStorageBackend>(
-                new TLocalStorageBackend(store, options, std::move(dirs), std::move(fileIO)));
+                new TLocalStorageBackend(store, options, std::move(dirs), std::move(fileIO), std::move(readCache)));
         });
 }
 
@@ -708,7 +856,9 @@ Status TLocalStorageBackend::CheckAppendAdmissible(const StoreInfo& store,
         if (input.bulk) {
             return {};
         }
-        auto batch = MakeRecordBatch(collection.schema, input.rows, Options_.InputPool.get());
+        auto batch = input.Columns != nullptr
+            ? CopyRecordBatch(*input.Columns, Options_.InputPool.get())
+            : MakeRecordBatch(collection.schema, input.rows, Options_.InputPool.get());
         if (!batch) {
             throw Failure(batch.error());
         }
@@ -777,7 +927,7 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
         auto scope = TakeIceberg(FileIO_->BindAttempt(attempt), "IO_ERROR", "bind append attempt");
         const auto location = TableLocation(Store_.store_id, binding.collection_id);
         std::vector<std::shared_ptr<iceberg::DataFile>> dataFiles;
-        const auto inputRows = input.bulk ? input.bulk->Rows : static_cast<int64_t>(input.rows.size());
+        const auto inputRows = input.bulk ? input.bulk->Rows : static_cast<int64_t>(input.GetRowCount());
         if (!input.bulk) {
             Require(input.writer_batch != nullptr, "INTERNAL", "append input was not admitted");
             const auto dataPath =
@@ -788,7 +938,7 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
                                         dataPath,
                                         {input.writer_batch},
                                         Options_.Writer,
-                                        WriterSpec(collection.write_settings)),
+                                        WriterSpec(collection.schema, collection.write_settings)),
                 "IO_ERROR",
                 "write data file");
             Require(data.DataFile && data.DataFile->record_count == inputRows,
@@ -807,6 +957,7 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
             int64_t fileRows = 0;
             int64_t fileBytes = 0;
             int64_t totalRows = 0;
+            uint64_t descriptorBytes = dataFiles.capacity() * sizeof(std::shared_ptr<iceberg::DataFile>);
             const auto flush = [&] {
                 if (batches.empty()) {
                     return;
@@ -826,12 +977,16 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
                                             path,
                                             batches,
                                             limits,
-                                            WriterSpec(collection.write_settings)),
+                                            WriterSpec(collection.schema, collection.write_settings)),
                     "IO_ERROR",
                     "write bulk data file");
                 Require(data.DataFile && data.DataFile->record_count == fileRows,
                     "IO_ERROR",
                     "bulk data file does not contain every input row");
+                AddMemory(descriptorBytes, DataFileMemory(*data.DataFile));
+                Require(descriptorBytes <= bulkMemory->GetBytes(),
+                    "RESOURCE_EXHAUSTED",
+                    "bulk data file metadata exceeds its memory envelope");
                 dataFiles.push_back(std::move(data.DataFile));
                 batches.clear();
                 fileRows = 0;
@@ -857,17 +1012,20 @@ Result<std::unique_ptr<StagedAppend>> TLocalStorageBackend::PrepareAppend(const 
                     throw Failure(next.error());
                 }
                 CheckDeadline(deadline);
-                if (next->rows.empty()) {
+                if (next->GetRowCount() == 0) {
                     Require(totalRows == inputRows, "INVALID_ARGUMENT", "bulk source row count changed");
                     break;
                 }
                 CheckWriterInput(collection.schema, *next, Options_.Writer);
-                const auto rows = static_cast<int64_t>(next->rows.size());
+                const auto rows = static_cast<int64_t>(next->GetRowCount());
                 Require(rows <= inputRows - totalRows, "INVALID_ARGUMENT", "bulk source exceeded its row count");
-                auto built = MakeRecordBatch(collection.schema, next->rows, Options_.InputPool.get());
+                auto built = next->Columns != nullptr
+                    ? CopyRecordBatch(*next->Columns, Options_.InputPool.get())
+                    : MakeRecordBatch(collection.schema, next->rows, Options_.InputPool.get());
                 if (!built) {
                     throw Failure(built.error());
                 }
+                next->Columns.reset();
                 next->rows.clear();
                 const auto& batch = *built;
                 const auto bytes = arrow::util::TotalBufferSize(*batch);
@@ -1025,6 +1183,9 @@ void TLocalStorageBackend::PublicationFinished(std::string_view collectionID,
     VerifiedGeneration_ = false;
     Collections_.clear();
     AdmittedWarehouseBytes_.reset();
+    if (ReadCache_) {
+        ReadCache_->Clear();
+    }
 }
 
 void TLocalStorageBackend::DiscardCandidate(std::string_view collectionID)
@@ -1047,6 +1208,9 @@ void TLocalStorageBackend::InvalidateCache()
     VerifiedGeneration_ = false;
     Collections_.clear();
     AdmittedWarehouseBytes_.reset();
+    if (ReadCache_) {
+        ReadCache_->Clear();
+    }
 }
 
 NIO::TResult<std::uint64_t> TLocalStorageBackend::CheckWriteCapacity(bool remember, bool reuse)
@@ -1156,6 +1320,9 @@ void TLocalStorageBackend::RetireRoot(const BaseIdentity& superseded)
             return;
         }
     }
+    if (ReadCache_) {
+        ReadCache_->EvictRoot(location);
+    }
     // Best effort: a root that cannot be removed stays as an orphan file.
     [[maybe_unused]] const auto error = Dirs_->RemoveMetadataFile(uri.Value());
 }
@@ -1184,7 +1351,7 @@ Result<std::shared_ptr<const NStorage::TBaseState>> TLocalStorageBackend::Verifi
 void TLocalStorageBackend::RecordCandidate(std::string_view collectionID,
     std::shared_ptr<const NStorage::TBaseState> candidate)
 {
-    auto memory = ReserveRootMemory(collectionID, candidate->Usage.RootBytes, false);
+    auto memory = ReserveRootMemory(collectionID, candidate->Usage.RootBytes, false, ScanIndexMemory(*candidate));
     candidate = RetainState(memory, std::move(candidate));
     std::lock_guard lock(Mutex_);
     auto it = Collections_.find(collectionID);
@@ -1239,23 +1406,19 @@ std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::ResolveBase(co
 }
 
 std::shared_ptr<ResourceReservation>
-TLocalStorageBackend::ReserveRootMemory(std::string_view collectionID, uint64_t bytes, bool reuse)
+TLocalStorageBackend::ReserveRootMemory(std::string_view collectionID, uint64_t bytes, bool reuse, uint64_t indexBytes)
 {
-    if (bytes > (64ULL << 20)) {
-        throw Failure({"RESOURCE_EXHAUSTED", "root exceeds the metadata profile", RetryHint::OperatorAction});
-    }
+    const auto required = RootMemoryBytes(bytes, indexBytes);
     if (reuse) {
         std::lock_guard lock(Mutex_);
         const auto found = CacheMemory_.find(collectionID);
         // Only the map can own a reused reservation. A still-live old state
         // needs its own charge until its last alias has been destroyed.
-        if (found != CacheMemory_.end() && found->second.use_count() == 1 &&
-            found->second->GetBytes() >= bytes * 32 + (4ULL << 20))
-        {
+        if (found != CacheMemory_.end() && found->second.use_count() == 1 && found->second->GetBytes() >= required) {
             return found->second;
         }
     }
-    auto memory = ReserveRoot(Options_.Resources, bytes);
+    auto memory = ReserveRoot(Options_.Resources, bytes, indexBytes);
     std::lock_guard lock(Mutex_);
     CacheMemory_[std::string(collectionID)] = memory;
     return memory;
@@ -1276,6 +1439,13 @@ std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::VerifyCollecti
                                   Dirs_->Path().string()),
         "verify retained collection");
     CheckIdentity(state, base);
+    const auto indexBytes = ScanIndexMemory(state);
+    if (memory->GetBytes() < RootMemoryBytes(state.Usage.RootBytes, indexBytes)) {
+        // Recovery's protected workspace covers reconstruction. Before the
+        // state escapes, retain the same index charge used at publication.
+        memory.reset();
+        memory = ReserveRootMemory(base.collection_id, state.Usage.RootBytes, true, indexBytes);
+    }
     return RetainState(std::move(memory), std::make_shared<const NStorage::TBaseState>(std::move(state)));
 }
 

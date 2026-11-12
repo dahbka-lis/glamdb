@@ -50,7 +50,7 @@ once to establish its hash; another hash conflicts.
 | Parquet | 8 MiB decoded row-group bound during ingestion; 32 MiB physical file |
 | Whole operation | 256 files, 25,600,000 rows, 4 GiB canonical bytes |
 | Owned input | 128 MiB reservation for a new bulk operation, plus the existing 256 MiB writer envelope and separately tracked Arrow capacities |
-| Metadata | Existing working/root envelopes plus a 32 MiB bulk descriptor envelope retained through staged publication |
+| Metadata | Existing working/root envelopes plus a 32 MiB bulk descriptor envelope retained through staged publication; verified index vectors, file metric maps and variable buffers receive an additional generation-pinned charge |
 | Attempt I/O | 8 GiB + 32 MiB new files; four times that amount in requested reads/writes |
 | Device admission | Reserve that full new-file envelope and 320 inodes before binding |
 | Time | Default and maximum 10 minutes per bulk call; the existing writer wait still applies |

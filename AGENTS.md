@@ -27,7 +27,7 @@ and network CLI. Independent durable I/O and Arrow/Parquet/Iceberg
 storage primitives provide file production, staging, publication validation,
 recovery verification, and capacity checks. `core/backend/` connects them to the
 coordinator StorageBackend and `core/scan/` implements `Engine::Scan`
-(fixed snapshot, verified membership index, SQL three-valued compound predicates `True`/`Compare`/`In`/`IsNull`/`IsNotNull`/`And`/`Or`/`Not`, projection including zero columns, limit; no pruning). See
+(fixed snapshot, verified membership index, SQL three-valued compound predicates `True`/`Compare`/`In`/`IsNull`/`IsNotNull`/`And`/`Or`/`Not`, projection including zero columns, limit, positional Parquet column/row-group reads, conservative manifest file and Parquet row-group pruning, and a bounded immutable metadata/footer cache; page and Bloom pruning remain unimplemented). See
 [the scanner guide](docs/development/SCANNER.md) for their contract and
 validation status, [the coordinator guide](docs/development/COORDINATOR.md)
 for the integration contract, and [the storage guide](docs/development/STORAGE_MODULE.md)
@@ -35,8 +35,9 @@ for the file-layer contract. A shared `ResourceOwner` now admits engines,
 transport copies and tracked Arrow allocations under finite class and device
 reservations; see [the resource owner](docs/development/SHARED_RESOURCES.md)
 for conservative envelopes, retained-buffer lifetime and measured validation.
-Scan plans, queued manifest descriptors and individual output descriptors retain
-shared reservations; cursor control admission and live/peak memory profiles are
+Scan plans, queued manifest descriptors, individual output descriptors and the
+per-store 32 MiB immutable metadata/footer cache retain shared reservations;
+cursor control admission and live/peak memory profiles are
 described in [shared resources](docs/development/SHARED_RESOURCES.md).
 Full engine durability remains unqualified. `Engine::GetHealth()` exposes
 nonblocking read/write admission and recovery/shutdown state; HTTP
@@ -131,7 +132,8 @@ Append preserves every input row, including duplicate keys. It provides neither
 key uniqueness nor replacement semantics.
 
 Collections carry Parquet write settings (collection-default compression codec
-and level, per-column overrides) that apply to data files of later appends.
+and level, dictionary policy and page limit; per-column codec, dictionary and
+value-encoding overrides) that apply to data files of later appends.
 They live in the SQLite catalog (version 2, created lazily by the first stored
 settings), change by compare-and-set under the writer and are checked against
 every written footer; see [the coordinator guide](docs/development/COORDINATOR.md#collection-write-settings).
@@ -249,7 +251,7 @@ Preserve these boundaries when adding or changing engine behavior:
 | `public/storage/` | Installed C++ types, scan API and synchronous engine facade. |
 | `core/api/`, `core/catalog/`, `core/engine/` | Canonical input, catalog, coordinator, and internal storage-backend seam. |
 | `core/backend/` | Production StorageBackend over `glamdb_storage`, built with `GLAMDB_BUILD_STORAGE`. |
-| `core/scan/` | Predicate evaluation, snapshot planning and Parquet scan cursor. |
+| `core/scan/` | Predicate evaluation, conservative zone pruning, snapshot planning, bounded metadata/footer cache and positional Parquet scan cursor. |
 | `core/telemetry/` | Private typed event adapter over pinned Quill; bounded frontend/backend memory and stderr process counters. |
 | `deploy/logging/`, `tools/logging/` | Pinned Loki/Alloy/private Grafana deployment, native macOS/Podman collection, control-plane adapter and real ingestion/redaction checks. |
 | `core/io/` | Independent local filesystem, attempts, receipts, durable files and copying (`glamdb_io`). |
@@ -326,10 +328,15 @@ for real storage/counter/readiness/restart coverage; `GLAMDB_TEST_TMPDIR` select
 its disposable test parent when `/tmp` cannot meet the storage disk reserve.
 The listener includes bounded native HTTP request/status counters, duration and
 in-flight metrics through asynchronous response completion/cancellation.
-`--log-directory DIR` opts into the existing Quill 13 structured logger with
-8 MiB JSONL rotation and three backups; requests never log tokens, URLs or data.
-Native and IO-only builds consume the pinned header-only `third_party/quill`
-for the structured logger.
+The server logs bounded JSON to stderr by default; `--log-directory DIR` selects
+Quill 13 file rotation at 8 MiB and three backups. Success sampling is configured
+with `--log-success-sample-every` and `--log-max-success-per-second`. Generated
+HTTP correlation uses the existing scoped worker/engine context; no tokens, URLs or data are logged.
+`glamdb.server_observability` checks real operations, publication replay counters,
+read scopes and sampling; metrics remain unsampled. Retained cursor counts and
+published rows/bytes are process observations, not database inventory.
+Normal native builds consume the pinned header-only `third_party/quill`; IO-only
+metrics builds retain no Quill dependency unless `GLAMDB_BUILD_LOGGING=ON`.
 
 Client/mock development uses Python 3.13 and Node 22+:
 
@@ -513,10 +520,11 @@ tool path overrides, and build details.
 Operational logs are independent of store publication. The native adapter uses
 pinned Quill BoundedDropping queues and its JSON sink on stderr; the Python
 adapter uses logging, python-json-logger and standard bounded QueueHandler /
-QueueListener. Runtime journald/Docker/Kubernetes owns retention and rotation.
+QueueListener. Runtime journald/Docker/Kubernetes owns stderr retention; optional native files
+use Quill rotation. Do not add a custom writer or log transport.
 Register native producer threads during worker initialization: only sixteen
 lifetime producer allocations are admitted to bound thread churn even with a
-blocked sink. No application file mode or `GLAMDB_LOG_DIRECTORY` exists.
+blocked sink. Server file mode uses Quill directly; `GLAMDB_LOG_DIRECTORY` is not used.
 Never add payload/header/query text or uncontrolled identifiers to the event
 schema. Quill queue admission and backend callbacks are measurable; exact
 native delivery/backlog are unavailable. Read [LOGGING.md](docs/development/LOGGING.md)

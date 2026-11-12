@@ -29,7 +29,7 @@ public:
         , CheckHealth_(std::move(checkHealth))
     {
         Check();
-        Hash_.Update(TakeBulk(EncodeBulkAppendHeader(Schema_, Request_.collection_id, Request_.rows)));
+        Hash_.AddBytes(TakeBulk(EncodeBulkAppendHeader(Schema_, Request_.collection_id, Request_.rows)));
         const auto rewound = Request_.source->Rewind();
         if (!rewound) {
             throw Failure(rewound.error());
@@ -58,9 +58,9 @@ public:
         return batch;
     }
 
-    std::string Digest() const
+    std::string Digest()
     {
-        return Hash_.Digest();
+        return Hash_.ComputeDigest();
     }
 
     const SchemaSpec& Schema() const
@@ -78,7 +78,7 @@ private:
     BulkAppendRequest Request_;
     std::chrono::steady_clock::time_point Deadline_;
     std::function<Status()> CheckHealth_;
-    Sha256State Hash_;
+    TCanonicalHasher Hash_;
     int64_t Rows_ = 0;
     size_t Bytes_ = 0;
 

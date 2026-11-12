@@ -13,11 +13,11 @@ TEST(BulkCanonical, ChunkBoundariesPreserveOrdinaryCanonicalBytes)
     const auto header =
         EncodeBulkAppendHeader(vertical::Schema, test::collection_id, first->num_rows() + second->num_rows());
     ASSERT_TRUE(header);
-    Sha256State hash;
-    hash.Update(*header);
+    TCanonicalHasher hash;
+    hash.AddBytes(*header);
     ASSERT_TRUE(UpdateFingerprintBatches(vertical::Schema, {first}, hash));
     ASSERT_TRUE(UpdateFingerprintBatches(vertical::Schema, {second}, hash));
-    EXPECT_EQ(hash.Digest(), *expected);
+    EXPECT_EQ(hash.ComputeDigest(), *expected);
 }
 
 TEST(BulkCanonical, OnlyBulkExtendsTheDeclaredRowCount)
@@ -38,7 +38,7 @@ TEST(BulkCanonical, RejectsSmallSliceRetainingAnOversizedParent)
     const auto values = arrow::SliceBuffer(parent, 0, 1);
     const auto array = arrow::MakeArray(arrow::ArrayData::Make(arrow::utf8(), 1, {nullptr, offsets, values}));
     const auto batch = arrow::RecordBatch::Make(arrow::schema({arrow::field("key", arrow::utf8(), false)}), 1, {array});
-    Sha256State hash;
+    TCanonicalHasher hash;
     const auto result = UpdateFingerprintBatches({{{"key", FieldType::String, false}}}, {batch}, hash);
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().code, "INPUT_TOO_LARGE");
