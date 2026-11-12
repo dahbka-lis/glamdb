@@ -585,7 +585,7 @@ struct Engine::Impl
 
 #if GLAMDB_HAS_STORAGE
     template <class T, class TRead>
-    Result<T> ReadView(std::string_view id, TRead&& read)
+    Result<T> ReadView(std::string_view id, TRead&& read, bool useCache = true)
     {
         std::string root;
         bool leased = false;
@@ -612,8 +612,12 @@ struct Engine::Impl
             }
             Require(backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
             auto memory = Take(resources->Reserve(ResourceClass::Metadata, MetadataWorkBytes));
+            const auto capabilities = backend->GetCapabilities();
             context.Resources = resources;
             context.FileIO = Take(backend->ReadOnlyFileIO());
+            context.Cache = useCache ? backend->ReadMetadataCache() : nullptr;
+            context.EnableFilePruning = capabilities.file_pruning;
+            context.EnableRowGroupPruning = capabilities.row_group_pruning;
             auto result = read(context);
             if (const auto retained = RetainMetadata(resources, result); !retained) {
                 throw Failure(retained.error());
@@ -1393,7 +1397,8 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             unresolved = impl->BlockedAppend(request);
             collection = impl->CachedCollection(request.collection_id);
         }
-        const auto payload_hash = Take(FingerprintBatches(collection.schema, request.collection_id, request.batches));
+        const auto fingerprinted = Take(FingerprintInput(collection.schema, request.collection_id, request.batches));
+        const auto& payload_hash = fingerprinted.PayloadHash;
         if (unresolved) {
             return metrics.Finish(UnresolvedAppend(*unresolved, payload_hash));
         }
@@ -1508,7 +1513,9 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         }
         // Only a new operation needs owned payload memory. A retry has already
         // returned its original terminal receipt, even under a lower input cap.
-        const auto reservation = Take(InputReservation(collection.schema, request.batches));
+        // Computed by the fingerprint's inspection; normalization re-inspects
+        // the caller buffers and rejects a shape that no longer matches it.
+        const auto reservation = fingerprinted.Reservation;
         {
             std::lock_guard lock(impl->state_mutex);
             impl->CheckHealthy(expected_generation);
@@ -1521,7 +1528,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
         }
         admission.shared_input = Take(impl->resources->Reserve(ResourceClass::Data, reservation));
         impl->ReserveAttempt();
-        auto input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches));
+        auto input = Take(NormalizeBatches(collection.schema, request.collection_id, request.batches, reservation));
         Require(input.payload_hash == payload_hash, "INVALID_ARGUMENT", "Arrow input changed during append");
         const auto base = impl->catalog->Base(request.collection_id);
         // The store may have been opened by a build without a stored codec.
@@ -1582,7 +1589,7 @@ AppendOutcome Engine::AppendDurable(const AppendRequest& request)
             std::nullopt,
             std::nullopt};
         Require(ValidateOutcome(committed).has_value() &&
-                receipt.rows_appended == static_cast<int64_t>(input.rows.size()),
+                receipt.rows_appended == static_cast<int64_t>(input.GetRowCount()),
             "IO_ERROR",
             "producer returned an invalid receipt or row count");
         {
@@ -1742,15 +1749,18 @@ Result<SnapshotHistory> Engine::ListSnapshots(std::string_view id) const
 {
     const auto impl = impl_;
 #if GLAMDB_HAS_STORAGE
-    return impl->ReadView<SnapshotHistory>(id, [&](const TScanContext& context) {
-        std::vector<AppendResult> receipts;
-        for (const auto& record : impl->catalog->Operations()) {
-            if (record.state == OperationState::Committed && record.outcome && record.outcome->result) {
-                receipts.push_back(*record.outcome->result);
+    return impl->ReadView<SnapshotHistory>(
+        id,
+        [&](const TScanContext& context) {
+            std::vector<AppendResult> receipts;
+            for (const auto& record : impl->catalog->Operations()) {
+                if (record.state == OperationState::Committed && record.outcome && record.outcome->result) {
+                    receipts.push_back(*record.outcome->result);
+                }
             }
-        }
-        return ReadHistory(context, receipts);
-    });
+            return ReadHistory(context, receipts);
+        },
+        false);
 #else
     (void)id;
     return std::unexpected(
@@ -1793,9 +1803,12 @@ Result<TFileDetails>
 Engine::GetFileDetails(std::string_view collectionID, std::string_view fileID, SnapshotSelector selector) const
 {
 #if GLAMDB_HAS_STORAGE
-    return impl_->ReadView<TFileDetails>(collectionID, [&](const TScanContext& context) {
-        return ReadFileDetails(context, fileID, selector);
-    });
+    return impl_->ReadView<TFileDetails>(
+        collectionID,
+        [&](const TScanContext& context) {
+            return ReadFileDetails(context, fileID, selector);
+        },
+        false);
 #else
     (void)collectionID;
     (void)fileID;
@@ -1852,8 +1865,12 @@ Result<std::shared_ptr<ScanCursor>> Engine::Scan(const ScanRequest& request) con
             leased_root = context.Base.metadata_location;
         }
         Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
+        const auto capabilities = impl->backend->GetCapabilities();
         context.Resources = impl->resources;
         context.FileIO = Take(impl->backend->ReadOnlyFileIO());
+        context.Cache = impl->backend->ReadMetadataCache();
+        context.EnableFilePruning = capabilities.file_pruning;
+        context.EnableRowGroupPruning = capabilities.row_group_pruning;
         context.Closing = std::shared_ptr<const std::atomic<bool>>(impl, &impl->closing);
         context.Lease = impl;
         context.OnError = [impl](const ErrorDetail& error) {
@@ -1936,6 +1953,9 @@ Status Engine::Shutdown(std::chrono::milliseconds timeout)
         }
         // Roots whose scans finished after the last append.
         impl->RemoveReleasedRoots();
+        if (impl->backend) {
+            impl->backend->InvalidateCache();
+        }
         impl->catalog->Close();
         std::lock_guard state_lock(impl->state_mutex);
         impl->ready = false;
