@@ -64,26 +64,31 @@ Raw JSON and executed logs from this run are retained locally under the ignored
 `artifacts/bulk-ingestion/2026-11-12/` directory.
 
 The measurement candidate used base `47cc955`. Final integration also includes
-`dce0c5a` (Arrow ownership/download and HTTP scan-quota changes); the data-production
-path is unchanged, and complete native/Python/UI tests were repeated after that
-integration.
+`c5ca585` (Arrow ownership/download, HTTP scan quotas, Parquet compression settings
+and combined recovery coverage). Measurements use the default writer encoding;
+nondefault compression levels were not included in this memory/timing campaign.
+The final integration repeats correctness checks and independently checks every
+bulk footer, settings changes, exact retries and reopen with catalog schema version 2.
 
 ## Correctness and quality checks
 
-- Complete Release build and CTest: **zero failures in 807 executed cases**, including native HTTP/SDK,
+- Complete Release build and CTest: **zero failures across 958 cases**, including native HTTP/SDK,
   installed consumer, protocol/fault, storage, I/O and scanner suites. Two
-  existing measurement tests were disabled; child-process entrypoints skipped
+  existing measurements and two manual capacity campaigns were disabled; child-process entrypoints skipped
   when invoked without their parent environment.
-- Complete Python suite after integration with `main`: **955 passed**, one expected skip; one
-  external Starlette deprecation warning. Complete Node suite: **180 passed**.
-- ASan/UBSan: unit **122**, vertical **170**, storage **171**, I/O **178** passed.
-  Seven child/manual entrypoints skipped; existing measurements and the two manual
-  capacity campaigns were excluded from sanitizer execution.
+- Complete Python suite after integration with `main`: **1,030 passed**, one expected skip; one
+  external Starlette deprecation warning. Complete Node suite: **192 passed**.
+- ASan/UBSan after the final `c5ca585` integration: vertical **315** and storage
+  **174** passed; eight expected child entrypoints skipped across those suites.
+  Earlier unit **122** and I/O **178** cases also passed before this integration.
+  Existing measurements and the two manual capacity campaigns were excluded
+  from sanitizer execution.
   Leak detection was disabled because LeakSanitizer cannot run under the local
   ptrace-based sandbox; no LSan or TSan result is claimed here.
-- LLVM 18 formatting across 248 project files, clang-tidy on all 17 changed
+- LLVM 18 formatting across 255 project files, clang-tidy on all 17 changed
   translation units, and quality negative checks passed. Diagnostics were fixed
-  and the affected translation units rechecked.
+  and the affected translation units rechecked; both edited C++ translation units
+  from the final integration were checked again.
 - Literal shared fixtures cover canonical chunk equivalence, receipt version 2,
   unsupported versions, ordinary limits, precise timestamps and 17 invalid
   receipt mutations in native, SDK, UI and independent verifier tests.
@@ -130,6 +135,15 @@ publication/recovery bounds. Shutdown and constrained-admission tests were added
 in response to its evidence checklist. Existing corruption-generation tests
 exercise the shared coordinator; no new bulk-specific corruption-race campaign
 or maximum-width NULL-heavy RSS qualification is claimed.
+
+A second independent review examined the integration with the newly merged
+Parquet settings and recovery coverage. It found no additional code blocker:
+settings are refreshed under the writer lock, both producers apply them to every
+file, terminal retries precede codec admission, and catalog schema version 2 is
+independent of result receipt version 2. It clarified the catalog outcome-blob
+encoding wording. Building the immutable writer specification once per operation
+and calibrating reservations across compression levels are further improvements;
+the footer/retry/reopen regression covers the implemented integration.
 
 The two-pass choice avoids a payload spool and its recovery/cleanup protocol,
 but requires replayable input, repeats hashing on retries and conservatively

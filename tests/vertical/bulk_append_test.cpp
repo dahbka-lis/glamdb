@@ -4,6 +4,9 @@
 #include "tests/support/journal_fault_vfs.h"
 #include "tests/vertical/vertical_support.h"
 
+#include <parquet/file_reader.h>
+#include <parquet/metadata.h>
+
 #include <chrono>
 #include <future>
 
@@ -211,6 +214,57 @@ TEST_F(TBulkAppendTest, StreamsBoundedFilesIntoOneSnapshotAndPreservesOldReceipt
     EXPECT_EQ(Read(SnapshotSelector::Id(snapshot)), source->Rows);
     EXPECT_EQ(Engine_->BulkAppendDurable(request), result);
     EXPECT_EQ(*Engine_->FindAppendOutcome(test::collection_id, FirstOperation), result);
+}
+
+TEST_F(TBulkAppendTest, CollectionCompressionAppliesToEveryBulkFileAndRetriesKeepOriginalSettings)
+{
+    const WriteSettings settings{ParquetCompression{ParquetCodec::Gzip, 6},
+        {{"key", ParquetCompression{ParquetCodec::Uncompressed, std::nullopt}}}};
+    ASSERT_TRUE(Engine_->UpdateWriteSettings({test::collection_id, 0, settings}));
+    const auto source = std::make_shared<TGeneratedBulkSource>();
+    const auto request = Request(source);
+    const auto committed = Engine_->BulkAppendDurable(request);
+    ASSERT_EQ(committed.disposition, CommitDisposition::Committed)
+        << (committed.error ? test::Present(committed.error).message : std::string());
+    ASSERT_TRUE(committed.result);
+    const auto& result = test::Present(committed.result);
+    ASSERT_GT(result.data_files_added, 1);
+    const auto verifyFooters = [&] {
+        int64_t files = 0;
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(Root_ / "warehouse")) {
+            if (entry.path().extension() != ".parquet" ||
+                entry.path().filename().string().find(FirstOperation) == std::string::npos)
+            {
+                continue;
+            }
+            ++files;
+            const auto reader = parquet::ParquetFileReader::OpenFile(entry.path().string());
+            const auto footer = reader->metadata();
+            ASSERT_GT(footer->num_row_groups(), 0);
+            for (int group = 0; group < footer->num_row_groups(); ++group) {
+                for (int column = 0; column < footer->num_columns(); ++column) {
+                    const auto expected = footer->schema()->Column(column)->name() == "key"
+                        ? arrow::Compression::UNCOMPRESSED
+                        : arrow::Compression::GZIP;
+                    EXPECT_EQ(footer->RowGroup(group)->ColumnChunk(column)->compression(), expected);
+                }
+            }
+        }
+        EXPECT_EQ(files, result.data_files_added);
+    };
+    verifyFooters();
+    const WriteSettings laterSettings{ParquetCompression{ParquetCodec::Snappy, std::nullopt}, {}};
+    ASSERT_TRUE(Engine_->UpdateWriteSettings({test::collection_id, 1, laterSettings}));
+    EXPECT_EQ(Engine_->BulkAppendDurable(request), committed);
+    EXPECT_EQ(Read(), source->Rows);
+    ASSERT_TRUE(Engine_->Shutdown(1000ms));
+    Engine_.reset();
+    const auto reopened = OpenExisting({Root_.string(), test::store_id});
+    ASSERT_TRUE(reopened) << reopened.error().message;
+    Engine_ = *reopened;
+    EXPECT_EQ(Engine_->BulkAppendDurable(request), committed);
+    EXPECT_EQ(Read(), source->Rows);
+    verifyFooters();
 }
 
 TEST_F(TBulkAppendTest, ChangedProductionStreamHasPermanentFailureAndNoPartialVisibility)

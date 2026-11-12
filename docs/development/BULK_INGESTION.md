@@ -22,6 +22,10 @@ The synchronous call reads twice. Pass one validates and fingerprints the entire
 source before operation binding or file production. Pass two rewinds, normalizes
 one chunk at a time, writes files, and verifies the complete canonical fingerprint
 and total before staging a snapshot. Chunk boundaries can differ between passes.
+Collection Parquet write settings are read under the serialized writer and
+applied to every output file; later settings changes preserve committed files
+and the original receipt on retry.
+
 Each returned batch must stay immutable until the next source callback, and the
 source must remain alive through the call. Callbacks run on the calling thread,
 must return promptly and must not reenter the engine writer. The embedding host
@@ -81,7 +85,8 @@ production at chunk boundaries. Cancellation cannot revoke a completed COMMIT;
 look up the original operation after an uncertain response.
 
 Bulk snapshots carry `glamdb.bulk-version=1`; committed bulk receipts use result
-`receipt_version=2`, while the outer catalog encoding remains version 1. Ordinary
+`receipt_version=2`, while catalog outcome-blob encoding remains version 1
+(independent of the SQLite catalog schema version). Ordinary
 receipt bytes and hashes are preserved. New readers accept both result versions;
 older binaries reject the extended bulk state and must not be used to open it.
 Recovery and publication both validate actual file rows/bytes/counts against

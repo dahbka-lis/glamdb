@@ -84,6 +84,10 @@ if(NOT GLAMDB_IO_ONLY)
             "${CMAKE_CURRENT_SOURCE_DIR}/integration/bulk_ingestion_test.py"
             "$<TARGET_FILE:glamdb_bulk_ingestion_bench>")
         set_tests_properties(glamdb.bulk_ingestion PROPERTIES LABELS "integration;bulk" TIMEOUT 240)
+
+        add_executable(glamdb_parquet_settings_bench "${PROJECT_SOURCE_DIR}/benchmarks/parquet_settings.cpp")
+        target_include_directories(glamdb_parquet_settings_bench PRIVATE "${PROJECT_SOURCE_DIR}")
+        target_link_libraries(glamdb_parquet_settings_bench PRIVATE glamdb::core glamdb_build_options Arrow::arrow_static)
     endif()
 
     file(GLOB_RECURSE fault_test_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/fault/*.cpp")
