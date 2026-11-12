@@ -148,6 +148,10 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
         } else {
             ICEBERG_RETURN_UNEXPECTED(
                 CheckAppendMetadata(*Context_.Base->Metadata, *candidate.Metadata, Context_.ExpectedSummary));
+            if (std::ranges::binary_search(Context_.Base->ExpiredSnapshotIDs, candidate.Metadata->current_snapshot_id))
+            {
+                return iceberg::ValidationFailed("Append reuses an expired snapshot identity.");
+            }
         }
         candidate.Usage = Context_.Base->Usage;
         candidate.ScanIndex = Context_.Base->ScanIndex;

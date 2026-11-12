@@ -40,7 +40,8 @@ TEST(SnapshotRetentionPolicy, FutureTimestampStopsPrefixWithoutExpiringCurrent)
     EXPECT_EQ(*ExpirationPrefix(metadata, {4096, 0}, 100), 0U);
     EXPECT_TRUE(CheckRetentionPolicy({1, 253402300799999LL}));
     EXPECT_FALSE(CheckRetentionPolicy({0, 0}));
-    EXPECT_FALSE(CheckRetentionPolicy({4097, 0}));
+    EXPECT_TRUE(CheckRetentionPolicy({4097, 0}));
+    EXPECT_FALSE(CheckRetentionPolicy({(1LL << 40) + 1, 0}));
     EXPECT_FALSE(CheckRetentionPolicy({1, -1}));
     EXPECT_FALSE(CheckRetentionPolicy({1, 253402300800000LL}));
 }

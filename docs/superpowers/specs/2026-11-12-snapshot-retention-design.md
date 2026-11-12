@@ -34,11 +34,10 @@ removed. Already
 planned cursors continue reading their immutable membership and data; new reads
 and preconditions on expired IDs return `SNAPSHOT_EXPIRED`.
 
-The default operation capacity remains 4,096. An explicitly larger finite
-operation profile (up to 8,192) reserves additional catalog/recovery memory;
-retention-enabled collections can retain up to 16,384 retained manifests. Data,
-catalog bytes and manifest bytes remain bounded; expiration is not compaction.
-No HTTP/SDK/UI maintenance interface is added in this change.
+The default operation capacity remains 4,096. The configured operation, catalog,
+history and recovery budgets stay authoritative before and after expiration.
+Expiration inventories use bounded keyset pages. Data and metadata remain finite;
+expiration is not compaction. No HTTP/SDK/UI maintenance interface is added.
 
 ## Invariants and evidence
 

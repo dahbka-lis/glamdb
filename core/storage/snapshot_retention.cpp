@@ -37,11 +37,11 @@ ReadInteger(const std::unordered_map<std::string, std::string>& properties, cons
 
 iceberg::Status CheckRetentionPolicy(const TRetentionPolicy& policy)
 {
-    if ((policy.KeepLast && (*policy.KeepLast < 1 || *policy.KeepLast > 4096)) || policy.MinAgeMs < 0 ||
+    if ((policy.KeepLast && (*policy.KeepLast < 1 || *policy.KeepLast > (1LL << 40))) || policy.MinAgeMs < 0 ||
         policy.MinAgeMs > 253402300799999LL)
     {
         return iceberg::InvalidArgument(
-            "Retention keep_last must be 1..4096 and min_age must be nonnegative and bounded.");
+            "Retention keep_last must be 1..1099511627776 and min_age must be nonnegative and bounded.");
     }
     return {};
 }
@@ -201,11 +201,4 @@ iceberg::Result<TMetadataRetirement> FindExpiredMetadata(const std::shared_ptr<i
     return result;
 }
 
-TStorageLimits RetentionLimits(TStorageLimits limits, const iceberg::TableMetadata& metadata)
-{
-    if (metadata.properties.configs().contains(RetentionVersionKey)) {
-        limits.Store.Manifests = limits.RetentionManifests;
-    }
-    return limits;
-}
 }

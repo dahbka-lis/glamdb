@@ -173,10 +173,10 @@ It lazily introduces catalog version 3, preserves all receipts and current data,
 and resumes bounded metadata cleanup after recovery. Cleanup reclaims manifest
 lists and merged inputs only after their last retained reference disappears;
 checkpoint recovery verifies original file provenance and receipt totals.
-Already planned cursors keep
-their fixed data view; new expired reads/preconditions report `SNAPSHOT_EXPIRED`.
-Default history remains unchanged. Explicit operation profiles up to 8192 reserve
-additional catalog/recovery memory; transport maintenance endpoints are not provided.
+Already planned cursors keep their fixed data view; new expired reads/preconditions
+report `SNAPSHOT_EXPIRED`. Default history remains unchanged. Retention preserves
+configured history budgets and pages expiration inventories beyond 8192 entries;
+transport maintenance endpoints are not provided.
 Compaction, general garbage collection, asynchronous admission, replication,
 multiple writers, and schema evolution are outside the initial append scope. Consult
 [docs/ROADMAP.md](docs/ROADMAP.md) when assessing feature scope; its current
@@ -540,6 +540,18 @@ strace evidence; passing cases without strace remain incomplete. Recovery path
 deduplication uses a bounded temporary SQLite database, separate from the catalog.
 See [qualification preparation](docs/development/QUALIFICATION.md) for commands,
 temporary-workspace prerequisites and the remaining qualification boundaries.
+
+The opt-in [scalable history profile](docs/development/SCALABLE_HISTORY.md)
+coordinates public engine/HTTP operation and retained-storage budgets, including
+recovery workspace and larger metadata roots. Defaults stay at 4,096 operations
+and snapshots. Catalog inventory/recovery use 256-record keyset pages; healthy
+outcome lookup remains indexed. `glamdb_history_bench` and `benchmarks/history.py`
+exercise all eight SF=10 tables through ordinary appends and verify exact typed
+row multisets in a fresh process with a bounded external-sort oracle.
+The [validation report](docs/development/SCALABLE_HISTORY_VALIDATION.md) records
+fresh-process checkpoint recovery, physical bytes, current-image RSS and review findings.
+`glamdb.history_campaign` covers duplicates, original failed/successful outcomes,
+retry/history, lowered budgets, restoration and oracle negative controls.
 
 `glamdb_capacity_bench` and `benchmarks/capacity.py` measure native aggregate
 ingestion, retained history/outcomes, physical orphan space, retained slices and

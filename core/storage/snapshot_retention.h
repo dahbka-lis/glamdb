@@ -60,6 +60,5 @@ iceberg::Result<std::size_t>
 ExpirationPrefix(const iceberg::TableMetadata& metadata, const TRetentionPolicy& policy, std::int64_t nowMs);
 // Validates and removes the supported extension properties from a profile copy.
 iceberg::Status StripRetentionProperties(std::unordered_map<std::string, std::string>& properties);
-TStorageLimits RetentionLimits(TStorageLimits limits, const iceberg::TableMetadata& metadata);
 
 }

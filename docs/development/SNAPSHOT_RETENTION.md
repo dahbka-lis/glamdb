@@ -15,7 +15,7 @@ auto next = engine->ExpireSnapshots({collection_id});
 auto effective = engine->GetSnapshotRetention(collection_id);
 ```
 
-`keep_last` accepts 1–4096; `min_age` accepts nonnegative milliseconds through
+`keep_last` accepts 1–2^40; `min_age` accepts nonnegative milliseconds through
 253402300799999. Retention protects the union of the newest `keep_last`
 snapshots, snapshots younger than `min_age`, and the current snapshot. A snapshot
 at exactly the minimum age can expire. Future-dated snapshots remain protected
@@ -91,13 +91,18 @@ publication. Version 3 is introduced transactionally and includes the existing
 write-settings schema plus expiration and cleanup tables. Older binaries reject
 version 3. The immutable store and append receipt formats remain unchanged.
 
-The default permanent operation limit remains 4096. To exceed it, create/open
-with the same explicit `Limits::max_operations` (up to 8192); a larger profile
-reserves additional catalog/recovery memory. This ceiling stays within the
-existing 8192-row catalog inventory query bound. Retention-enabled collections allow
-16384 retained manifests; data files, root/manifest/list bytes, catalog bytes,
-warehouse capacity and shared reservations remain finite. Retention cannot make
-an append-only data inventory independent of the number of appends.
+The default permanent operation limit remains 4096. To exceed it, select adequate
+explicit `Limits::max_operations`, catalog bytes and `Limits::history` budgets,
+and pass the same profile when reopening; see [configurable history](SCALABLE_HISTORY.md).
+Retention never raises or lowers configured capacity. Successful history is bounded
+by the lesser of the operation and data-file budgets: above 4096 such slots,
+admission reserves an additional 16 KiB metadata and 64 KiB recovery memory per
+slot. This covers expired ancestry even when the retained root is small; streamed
+failed operations do not inflate this reservation. Catalog operation and
+expiration inventories use bounded keyset pages, so a ledger beyond 8192 entries
+remains recoverable. Data files, roots, manifests, lists, catalog bytes, warehouse
+capacity and shared reservations remain finite. Retention cannot make an
+append-only data inventory independent of the number of appends.
 
 ## Validation
 
@@ -124,23 +129,22 @@ Executed on 2026-11-12 with Clang 18, Linux x86-64, a Debug build and disposable
 
 | Check | Result |
 | --- | --- |
-| 4,100 committed appends, 12,300 rows | PASS; 412,924 ms through the final maintenance |
-| Maximum root after maintenance | 8,660 bytes; eight snapshots retained |
-| Fresh-process reopen | 13,267 ms; every original serialized receipt verified |
-| Full native/SDK/HTTP CTest suite | PASS; 0 failures out of 1,143 enabled entries, with 12 helper/measurement skips |
-| Focused retention, planner, adapter and catalog compatibility regressions | PASS; 22 tests |
-| ASan/UBSan/LSan retention, adapter, settings and cursor lifetime checks | PASS; 49 tests |
-| LLVM 18 formatting / changed translation units / quality negative check | PASS; 295 files / 17 translation units / deliberate violations rejected |
+| 4,100 committed appends, 12,300 rows | PASS; 310,465 ms through the final maintenance |
+| Maximum root after maintenance | 8,644 bytes; eight snapshots retained |
+| Fresh-process reopen | 4,324 ms; every original serialized receipt verified |
+| Full native/SDK/HTTP CTest suite | PASS; 0 failures out of 1,183 enabled entries, with 13 helper/measurement skips |
+| Focused retention, planner, adapter and catalog compatibility regressions | PASS; 25 native tests |
+| ASan/UBSan/LSan retention, adapter, settings and cursor lifetime checks | PASS; 108 tests across native, storage and catalog suites |
+| LLVM 18 formatting / changed translation units / quality negative check | PASS; 299 files / 18 translation units / deliberate violations rejected |
 
 The full-suite command was
 `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 ctest --test-dir build/local --output-on-failure --parallel 4`.
-All enabled entries completed in 210.38 seconds without retries. An earlier eight-worker run hit the unchanged
-Arrow scratch test's 30-second timeout; it passed alone and in the final run.
-Five manual campaigns remain disabled in default CTest; the retention campaign
-above was executed separately. Two earlier retention runs also passed with the
-same maximum root size (reopen times 10,460 and 15,261 ms). These runs did not
-control cache warmth or qualify combined capacity, dedicated-device behavior,
-or physical power loss. G4 remains NOT RUN.
+All enabled entries completed in 225.93 seconds without retries, on the integrated
+manifest-merging/configurable-history code. Five manual campaigns remain disabled
+in default CTest; the retention campaign above was executed separately. Earlier
+runs before manifest merging also passed, but their timings do not measure this
+producer. The runs did not control cache warmth or qualify combined capacity,
+dedicated-device behavior, or physical power loss. G4 remains NOT RUN.
 
 The sanitizer build uses `GLAMDB_ENABLE_ASAN=ON` and `GLAMDB_ENABLE_UBSAN=ON`;
 the focused executable runs with `ASAN_OPTIONS=detect_leaks=1` and
@@ -149,12 +153,12 @@ the focused executable runs with `ASAN_OPTIONS=detect_leaks=1` and
 ## Design review
 
 Independent review exposed two compatibility pitfalls now covered by
-regressions: every catalog-version preflight must accept version 3, and
-aggregate store limits must remain distinct from each collection's manifest
-profile. Opting one collection into retention cannot admit an unreadable state
-in another collection. Reopen also checks aggregate usage independently of
-collection creation order. The operation ceiling also stays within the catalog
-inventory's 8192-row bound.
+regressions: every catalog-version preflight must accept version 3, and installing
+a retention policy must preserve configured storage budgets. Opting one collection
+into retention cannot admit an unreadable state in another collection. Reopen
+also checks aggregate usage independently of collection creation order. Integration
+with configurable history added paged expiration inventories, overflow-safe queue
+bounds, larger keep-last values and owned receipts across streaming callbacks.
 
 The adapter review added deterministic regressions for an expired history
 selector and expiration between statistics and history reads. A keep-last-one
@@ -167,7 +171,11 @@ recovery, union-based last-reference manifest cleanup, and bounded cleanup batch
 Regressions cover the 99/100 to 100/101 reference transition, original bulk files,
 identical publication/recovery accounting, malformed file provenance, early Avro
 record limits and a cleanup queue larger than 8192 paths. Fresh-process tests
-also cover format-reader initialization before checkpoint recovery.
+also cover format-reader initialization before checkpoint recovery. A forced
+snapshot-ID collision proves that append publication rejects IDs reserved by the
+expiration ledger; a randomly reused expired ID cannot become an unreadable
+committed snapshot. Resource-admission tests cover successful-history bounds,
+large operation settings and refusal before creating a store.
 
 The retained root and redundant list history are bounded by explicit maintenance;
 permanent receipts and the current append-only file inventory still grow within

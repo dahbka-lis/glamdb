@@ -222,9 +222,9 @@ void DurableSqliteCatalogStore::Configure()
             profile.cache_size == -8192 && profile.mmap_size == 0,
         "IO_ERROR",
         "SQLite working connection settings did not take effect");
-    Require(limits_.max_catalog_bytes >= 65536 && limits_.max_catalog_bytes <= 256LL * 1024 * 1024 &&
-            limits_.max_operations > 0 && limits_.max_operations <= Limits::MaxSupportedOperations &&
-            limits_.max_collections > 0 && limits_.max_collections <= Limits::MaxSupportedCollections,
+    Require(limits_.max_catalog_bytes >= 65536 && limits_.max_catalog_bytes <= (1LL << 40) &&
+            limits_.max_operations > 0 && limits_.max_collections > 0 &&
+            limits_.max_collections <= Limits::MaxSupportedCollections,
         "INVALID_ARGUMENT",
         "invalid catalog limits");
     const auto pages = limits_.max_catalog_bytes / database_.Integer("PRAGMA page_size");
@@ -590,19 +590,36 @@ OperationRecord DurableSqliteCatalogStore::ReadOperation(const SqlRow& row)
 
 std::vector<OperationRecord> DurableSqliteCatalogStore::Operations()
 {
+    std::vector<OperationRecord> result;
+    ForEachOperation([&](const auto& record) {
+        result.push_back(record);
+    });
+    return result;
+}
+
+void DurableSqliteCatalogStore::ForEachOperation(const OperationConsumer& consume, std::string_view collection_id)
+{
     std::lock_guard lock(mutex_);
     Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
-    const auto rows = database_.Query(
-        "SELECT " + std::string(operation_columns) + " FROM operations ORDER BY collection_id,operation_id");
-    Require(rows.size() <= static_cast<size_t>(limits_.max_operations),
+    Require(database_.Integer("SELECT COUNT(*) FROM operations") <= limits_.max_operations,
         "CONFIG_TOO_SMALL",
         "operation count exceeds configured capacity");
-    std::vector<OperationRecord> result;
-    result.reserve(rows.size());
-    for (const auto& row : rows) {
-        result.push_back(ReadOperation(row));
+    std::string last_collection;
+    std::string last_operation;
+    while (true) {
+        const auto rows = database_.Query("SELECT " + std::string(operation_columns) +
+                " FROM operations WHERE (collection_id,operation_id)>(?,?) "
+                "AND (?='' OR collection_id=?) ORDER BY collection_id,operation_id LIMIT 256",
+            {last_collection, last_operation, std::string(collection_id), std::string(collection_id)});
+        if (rows.empty()) {
+            break;
+        }
+        for (const auto& row : rows) {
+            consume(ReadOperation(row));
+        }
+        last_collection = Required(rows.back(), 0);
+        last_operation = Required(rows.back(), 1);
     }
-    return result;
 }
 
 std::optional<OperationRecord> DurableSqliteCatalogStore::FindOperation(std::string_view collection_id,
@@ -833,17 +850,26 @@ std::vector<ExpiredSnapshotRecord> DurableSqliteCatalogStore::ExpiredSnapshots(s
     if (database_.Integer("PRAGMA user_version") < 3) {
         return {};
     }
-    const auto rows = database_.Query("SELECT snapshot_id,sequence_number,operation_id FROM expired_snapshots "
-                                      "WHERE collection_id=? ORDER BY sequence_number",
-        {std::string(id)});
-    Require(rows.size() <= static_cast<size_t>(limits_.max_operations),
-        "CONFIG_TOO_SMALL",
-        "expired inventory exceeds capacity");
+    const auto countRows =
+        database_.Query("SELECT COUNT(*) FROM expired_snapshots WHERE collection_id=?", {std::string(id)});
+    const auto count = ParseInteger(Required(countRows.at(0), 0));
+    Require(count >= 0 && count <= limits_.max_operations, "CONFIG_TOO_SMALL", "expired inventory exceeds capacity");
     std::vector<ExpiredSnapshotRecord> result;
-    result.reserve(rows.size());
-    for (const auto& row : rows) {
-        result.push_back({ParseInteger(Required(row, 0)), ParseInteger(Required(row, 1)), Required(row, 2)});
+    int64_t last = 0;
+    while (true) {
+        const auto rows =
+            database_.Query("SELECT snapshot_id,sequence_number,operation_id FROM expired_snapshots "
+                            "WHERE collection_id=? AND sequence_number>? ORDER BY sequence_number LIMIT 256",
+                {std::string(id), last});
+        if (rows.empty()) {
+            break;
+        }
+        for (const auto& row : rows) {
+            result.push_back({ParseInteger(Required(row, 0)), ParseInteger(Required(row, 1)), Required(row, 2)});
+        }
+        last = result.back().sequence_number;
     }
+    Require(result.size() == static_cast<std::uint64_t>(count), "CORRUPTION", "expiration ledger is incomplete");
     return result;
 }
 
@@ -867,7 +893,9 @@ int64_t DurableSqliteCatalogStore::PendingMetadataCount(std::string_view id)
     }
     const auto rows = database_.Query("SELECT COUNT(*) FROM metadata_cleanup WHERE collection_id=?", {std::string(id)});
     const auto count = ParseInteger(Required(rows.at(0), 0));
-    Require(count >= 0 && count <= limits_.max_operations * 9, "CORRUPTION", "cleanup inventory exceeds capacity");
+    Require(count >= 0 && count / 9 + (count % 9 != 0 ? 1 : 0) <= limits_.max_operations,
+        "CORRUPTION",
+        "cleanup inventory exceeds capacity");
     return count;
 }
 
@@ -979,13 +1007,13 @@ void DurableSqliteCatalogStore::ValidateInventory()
     for (const auto& collection : collections) {
         (void)Base(collection.collection_id);
     }
-    for (const auto& record : Operations()) {
+    ForEachOperation([&](const auto& record) {
         const auto base = Base(record.binding.collection_id);
         Require(record.binding.base.table_uuid == base.table_uuid && record.binding.base.schema_id == base.schema_id &&
                 record.binding.base.spec_id == base.spec_id,
             "CORRUPTION",
             "operation bound to a different table");
-    }
+    });
 }
 
 void DurableSqliteCatalogStore::DurabilityFence()

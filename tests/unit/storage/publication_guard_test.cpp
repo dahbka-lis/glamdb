@@ -225,7 +225,8 @@ protected:
         const std::string& retainedDataPath = {},
         int bulkFiles = 0,
         bool duplicateBulkFile = false,
-        const std::function<void(std::vector<iceberg::ManifestEntry>&)>& rewriteEntries = {})
+        const std::function<void(std::vector<iceberg::ManifestEntry>&)>& rewriteEntries = {},
+        std::optional<int64_t> forcedSnapshotID = std::nullopt)
     {
         Scope_.reset();
         const auto attemptID = std::string("33333333-3333-7333-8333-33333333333") + std::to_string(index + 3);
@@ -282,7 +283,7 @@ protected:
         if (rewriteEntries) {
             stagedMetadata = std::make_shared<iceberg::TableMetadata>(*base->Metadata);
             auto snapshot = std::make_shared<iceberg::Snapshot>();
-            snapshot->snapshot_id = 1690000 + index;
+            snapshot->snapshot_id = forcedSnapshotID.value_or(1690000 + index);
             snapshot->parent_snapshot_id = base->Metadata->current_snapshot_id;
             snapshot->sequence_number = ++stagedMetadata->last_sequence_number;
             stagedMetadata->last_updated_ms += std::chrono::milliseconds(1);
@@ -704,6 +705,32 @@ TEST_F(TPublicationGuardTest, ExpiredMergedCheckpointPreservesBulkFilesAndExactR
     recovery = VerifyReachable(IO_, (*retained)->MetadataLocation, StoreID, CollectionID, {}, {}, expired);
     ASSERT_TRUE(recovery) << recovery.error().message;
     EXPECT_EQ(recovery->Usage, (*retained)->Usage);
+}
+
+TEST_F(TPublicationGuardTest, AppendCannotReuseAnExpiredSnapshotIdentity)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto first = Append(1, create.GetCandidate(), 3);
+    ASSERT_TRUE(first) << first.error().message;
+    const auto second = Append(2, *first, 2);
+    ASSERT_TRUE(second) << second.error().message;
+    const auto retained = RetainLatest(*second);
+    ASSERT_TRUE(retained) << retained.error().message;
+    const auto reused = Append(
+        3,
+        *retained,
+        1,
+        {},
+        {},
+        0,
+        false,
+        [](auto&) {
+        },
+        (*first)->Metadata->current_snapshot_id);
+    ASSERT_FALSE(reused);
+    EXPECT_EQ(reused.error().message, "Append reuses an expired snapshot identity.");
 }
 
 class TMergedClosureCorruptionTest

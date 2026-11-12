@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <format>
 #include <iostream>
+#include <limits>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -203,7 +204,7 @@ TEST_F(TSnapshotRetentionTest, InvalidPolicyDoesNotPublishOrRemoveAnything)
 {
     const auto before = CountRegularFiles(Root_ / "warehouse");
     for (const auto& policy : {SnapshotRetentionPolicy{0},
-             SnapshotRetentionPolicy{4097},
+             SnapshotRetentionPolicy{(1LL << 40) + 1},
              SnapshotRetentionPolicy{1, std::chrono::milliseconds(-1)}})
     {
         const auto result = Engine_->ExpireSnapshots({test::collection_id, policy});
@@ -487,13 +488,62 @@ TEST(SnapshotRetention, DISABLED_MoreThan4096AppendsBoundRootAndVerifyAllReceipt
     RunRetentionChild(root, "verify", 12300);
 }
 
+TEST(SnapshotRetention, VeryLargeOperationLimitAndKeepLastDoNotOverflowMaintenance)
+{
+    test::TempDir directory;
+    const auto root = directory.path / "store";
+    Limits limits;
+    limits.max_operations = std::numeric_limits<int64_t>::max();
+    auto created = CreateStore({test::store_id, root.string(), "local-delete-extra-v1", limits});
+    ASSERT_TRUE(created) << created.error().message;
+    auto engine = std::move(*created);
+    ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", Schema}).disposition,
+        CommitDisposition::Committed);
+    ASSERT_EQ(engine->AppendDurable({test::collection_id, FirstOperation, {}, {Batch(FirstRows)}}).disposition,
+        CommitDisposition::Committed);
+    ASSERT_EQ(engine->AppendDurable({test::collection_id, SecondOperation, {}, {Batch(SecondRows)}}).disposition,
+        CommitDisposition::Committed);
+    const auto protectedHistory = engine->ExpireSnapshots({test::collection_id, SnapshotRetentionPolicy{8193}});
+    ASSERT_TRUE(protectedHistory) << protectedHistory.error().message;
+    EXPECT_EQ(protectedHistory->snapshots_expired, 0);
+    EXPECT_EQ(protectedHistory->cleanup_pending, 0);
+    const auto expired = engine->ExpireSnapshots({test::collection_id, SnapshotRetentionPolicy{1}});
+    ASSERT_TRUE(expired) << expired.error().message;
+    EXPECT_EQ(expired->snapshots_expired, 1);
+    EXPECT_EQ(expired->cleanup_pending, 0);
+    ASSERT_TRUE(engine->Shutdown(std::chrono::seconds(5)));
+    engine.reset();
+    const auto opened = OpenExisting({root.string(), test::store_id, "local-delete-extra-v1", limits});
+    ASSERT_TRUE(opened) << opened.error().message;
+    EXPECT_EQ((*opened)->GetStatistics(test::collection_id)->rows.value, 5);
+    EXPECT_EQ((*opened)->ListSnapshots(test::collection_id)->snapshots.size(), 1U);
+}
+
+TEST(SnapshotRetention, SuccessfulHistoryReservationRefusesBeforeCreationAndBoundsHugeOperationProfiles)
+{
+    test::TempDir directory;
+    const auto root = directory.path / "store";
+    ResourceLimits budget;
+    budget.memory_bytes[static_cast<size_t>(ResourceClass::Recovery)] = 1ULL << 30;
+    const auto owner = std::make_shared<ResourceOwner>(budget);
+    Limits limits;
+    limits.max_operations = std::numeric_limits<int64_t>::max();
+    const auto refused = CreateStore({test::store_id, root.string(), "local-delete-extra-v1", limits, owner});
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "RESOURCE_EXHAUSTED");
+    EXPECT_FALSE(std::filesystem::exists(root));
+    limits.history.max_data_files = 2;
+    const auto admitted = CreateStore({test::store_id, root.string(), "local-delete-extra-v1", limits, owner});
+    ASSERT_TRUE(admitted) << admitted.error().message;
+    EXPECT_TRUE((*admitted)->GetHealth().write_ready);
+}
+
 TEST(SnapshotRetention, OptInDoesNotRelaxOtherCollectionsManifestProfile)
 {
     test::TempDir directory;
     const auto root = directory.path / "store";
     detail::TLocalStorageOptions options;
     options.Storage.Store.Manifests = 1;
-    options.Storage.RetentionManifests = 4;
     auto created = detail::EngineFactory::CreateWith({test::store_id, root.string()}, RetentionBackend(options));
     ASSERT_TRUE(created);
     auto engine = std::move(*created);
@@ -545,8 +595,7 @@ TEST(SnapshotRetention, AggregateReopenIsIndependentOfCollectionCreationOrder)
     test::TempDir directory;
     const auto root = directory.path / "store";
     detail::TLocalStorageOptions options;
-    options.Storage.Store.Manifests = 1;
-    options.Storage.RetentionManifests = 4;
+    options.Storage.Store.Manifests = 3;
     auto created = detail::EngineFactory::CreateWith({test::store_id, root.string()}, RetentionBackend(options));
     ASSERT_TRUE(created);
     auto engine = std::move(*created);

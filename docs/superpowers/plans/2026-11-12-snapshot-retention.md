@@ -18,6 +18,7 @@ recover current files from retained snapshots and permanent append receipts.
 - Never delete Parquet or a manifest referenced by a retained snapshot.
 - Keep all original append receipts and exact retries.
 - Use snapshot sequence numbers for prefix ordering, never opaque IDs.
+- Reject a new snapshot identity already reserved by the expiration ledger.
 - Public errors distinguish `SNAPSHOT_EXPIRED` from unknown snapshots.
 
 ## Review Focus
@@ -29,7 +30,7 @@ recover current files from retained snapshots and permanent append receipts.
 - Cleanup parsing and queue materialization retain finite preallocation bounds.
 - A larger age guarantee must protect history even when keep-last is small (task 1).
 - An expired parent must not weaken receipt/provenance checks (task 2).
-- Larger operation capacity must remain finite and reserved (task 4).
+- Larger profiles must keep bounded inventory reads and shared admission (task 4).
 
 ### Task 1: Retention policy and public behavior
 
@@ -69,7 +70,7 @@ Files: `core/engine/engine.cpp`, `core/io/store_dirs.*`, vertical tests.
 
 Files: `public/storage/types.h`, resource envelopes, development documentation.
 
-- [x] Reserve larger finite operation profiles, keep defaults unchanged, and
+- [x] Preserve configured finite operation/history budgets and defaults, and
   run >4,096 real appends with periodic explicit maintenance and fresh reopen.
 - [x] Record measured root sizes and reopen time; verify that expired manifest-list
   bytes and last-reference manifests are reclaimed.
