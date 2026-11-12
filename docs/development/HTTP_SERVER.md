@@ -199,6 +199,7 @@ separate, broader development profile.
 | `GET /collections/{id}` | `GetCollection` | Identity and current schema |
 | `GET /collections/{id}/schema` | `GetCollection` / `Schema` | Stable field IDs |
 | `POST /collections/{id}/append` | `AppendDurable` | Synchronous native receipt |
+| `POST /collections/{id}/bulk-append` | `BulkAppendDurable` | Bounded NDJSON, anonymous disk replay, one atomic receipt |
 | `POST /collections/{id}/write-settings` | `UpdateWriteSettings` | Compare-and-set of Parquet settings for later appends |
 | `GET /collections/{id}/operations/{op}` | `FindAppendOutcome` | Original result or authoritative absence |
 | `POST /collections/{id}/scan/open` | `Scan` | Resolve a fixed view and return a cursor without consuming rows |
@@ -445,7 +446,7 @@ Collections accept `page_size` 1..1000; insufficient size or any cursor returns
 ## HTTP service profile
 
 Standalone Asio provides asynchronous sockets, timers and signals. Separate pools
-serve readers (four workers, two calls per database), publishers (four workers,
+serve readers (by default four workers, two calls per database), publishers (four workers,
 one per database), lifecycle (four workers, one per database), and controls/static
 files (two workers, one per database). Each pool uses per-database FIFO queues and
 round-robin dispatch: at most 64 queued calls and 64 MiB of queued bodies per pool,
@@ -456,6 +457,23 @@ its send side; queued and active calls retain their response socket. Active core
 calls finish independently of read/queue deadlines. Outcome
 lookup never waits on an in-progress catalog publication. Health and capabilities
 run on the I/O thread. Core retains its single serialized writer.
+
+`--http-readers` configures active reader workers globally (1–4, default 4);
+`--http-readers-per-database` configures active readers per database (1 through
+the global limit, default 2). Invalid profiles fail before opening the service
+directory. These are active-call limits, separate from scan cursor quotas and
+TCP/body limits. Reducing reader admission preserves the independent publisher,
+control and lifecycle pools, bounded fair queues, deadlines and response ownership.
+
+For a small host whose shared metadata budget admits one heavy read, configure
+both reader limits to 1 so simultaneous Explain/statistics calls queue instead
+of competing for the same working reservation. Explain currently holds two
+768 MiB metadata envelopes plus retained store/result memory; 1280 MiB cannot
+admit even one Explain. An example finite profile uses 512 MiB data, 1792 MiB
+metadata, 32 MiB control, 64 MiB completion and 1536 MiB recovery, with
+`--scan-live-limit 1 --scan-live-per-database 1 --http-readers 1
+--http-readers-per-database 1`. These admission envelopes are not RSS measurements
+or a guarantee that simultaneous independent publishers fit the same budget.
 
 Ordinary header allowances are 64 globally and 32 per peer; excess accepted
 connections have a 100 ms header probe so complete requests can still progress.
@@ -506,7 +524,13 @@ is acknowledged after authentication and body admission. Oversized headers retur
 431, malformed line endings 400, and read timeouts 408. JSON Content-Type accepts
 case-insensitive media names and UTF-8 charset parameters. Scan Accept supports
 media lists, wildcards and quality weights.
-Use ordinary buffered JSON requests. The server defaults to 127.0.0.1:8080.
+Ordinary routes use buffered JSON requests. The [native bulk route](BULK_INGESTION.md#native-http-sdk-and-cli)
+streams LF-terminated NDJSON with Content-Length through anonymous disk scratch:
+4 GiB total wire, 16 MiB per batch, ten-minute upload deadline, two global/one
+per-database spool permits retained through publisher completion. It uses separate
+spill workers and shared disk/memory reservations; partial uploads never enter
+core. Ordinary request and queue deadlines retain their existing values.
+The server defaults to 127.0.0.1:8080.
 `--listen` is explicit; terminate TLS and apply deployment limits at a trusted
 reverse proxy for remote access. There is one bearer identity, no user/RBAC layer.
 The token comes only from `GLAMDB_TOKEN`, never a URL, log, config response or UI

@@ -56,9 +56,9 @@ Current work focuses on qualifying and improving the existing append engine:
 - Page-level and Bloom-filter pruning and broader scan memory qualification
   ([#46](https://github.com/glamourdb/glamdb/issues/46)).
 
-The embedded C++ API also supports [bounded streaming bulk append](docs/development/BULK_INGESTION.md):
+The C++ API, native HTTP service, Python SDK and CLI support [bounded streaming bulk append](docs/development/BULK_INGESTION.md):
 a replayable source produces multiple files with one atomic snapshot and receipt.
-Network upload adapters and 1 TiB qualification remain future work.
+Native uploads stream bounded batches through an anonymous disk spool. UI import and 1 TiB qualification remain future work.
 
 ### Planned
 - An explicit key-value mode with copy-on-write upserts, deletes, and batched
@@ -265,6 +265,12 @@ To run the resulting server directly, with `GLAMDB_TOKEN` set:
 ```sh
 ./build/local/apps/server/glamdb --data-dir "$PWD/build/data" --ui-root "$PWD/ui"
 ```
+
+For a smaller shared memory profile, `--http-readers 1
+--http-readers-per-database 1` queues heavy metadata reads without restricting
+control or publishing calls. Defaults remain four readers globally and two per
+database; see the [HTTP service profile](docs/development/HTTP_SERVER.md#http-service-profile)
+for the finite memory settings and admission limits.
 
 The build also produces `build/local/apps/cli/glamdb-cli`. Use the `release`
 or `asan-ubsan` preset instead of `local` for release or sanitizer builds.

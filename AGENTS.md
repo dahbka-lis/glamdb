@@ -67,6 +67,9 @@ eviction is oldest-first; live cursors are never evicted. See
 32-reader profile and `glamdb.scan_policy` real native validation.
 Separate HTTP reader, publisher, lifecycle and
 control pools use bounded fair per-database queues with deadlines and cancellation.
+`--http-readers` and `--http-readers-per-database` configure reader admission
+(defaults 4/2); a 1/1 profile queues heavy reads within a smaller shared budget
+without restricting publisher, control or lifecycle pools.
 Outcome lookups refuse tentative catalog reads without waiting on publication.
 HTTP body admission reserves four of sixteen readers from ordinary uploads for
 authenticated database lifecycle and scan cancellation, including through a TLS
@@ -129,7 +132,17 @@ under one atomic snapshot/receipt; ordinary append retains its old limits. Read
 [bulk ingestion](docs/development/BULK_INGESTION.md) for source lifetime, cancellation,
 explicit bulk I/O attempts, result receipt version 2, conservative device reservations
 and measured limits. Keep unmarked ordinary one-file guards strict and change
-publication/recovery bounds together. No bulk HTTP upload endpoint is provided.
+publication/recovery bounds together. Native `POST /collections/{id}/bulk-append` accepts bounded NDJSON through an anonymous
+transport spool; the SDK prepares replayable disk-backed requests and the standalone CLI
+streams regular files. Uploads are capped at 4 GiB wire bytes, two globally and one per
+database; shared disk/memory admission lasts through execution. See the bulk guide for
+framing, deadlines, retry, native-only availability and validation.
+
+Native append preparation retains one schema mapping per traversal and reuses
+inspected string sizes for its owned columns. Full validation remains per batch,
+and fresh post-admission inspection plus the owned-hash comparison remain before
+binding. See [append preparation](docs/development/APPEND_PREPARATION.md) for
+fragmented-input measurements, rejection scratch and remaining admission limits.
 
 The first milestone is an embedded, synchronous, durable **append store** on
 local disk. A store has one owning process and one serialized writer; reads may
@@ -685,6 +698,8 @@ from Kubernetes. The live Grafana overview separates transport, engine outcomes
 and edge/gateway layers. `tools/monitoring/extend_checks.py` applies optional
 source checks to alerting config; unavailable producers remain NODATA. Validate
 Prometheus and Loki dashboard queries with their respective engines.
+Telegram summaries use bounded, escaped native Alertmanager HTML groups; run
+`tools/alerting/check.py` for template rendering and loopback delivery checks.
 
 ## Validation and reporting
 

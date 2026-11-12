@@ -132,16 +132,24 @@ Executed on 2026-11-12 with Clang 18, Linux x86-64, a Debug build and disposable
 | 4,100 committed appends, 12,300 rows | PASS; 310,465 ms through the final maintenance |
 | Maximum root after maintenance | 8,644 bytes; eight snapshots retained |
 | Fresh-process reopen | 4,324 ms; every original serialized receipt verified |
-| Full native/SDK/HTTP CTest suite | PASS; 0 failures out of 1,183 enabled entries, with 13 helper/measurement skips |
+| Full native/SDK/HTTP suite before the final HTTP integration | PASS; 0 failures out of 1,183 enabled entries, with 13 helper/measurement skips |
+| Latest upstream HTTP integration suite | 1,191 enabled entries; one new HTTP timing test failed initially and passed on isolated retry; all other entries passed or were helper skips |
 | Focused retention, planner, adapter and catalog compatibility regressions | PASS; 25 native tests |
 | ASan/UBSan/LSan retention, adapter, settings and cursor lifetime checks | PASS; 108 tests across native, storage and catalog suites |
-| LLVM 18 formatting / changed translation units / quality negative check | PASS; 299 files / 18 translation units / deliberate violations rejected |
+| LLVM 18 formatting / changed translation units / quality negative check | PASS; 306 files / 18 translation units / deliberate violations rejected |
 
 The full-suite command was
 `GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 ctest --test-dir build/local --output-on-failure --parallel 4`.
-All enabled entries completed in 225.93 seconds without retries, on the integrated
-manifest-merging/configurable-history code. Five manual campaigns remain disabled
-in default CTest; the retention campaign above was executed separately. Earlier
+The manifest-merging/configurable-history run completed in 225.93 seconds without
+retries. A subsequent merge of upstream HTTP changes completed 1191 entries in
+171.53 seconds, with one failure in the newly introduced concurrent reader test:
+an operation lookup raced the catalog mutex held by statistics/history and
+returned `OPERATION_IN_PROGRESS`. The same locking path exists in the upstream
+base. The entire `glamdb.native_http` entry passed when rerun alone (7.94 seconds).
+That unrelated test and runtime behavior are unchanged by this extension.
+Five manual campaigns remain disabled in default CTest; the retention campaign
+above was executed before that final HTTP merge. Its retention implementation is
+unchanged; those timings do not measure the newer HTTP/input preparation code. Earlier
 runs before manifest merging also passed, but their timings do not measure this
 producer. The runs did not control cache warmth or qualify combined capacity,
 dedicated-device behavior, or physical power loss. G4 remains NOT RUN.
