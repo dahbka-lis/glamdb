@@ -318,6 +318,91 @@ TEST_F(CatalogTest, WideSchemaAndHashVersionsDoNotAliasSupportedInt32Values)
     EXPECT_THROW(DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite", info, {}), Failure);
 }
 
+TEST_F(CatalogTest, ExpirationInventoryPagesBeyondTheGeneralQueryRowLimit)
+{
+    CreateCollection();
+    Bind();
+    const auto base = catalog->Base(collection_id);
+    catalog->PublishExpiration(
+        base,
+        {},
+        {},
+        [](std::string_view) -> Status {
+            return {};
+        },
+        [&]() -> iceberg::Status {
+            const auto updated = catalog->UpdateTableMetadataLocation("columnar",
+                "events",
+                Location("maintenance"),
+                base.metadata_location,
+                base.metadata_location);
+            if (!updated) {
+                return std::unexpected(updated.error());
+            }
+            return {};
+        });
+    catalog.reset();
+    Database raw;
+    raw.Open(temporary.path / "catalog.sqlite", SQLITE_OPEN_READWRITE, {});
+    raw.Execute("WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<8192) "
+                "INSERT INTO operations SELECT collection_id,printf('16800000-0000-4000-8000-%012x',n),"
+                "payload_hash,hash_version,state,base_identity,attempt_id,receipt_version,outcome_blob "
+                "FROM operations,numbers");
+    raw.Execute("INSERT INTO expired_snapshots SELECT collection_id,row_number() OVER(ORDER BY operation_id),"
+                "row_number() OVER(ORDER BY operation_id),operation_id FROM operations");
+    raw.Close();
+    Limits limits;
+    limits.max_operations = 10000;
+    catalog = DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite", info, limits);
+    const auto expired = catalog->ExpiredSnapshots(collection_id);
+    ASSERT_EQ(expired.size(), 8193U);
+    EXPECT_EQ(expired.front().sequence_number, 1);
+    EXPECT_EQ(expired.back().sequence_number, 8193);
+    EXPECT_EQ(expired.front().snapshot_id, 1);
+    EXPECT_EQ(expired.back().snapshot_id, 8193);
+}
+
+TEST_F(CatalogTest, CleanupBacklogUsesBoundedBatchesAndAnExactCount)
+{
+    CreateCollection();
+    const auto base = catalog->Base(collection_id);
+    std::vector<std::string> garbage;
+    garbage.reserve(8193);
+    for (int i = 0; i < 8193; ++i) {
+        garbage.push_back(Location("obsolete-" + std::to_string(i)));
+    }
+    catalog->PublishExpiration(
+        base,
+        {},
+        garbage,
+        [](std::string_view) -> Status {
+            return {};
+        },
+        [&]() -> iceberg::Status {
+            const auto updated = catalog->UpdateTableMetadataLocation("columnar",
+                "events",
+                Location("maintenance"),
+                base.metadata_location,
+                base.metadata_location);
+            if (!updated) {
+                return std::unexpected(updated.error());
+            }
+            return {};
+        });
+    EXPECT_EQ(catalog->PendingMetadataCount(collection_id), 8193);
+    const auto first = catalog->PendingMetadata(collection_id);
+    ASSERT_EQ(first.size(), 8192U);
+    catalog->AcknowledgeMetadata(collection_id, first);
+    EXPECT_EQ(catalog->PendingMetadataCount(collection_id), 1);
+    const auto last = catalog->PendingMetadata(collection_id);
+    ASSERT_EQ(last.size(), 1U);
+    catalog->AcknowledgeMetadata(collection_id, last);
+    EXPECT_EQ(catalog->PendingMetadataCount(collection_id), 0);
+    catalog.reset();
+    catalog = DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite", info, {});
+    EXPECT_TRUE(catalog->PendingMetadata(collection_id).empty());
+}
+
 } // namespace
 TEST_F(CatalogTest, KVModeAndNoOpReceiptSurviveReopenWithoutPointerChange)
 {
@@ -386,12 +471,16 @@ TEST_F(CatalogTest, MigrationOwnershipReservesThePopulationAndValidatesItsBindin
         1,
         catalog->Base(collection_id),
         test::attempt_id};
+    const auto createdOnly = catalog->TryMigrationReplay(collection_id, operation_id, owner);
+    ASSERT_TRUE(createdOnly);
+    EXPECT_EQ(test::Present(createdOnly).first.mode, CollectionMode::KeyValue);
+    EXPECT_FALSE(test::Present(createdOnly).second);
     EXPECT_THROW(catalog->BindOperation(binding), Failure);
     EXPECT_FALSE(catalog->FindOperation(collection_id, operation_id));
     catalog->BindOperation(binding, owner);
     const auto replay = catalog->TryMigrationReplay(collection_id, operation_id, owner);
     ASSERT_TRUE(replay);
-    EXPECT_EQ(test::Present(replay).second.binding, binding);
+    EXPECT_EQ(test::Present(test::Present(replay).second).binding, binding);
     const auto transaction = catalog->RunInTransaction([&]() -> iceberg::Status {
         EXPECT_THROW(catalog->TryMigrationReplay(collection_id, operation_id, owner), Failure);
         return {};

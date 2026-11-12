@@ -10,6 +10,7 @@ TJson OptionalInteger(std::optional<int64_t> value);
 TJson Snapshot(SnapshotSelector selector);
 TJson Value(const Metric& metric);
 std::string MetricKindName(const Metric& metric);
+TJson Footprint(const StorageFootprint& footprint);
 TJson NativeIdentity(const BaseIdentity& identity, SnapshotSelector selector);
 TJson Statistics(const CollectionStatistics& statistics);
 SnapshotSelector MetadataSelector(const std::map<std::string, std::string>& query);

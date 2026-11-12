@@ -70,13 +70,26 @@ Replay verifies this link before returning an original receipt. Only that
 migration can resume the target, including after an uncertain creation or a
 pre-binding population refusal. A pre-existing ordinary empty target is
 rejected. Population always has a no-snapshot precondition. This API makes no
-atomic create-and-populate promise; source collections and their old
-receipts/history remain unchanged. It never reuses source paths in the target.
+atomic create-and-populate promise; migration itself does not change source
+collections or receipts/history and never reuses source paths in the target.
+If a separate append retention operation later expires the selected source,
+a terminal migration retry still replays its original receipt. An owned target
+whose population never bound remains a committed creation; source expiry then
+refuses population with `SNAPSHOT_EXPIRED`. A fresh migration refuses an expired
+source before creating its target.
+
+Append snapshot-retention maintenance is a separate opt-in contract. KV
+collections reject retention policy reads, policy updates and expiration with
+`COLLECTION_MODE_MISMATCH`; all KV snapshot intervals and no-op roots remain
+retained. A KV expiration ledger or cleanup queue is corruption, never authority
+to delete a KV file. Physical inventory includes retained historical manifests
+and exact no-op bound roots.
 
 ## Receipt and recovery format
 
-Catalog version 3 is installed transactionally on the first KV collection.
-Append-only version-1/2 catalogs retain their format until then. The new mode
+Catalog version 4 is installed transactionally on the first KV collection,
+including the version-3 append retention tables. Existing version-1/2 append and
+version-3 retention catalogs retain their format until then. The new mode
 relation contains only KV rows; absent rows mean append. The immutable Iceberg
 property `glamdb.collection-mode=kv1` must match SQLite. Every KV snapshot has
 version/kind provenance, so unmarked append operations cannot bypass uniqueness.

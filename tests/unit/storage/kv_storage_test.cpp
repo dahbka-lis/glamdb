@@ -4,6 +4,7 @@
 #include "core/storage/metadata_validation.h"
 #include "core/storage/publication_guard.h"
 #include "core/storage/table_profile.h"
+#include "tests/support/memory_file_io.h"
 #include "tests/support/temp_dir.h"
 #include <algorithm>
 #include <arrow/array/builder_binary.h>
@@ -237,6 +238,36 @@ protected:
     }
 };
 
+TEST_F(TKVClosureTest, MaintenanceGuardRejectsKVBeforeCandidateFileIO)
+{
+    auto attempt = NIO::TIOAttempt::Make(
+        {StoreID, CollectionID, "33333333-3333-7333-8333-333333333399", NIO::EAttemptKind::Maintenance, {}},
+        Dirs_->Latch());
+    ASSERT_TRUE(attempt);
+    auto io = std::make_shared<glamdb::test::TMemoryFileIO>();
+    std::size_t reads = 0;
+    io->OnRead = [&](const auto&) {
+        ++reads;
+    };
+    TStoragePublicationGuard guard({.Directories = Dirs_,
+        .FileIO = io,
+        .Attempt = attempt.Value(),
+        .Namespace = "test",
+        .Name = "keys",
+        .Profile = Profile_,
+        .Base = Empty_,
+        .RetentionPolicy = TRetentionPolicy{1, 0}});
+    const auto status = guard.BeforePointerChange({EPointerOp::UpdateLocation,
+        "test",
+        "keys",
+        Empty_->MetadataLocation,
+        Location_ + "/metadata/00001-33333333-3333-7333-8333-333333333399.metadata.json"});
+    ASSERT_FALSE(status);
+    EXPECT_NE(status.error().message.find("KV"), std::string::npos);
+    EXPECT_EQ(reads, 0U);
+    EXPECT_FALSE(guard.GetCandidate());
+}
+
 TEST_F(TKVClosureTest, AcceptsOverwriteAndHistoricalRecovery)
 {
     auto first = Change(Empty_, {{"a", "b", "c"}});
@@ -295,6 +326,11 @@ TEST_F(TKVClosureTest, RecoveryRetainsOldOriginsAndIntervalsAcrossSeveralManifes
     ASSERT_TRUE(recovered) << recovered.error().message;
     ASSERT_EQ(recovered->ScanIndex->Files.size(), 13U);
     EXPECT_EQ(recovered->Usage, (*state)->Usage);
+    EXPECT_EQ(recovered->RetainedManifestPaths, (*state)->RetainedManifestPaths);
+    EXPECT_EQ(recovered->RetainedManifestPaths.size(), recovered->Usage.Manifests);
+    EXPECT_EQ(recovered->CurrentCommitMetadataBytes, (*state)->CurrentCommitMetadataBytes);
+    EXPECT_GT(recovered->CurrentCommitMetadataBytes, 0U);
+    EXPECT_TRUE(recovered->ExpiredSnapshotIDs.empty());
     ASSERT_EQ(recovered->ScanIndex->Snapshots.size(), 12U);
     for (std::size_t offset = 0; offset < recovered->ScanIndex->Files.size(); ++offset) {
         const auto& actual = recovered->ScanIndex->Files[offset];

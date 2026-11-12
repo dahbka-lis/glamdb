@@ -1,6 +1,7 @@
 #include "core/storage/metadata_validation.h"
 #include "core/io/store_uri.h"
 #include "core/storage/iceberg_error_boundary.h"
+#include "core/storage/snapshot_retention.h"
 #include "core/storage/table_profile.h"
 
 #include <iceberg/constants.h>
@@ -177,6 +178,10 @@ iceberg::Status CheckMetadataDelta(const iceberg::TableMetadata& base,
             candidate.last_sequence_number != base.last_sequence_number + 1)
         {
             return iceberg::ValidationFailed("Invalid append metadata delta.");
+        }
+        if (keyValue) {
+            ICEBERG_RETURN_UNEXPECTED(ExpiredSequence(base));
+            ICEBERG_RETURN_UNEXPECTED(ExpiredSequence(candidate));
         }
         if (!std::ranges::equal(base.snapshots,
                 std::span(candidate.snapshots).first(base.snapshots.size()),

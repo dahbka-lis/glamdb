@@ -1,5 +1,7 @@
 #pragma once
 
+#include "storage/schema.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -15,6 +17,8 @@ class RecordBatch;
 }
 
 namespace glamdb {
+
+inline constexpr std::size_t MaxSchemaFields = NGlamDB::MaxSchemaFields;
 
 class ResourceOwner;
 
@@ -350,6 +354,30 @@ struct BulkAppendLimits
     static constexpr int64_t MemoryBytes = 128LL << 20;
     static constexpr uint64_t AttemptDiskBytes = (8ULL << 30) + (32ULL << 20);
     static constexpr uint64_t AttemptInodes = 320;
+};
+
+// An empty policy retains everything. Otherwise retain the union of the last
+// keep_last snapshots, snapshots younger than min_age, and the current snapshot.
+struct SnapshotRetentionPolicy
+{
+    std::optional<int64_t> keep_last{};
+    std::chrono::milliseconds min_age{0};
+    bool operator==(const SnapshotRetentionPolicy&) const = default;
+};
+
+struct SnapshotExpirationRequest
+{
+    std::string collection_id;
+    // Omission uses the persisted policy. An explicit empty policy disables
+    // further expiration; it cannot restore snapshots already expired.
+    std::optional<SnapshotRetentionPolicy> policy{};
+};
+
+struct SnapshotExpirationResult
+{
+    SnapshotRetentionPolicy policy{};
+    int64_t snapshots_expired = 0;
+    int64_t cleanup_pending = 0;
 };
 
 // Finite retained-history budgets. Counts and serialized bytes are store-wide;

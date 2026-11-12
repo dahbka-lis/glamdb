@@ -19,6 +19,8 @@
 #include "core/scan/file_metadata.h"
 #include "core/scan/metadata.h"
 #include "core/scan/scan_cursor.h"
+#include "core/storage/base_state.h"
+#include "core/storage/snapshot_retention.h"
 #endif
 
 #include "core/resources/envelopes.h"
@@ -68,6 +70,27 @@ AppendOutcome Rejected(std::string operation_id, CommitPhase phase, ErrorDetail 
         std::move(error),
         std::nullopt};
 }
+
+#if GLAMDB_HAS_STORAGE
+Result<SnapshotRetentionPolicy> NStoragePolicy(const iceberg::TableMetadata& metadata)
+{
+    const auto policy = NGlamDB::NStorage::ReadRetentionPolicy(metadata);
+    if (!policy) {
+        return std::unexpected(ErrorDetail{"CORRUPTION", policy.error().message, RetryHint::OperatorAction});
+    }
+    return SnapshotRetentionPolicy{policy->KeepLast, std::chrono::milliseconds(policy->MinAgeMs)};
+}
+
+void CheckExpiredSnapshot(const TScanContext& context, const SnapshotSelector& selector)
+{
+    if (selector.kind == SnapshotSelectorKind::Id && context.VerifiedState &&
+        std::ranges::binary_search(context.VerifiedState->ExpiredSnapshotIDs, selector.snapshot_id))
+    {
+        throw Failure(
+            {"SNAPSHOT_EXPIRED", "snapshot was removed by explicit retention maintenance", RetryHint::FixInput});
+    }
+}
+#endif
 
 void ValidateConfig(const StoreInfo& info, const Limits& limits)
 {
@@ -223,10 +246,15 @@ struct Engine::Impl
     {
         resources = supplied ? supplied : ResourceOwner::ProcessDefault();
         const auto extra = ExtraCollectionSlots(limits.max_collections);
-        store_resources.push_back(
-            Take(resources->Reserve(ResourceClass::Metadata, CatalogMemoryBytes + extra * CollectionMetadataBytes)));
-        store_resources.push_back(
-            Take(resources->Reserve(ResourceClass::Recovery, RecoveryMemoryBytes + extra * CollectionRecoveryBytes)));
+        // Every committed append adds at least one never-deleted data file.
+        // Bound expired ancestry independently of the retained root and the
+        // arbitrarily large streamed inventory of failed operations.
+        const auto successes = std::min(limits.max_operations, limits.history.max_data_files);
+        const auto operations = successes > 4096 ? static_cast<uint64_t>(successes - 4096) : 0;
+        store_resources.push_back(Take(resources->Reserve(ResourceClass::Metadata,
+            CatalogMemoryBytes + extra * CollectionMetadataBytes + operations * (16ULL << 10))));
+        store_resources.push_back(Take(resources->Reserve(ResourceClass::Recovery,
+            RecoveryMemoryBytes + extra * CollectionRecoveryBytes + operations * (64ULL << 10))));
         if (extra != 0) {
             store_resources.push_back(Take(resources->Reserve(ResourceClass::Control, extra * CollectionControlBytes)));
         }
@@ -583,6 +611,7 @@ struct Engine::Impl
             retired_roots.push_back(superseded);
         }
         RemoveReleasedRoots();
+        DrainExpiredMetadata();
     }
 
     // Writer only (append or shutdown holds `writer`).
@@ -601,6 +630,46 @@ struct Engine::Impl
             for (const auto& superseded : released) {
                 backend->RetireRoot(superseded);
             }
+        }
+    }
+
+    // Writer only. Every older root of the collection can share an expired
+    // list, so all its planners must release before any queued unlink.
+    void DrainExpiredMetadata()
+    {
+        if (!backend) {
+            return;
+        }
+        for (const auto& collection : catalog->Collections()) {
+            if (collection.mode == CollectionMode::KeyValue) {
+                Require(catalog->ExpiredSnapshots(collection.collection_id).empty() &&
+                        catalog->PendingMetadataCount(collection.collection_id) == 0,
+                    "CORRUPTION",
+                    "KV collections cannot have expiration or cleanup records");
+                continue;
+            }
+            const auto prefix = "store://" + info.store_id + "/warehouse/" + collection.collection_id + "/";
+            {
+                std::lock_guard lock(state_mutex);
+                if (std::ranges::any_of(root_readers, [&](const auto& reader) {
+                        return reader.first.starts_with(prefix);
+                    }))
+                {
+                    continue;
+                }
+            }
+            std::vector<std::string> removed;
+            for (const auto& path : catalog->PendingMetadata(collection.collection_id)) {
+                const auto result = backend->RemoveExpiredMetadata(collection.collection_id, path);
+                if (!result) {
+                    if (result.error().code == "CORRUPTION") {
+                        throw Failure(result.error());
+                    }
+                    break;
+                }
+                removed.push_back(path);
+            }
+            catalog->AcknowledgeMetadata(collection.collection_id, removed);
         }
     }
 
@@ -639,6 +708,7 @@ struct Engine::Impl
                 });
                 Require(view != confirmed_views.end(), "CORRUPTION", "confirmed collection view is missing");
                 context.Base = view->base;
+                context.VerifiedState = view->scan_state;
                 root = context.Base.metadata_location;
                 ++root_readers[root];
                 leased = true;
@@ -715,7 +785,10 @@ struct Engine::Impl
             catalog->ValidateInventory();
             std::vector<CollectionView> views;
             for (const auto& collection : catalog->Collections()) {
-                views.push_back({collection, catalog->Base(collection.collection_id)});
+                views.push_back({collection,
+                    catalog->Base(collection.collection_id),
+                    {},
+                    catalog->ExpiredSnapshots(collection.collection_id)});
             }
             Require(views.empty() || backend != nullptr,
                 "DEPENDENCY_UNAVAILABLE",
@@ -812,6 +885,7 @@ struct Engine::Impl
         });
         catalog->ValidateInventory();
         RefreshCache();
+        DrainExpiredMetadata();
         std::lock_guard lock(state_mutex);
         if (health_generation != start_generation) {
             if (backend) {
@@ -1358,6 +1432,123 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
     }
 }
 
+Result<SnapshotRetentionPolicy> Engine::GetSnapshotRetention(std::string_view id) const
+{
+    try {
+#if GLAMDB_HAS_STORAGE
+        std::lock_guard lock(impl_->state_mutex);
+        impl_->CheckReady();
+        Require(impl_->CachedCollection(id).mode == CollectionMode::Append,
+            "COLLECTION_MODE_MISMATCH",
+            "snapshot retention requires append mode");
+        const auto found = std::ranges::find_if(impl_->confirmed_views, [&](const auto& view) {
+            return view.info.collection_id == id;
+        });
+        Require(found != impl_->confirmed_views.end() && found->scan_state,
+            "DEPENDENCY_UNAVAILABLE",
+            "retention metadata is unavailable");
+        const auto policy = Take(NStoragePolicy(*found->scan_state->Metadata));
+        return policy;
+#else
+        (void)id;
+        return std::unexpected(
+            ErrorDetail{"DEPENDENCY_UNAVAILABLE", "storage maintenance is not built", RetryHint::OperatorAction});
+#endif
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    }
+}
+
+Result<SnapshotExpirationResult> Engine::ExpireSnapshots(const SnapshotExpirationRequest& request)
+{
+    const auto impl = impl_;
+    std::unique_lock writer_lock(impl->writer, std::defer_lock);
+    Impl::TAttemptRelease release{*impl, writer_lock};
+    std::optional<BaseIdentity> base;
+    std::string candidate;
+    bool publicationStarted = false;
+    bool committed = false;
+    const auto invalidate = [&] {
+        if (impl->backend) {
+            impl->backend->InvalidateCache();
+        }
+        std::lock_guard lock(impl->state_mutex);
+        impl->ready = false;
+        ++impl->health_generation;
+    };
+    try {
+        Require(ValidUuid(request.collection_id), "INVALID_ARGUMENT", "collection ID must be a canonical UUID");
+        Require(writer_lock.try_lock_for(impl->limits.writer_wait), "RESOURCE_EXHAUSTED", "writer is busy");
+        uint64_t generation = 0;
+        {
+            std::lock_guard lock(impl->state_mutex);
+            impl->CheckReady();
+            generation = impl->health_generation;
+        }
+        Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "snapshot maintenance is not installed");
+        const auto collection = impl->catalog->Collection(request.collection_id);
+        Require(collection.mode == CollectionMode::Append,
+            "COLLECTION_MODE_MISMATCH",
+            "snapshot expiration requires append mode");
+        base = impl->catalog->Base(request.collection_id);
+        impl->ReserveAttempt();
+        auto staged = Take(impl->backend->PrepareExpiration(impl->info, collection, *base, request.policy));
+        Require(staged != nullptr, "INTERNAL", "maintenance returned no staged result");
+        SnapshotExpirationResult result{staged->Policy(), static_cast<int64_t>(staged->Expired().size()), 0};
+        if (staged->Changed()) {
+            std::unique_lock gate(impl->commit_gate);
+            {
+                std::lock_guard lock(impl->state_mutex);
+                impl->CheckHealthy(generation);
+            }
+            publicationStarted = true;
+            impl->catalog->PublishExpiration(
+                *base,
+                staged->Expired(),
+                staged->Garbage(),
+                [&](std::string_view location) -> Status {
+                    const auto status = staged->VerifyClosure(location);
+                    if (!status) {
+                        return status;
+                    }
+                    candidate = location;
+                    return impl->PublicationHealth(generation);
+                },
+                [&] {
+                    return staged->Publish(*impl->catalog);
+                });
+            committed = true;
+            impl->backend->PublicationFinished(request.collection_id, candidate, CommitDisposition::Committed);
+            impl->RefreshCache();
+            gate.unlock();
+            impl->RetireRoot(*base);
+        }
+        impl->DrainExpiredMetadata();
+        result.cleanup_pending = impl->catalog->PendingMetadataCount(request.collection_id);
+        return result;
+    } catch (const Failure& error) {
+        if (publicationStarted && impl->backend) {
+            impl->backend->PublicationFinished(request.collection_id,
+                candidate,
+                error.uncertain || committed ? CommitDisposition::CommitUnknown
+                                             : CommitDisposition::DefinitelyNotCommitted);
+        }
+        if (error.uncertain || committed) {
+            invalidate();
+            return std::unexpected(ErrorDetail{"RECOVERY_REQUIRED",
+                "maintenance outcome requires reconciliation; repeat the request afterward",
+                RetryHint::SameIdAfterReconcile});
+        }
+        impl->CloseOnCorruption(error.detail);
+        return std::unexpected(error.detail);
+    } catch (const std::exception& error) {
+        if (publicationStarted) {
+            invalidate();
+        }
+        return std::unexpected(ExceptionError(error));
+    }
+}
+
 Result<CollectionInfo> Engine::UpdateWriteSettings(const UpdateWriteSettingsRequest& request)
 {
     const auto impl = impl_;
@@ -1505,7 +1696,7 @@ std::optional<MigrationOutcome> detail::ReplayMigration(const std::shared_ptr<En
     const MigrationRequest& request,
     std::string_view identity)
 {
-    std::optional<std::pair<CollectionInfo, OperationRecord>> replay;
+    std::optional<std::pair<CollectionInfo, std::optional<OperationRecord>>> replay;
     try {
         replay = impl->catalog->TryMigrationReplay(request.target.collection_id, request.operation_id, identity);
     } catch (const Failure& failure) {
@@ -1570,7 +1761,10 @@ std::optional<MigrationOutcome> detail::ReplayMigration(const std::shared_ptr<En
         std::move(replay->first),
         std::nullopt,
         std::nullopt};
-    const auto& record = replay->second;
+    if (!replay->second) {
+        return outcome;
+    }
+    const auto& record = *replay->second;
     if (record.outcome) {
         outcome.mutation = *record.outcome;
     } else {
@@ -1968,6 +2162,9 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
         if (request.expected_snapshot.kind == SnapshotPreconditionKind::NoSnapshot) {
             Require(!binding->base.current_snapshot_id, "PRECONDITION_FAILED", "collection already has a snapshot");
         } else if (request.expected_snapshot.kind == SnapshotPreconditionKind::Equals) {
+            Require(!impl->catalog->IsExpiredSnapshot(request.collection_id, request.expected_snapshot.snapshot_id),
+                "SNAPSHOT_EXPIRED",
+                "snapshot precondition refers to an explicitly expired snapshot");
             Require(binding->base.current_snapshot_id == request.expected_snapshot.snapshot_id,
                 "PRECONDITION_FAILED",
                 "snapshot precondition does not match");
@@ -2176,6 +2373,32 @@ EngineCapabilities Engine::GetCapabilities() const
     return impl_->backend ? impl_->backend->GetCapabilities() : EngineCapabilities{};
 }
 
+Result<StorageFootprint> Engine::GetStorageFootprint() const
+{
+    const auto impl = impl_;
+    try {
+        std::unique_lock writer(impl->writer, std::try_to_lock);
+        Require(writer.owns_lock(), "DATABASE_BUSY", "physical inventory requires a quiescent writer");
+        {
+            std::lock_guard lock(impl->state_mutex);
+            impl->CheckReady();
+        }
+        Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "physical inventory requires storage");
+        auto result = impl->backend->GetStorageFootprint();
+        if (!result) {
+            impl->CloseOnCorruption(result.error());
+            return result;
+        }
+        {
+            std::lock_guard lock(impl->state_mutex);
+            impl->CheckReady();
+        }
+        return result;
+    } catch (const Failure& error) {
+        return std::unexpected(error.detail);
+    }
+}
+
 Result<SnapshotHistory> Engine::ListSnapshots(std::string_view id) const
 {
     const auto impl = impl_;
@@ -2187,9 +2410,15 @@ Result<SnapshotHistory> Engine::ListSnapshots(std::string_view id) const
             impl->catalog->ForEachOperation(
                 [&](const auto& record) {
                     if (record.state == OperationState::Committed && record.outcome && record.outcome->result) {
-                        const auto& result = *record.outcome->result;
-                        if (result.receipt_version != 3 || result.snapshot_created) {
-                            receipts.push_back(result);
+                        const auto& receipt = *record.outcome->result;
+                        if ((receipt.receipt_version != 3 || receipt.snapshot_created) &&
+                            (!context.VerifiedState || !context.VerifiedState->ScanIndex ||
+                                std::ranges::binary_search(context.VerifiedState->ScanIndex->Snapshots,
+                                    receipt.snapshot_id,
+                                    {},
+                                    &NGlamDB::NStorage::TSnapshotBoundary::SnapshotID)))
+                        {
+                            receipts.push_back(receipt);
                         }
                     }
                 },
@@ -2209,6 +2438,7 @@ Result<CollectionStatistics> Engine::GetStatistics(std::string_view id, Snapshot
     const auto impl = impl_;
 #if GLAMDB_HAS_STORAGE
     return impl->ReadView<CollectionStatistics>(id, [&](const TScanContext& context) {
+        CheckExpiredSnapshot(context, selector);
         return ReadStatistics(context, selector);
     });
 #else
@@ -2223,6 +2453,7 @@ Result<TFileListing> Engine::ListFiles(std::string_view collectionID, SnapshotSe
 {
 #if GLAMDB_HAS_STORAGE
     return impl_->ReadView<TFileListing>(collectionID, [&](const TScanContext& context) {
+        CheckExpiredSnapshot(context, selector);
         return ReadFiles(context, selector);
     });
 #else
@@ -2242,6 +2473,7 @@ Engine::GetFileDetails(std::string_view collectionID, std::string_view fileID, S
     return impl_->ReadView<TFileDetails>(
         collectionID,
         [&](const TScanContext& context) {
+            CheckExpiredSnapshot(context, selector);
             return ReadFileDetails(context, fileID, selector);
         },
         false);
@@ -2260,6 +2492,7 @@ Result<ScanExplanation> Engine::ExplainScan(const ScanRequest& request) const
     const auto impl = impl_;
 #if GLAMDB_HAS_STORAGE
     return impl->ReadView<ScanExplanation>(request.collection_id, [&](const TScanContext& context) {
+        CheckExpiredSnapshot(context, request.selector);
         return detail::ExplainScan(context, request);
     });
 #else
@@ -2308,6 +2541,7 @@ Engine::ScanImpl(const ScanRequest& request, std::shared_ptr<TReadBudget> budget
             leased_root = context.Base.metadata_location;
         }
         Require(impl->backend != nullptr, "DEPENDENCY_UNAVAILABLE", "storage reader is not installed");
+        CheckExpiredSnapshot(context, request.selector);
         const auto capabilities = impl->backend->GetCapabilities();
         context.Resources = impl->resources;
         context.ChronologicalFiles = chronologicalFiles;

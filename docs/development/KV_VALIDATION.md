@@ -25,6 +25,27 @@ protection, corrected target rows, busy lookup classification, and policy/source
 view conflicts. This is a bounded review; it is not a proof that every possible
 bug or durability failure has been excluded.
 
+## Review of the later official retention integration
+
+Official main then added append snapshot retention and wider schemas. KV now
+uses catalog version 4, preserving official version-3 retention stores without
+reinterpretation; the first KV creation upgrades transactionally. Three
+additional cross-feature findings were corrected:
+
+| Finding | Correction and regression evidence |
+| --- | --- |
+| An unbound migration population could report its existing target creation as uncommitted after source expiry. | Owner-proven creation is retained before source reads; source expiry refuses population while creation remains committed, including after reopen. Terminal populations replay their original receipt without source reads. |
+| An append cleanup queue could be interpreted against an incomplete KV manifest union. | KV refuses retention policy/expiration, rejects expiration ledgers and cleanup queues, and rejects direct cleanup before I/O. Storage profiles, closure, recovery and scan planning independently reject retention/checkpoint state. |
+| Physical inventory omitted historical KV manifests and permanently pinned no-op roots. | Verified full manifest unions and no-op roots enter referenced-byte accounting; mixed-mode cleanup, independent file sums and reopen checks cover classification. Path admission is checked before each insertion. |
+
+Independent native probes additionally cover official v3 reopen followed by
+lazy v4 KV creation, 128 fields with the key at column 128 and 127 decimal fields
+with 128-byte names, exact values beyond binary64 integer precision, null
+replacement, historical rows, no-op replay and exact physical metadata sums.
+The 520-operation/260-root probe also checks referenced/unreferenced bytes before
+and after reopen. These are finite correctness checks, not larger-history or
+power-loss qualification.
+
 ## Invariants exercised
 
 | Contract | Executable coverage |

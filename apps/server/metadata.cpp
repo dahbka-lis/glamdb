@@ -107,6 +107,7 @@ EngineCapabilities InstalledCapabilities()
         .parquet_codecs = detail::ParquetCodecCapabilities()};
     detail::AddEncodingCapabilities(capabilities);
     capabilities.key_value = true;
+    capabilities.storage_footprint = true;
     return capabilities;
 #else
     return {};
@@ -199,6 +200,7 @@ TJson CapabilitiesJson(const EngineCapabilities& capabilities,
                 {"scan_cancel", capabilities.scan},
                 {"arrow_export", capabilities.scan},
                 {"stats", metadata},
+                {"storage_footprint", capabilities.storage_footprint},
                 {"snapshots", metadata},
                 {"files", metadata},
                 {"explain", metadata},
@@ -220,6 +222,7 @@ TJson CapabilitiesJson(const EngineCapabilities& capabilities,
                 {"upsert_rows", 10000},
                 {"delete_keys", 10000},
                 {"lookup_keys", 4096},
+                {"schema_fields", MaxSchemaFields},
                 {"scan_page_rows", 10000},
                 {"scan_sessions", scans.Live},
                 {"scan_sessions_per_database", scans.LivePerDatabase},

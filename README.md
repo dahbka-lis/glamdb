@@ -42,8 +42,11 @@ concurrent snapshot readers. Power-loss durability qualification is still pendin
 
 Queries use a typed predicate API; there is no SQL query interface. Collections
 are unpartitioned with immutable append or KV mode. Schema evolution,
-snapshot expiration, garbage collection, object storage and replication remain
-outside the supported profile.
+general garbage collection, object storage and replication remain outside the
+supported profile. The embedded C++ API supports
+[explicit snapshot retention maintenance](docs/development/SNAPSHOT_RETENTION.md)
+for append collections; history is retained forever unless a caller opts in.
+KV collections preserve all history and refuse snapshot expiration.
 
 ### In development
 

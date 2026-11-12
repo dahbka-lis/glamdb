@@ -25,7 +25,7 @@ iceberg::Result<TTableProfile> MakeTableProfile(const TSchemaSpec& spec);
 iceberg::Result<TTableProfile> MakeKVTableProfile(const TSchemaSpec& spec);
 bool IsKVMetadata(const iceberg::TableMetadata& metadata);
 
-// Only profiles produced by MakeTableProfile/MakeKVTableProfile are supported; other extensions are rejected.
+// Fixed append and KV profiles are supported. Retention extensions are append-only.
 iceberg::Status CheckTableProfile(const TTableProfile& profile);
 
 }

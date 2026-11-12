@@ -57,3 +57,11 @@ def test_kv_mutations_share_permanent_write_admission(action):
 def test_kv_lookup_uses_read_policy_without_write_admission():
     route = classify('POST', f'/collections/{uuid4()}/lookup')
     assert route.action == 'read' and route.kind is None
+
+
+def test_storage_inventory_uses_metadata_policy_and_rejects_other_methods():
+    route = classify("GET", "/storage")
+    assert route.action == "metadata" and route.metric == "storage" and route.kind is None
+    for method in ("POST", "DELETE"):
+        with pytest.raises(ValueError):
+            classify(method, "/storage")

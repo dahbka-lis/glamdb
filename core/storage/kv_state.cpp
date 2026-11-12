@@ -7,6 +7,7 @@
 #include "core/storage/iceberg_error_boundary.h"
 #include "core/storage/metadata_validation.h"
 #include "core/storage/recovery_visited.h"
+#include "core/storage/snapshot_retention.h"
 #include "core/storage/table_profile.h"
 
 #include <arrow/array.h>
@@ -394,6 +395,7 @@ struct TKVReplay
     std::map<std::int64_t, std::int64_t> SnapshotBySequence;
     std::set<std::string> Live;
     std::unique_ptr<TRecoveryVisited> Visited;
+    std::vector<std::string> RetainedManifestPaths;
 };
 
 iceberg::Result<TBaseState> CheckKVTransition(const std::shared_ptr<iceberg::FileIO>& io,
@@ -405,10 +407,13 @@ iceberg::Result<TBaseState> CheckKVTransition(const std::shared_ptr<iceberg::Fil
     TKVReplay* replay)
 {
     if (!io || !candidate.Metadata || !base.Metadata || !base.ScanIndex || !base.ScanIndex->KeyValue ||
-        !IsKVMetadata(*candidate.Metadata) || !IsKVMetadata(*base.Metadata))
+        !IsKVMetadata(*candidate.Metadata) || !IsKVMetadata(*base.Metadata) || !base.ExpiredSnapshotIDs.empty() ||
+        !candidate.ExpiredSnapshotIDs.empty())
     {
         return iceberg::ValidationFailed("Missing verified KV closure context.");
     }
+    ICEBERG_RETURN_UNEXPECTED(ExpiredSequence(*base.Metadata));
+    ICEBERG_RETURN_UNEXPECTED(ExpiredSequence(*candidate.Metadata));
     RegisterStorageFormats();
     arrow::util::InitializeUTF8();
     const auto& metadata = *candidate.Metadata;
@@ -508,6 +513,9 @@ iceberg::Result<TBaseState> CheckKVTransition(const std::shared_ptr<iceberg::Fil
         if (manifest.added_snapshot_id != snapshot->snapshot_id ||
             manifest.sequence_number != snapshot->sequence_number)
         {
+            return iceberg::ValidationFailed("KV reuses a historical manifest.");
+        }
+        if (!replay && std::ranges::binary_search(base.RetainedManifestPaths, manifest.manifest_path)) {
             return iceberg::ValidationFailed("KV reuses a historical manifest.");
         }
         if (proof.Visited) {
@@ -768,6 +776,17 @@ iceberg::Result<TBaseState> CheckKVTransition(const std::shared_ptr<iceberg::Fil
         return iceberg::ValidationFailed("CAPACITY: KV retained closure exceeds storage capacity.");
     }
     candidate.Usage = usage.Value();
+    candidate.CurrentCommitMetadataBytes = workBytes - (commitRoot ? candidate.Usage.RootBytes : 0);
+    if (!replay) {
+        candidate.RetainedManifestPaths = base.RetainedManifestPaths;
+    }
+    auto& retained = replay ? proof.RetainedManifestPaths : candidate.RetainedManifestPaths;
+    for (const auto* manifest : addedManifests) {
+        retained.push_back(manifest->manifest_path);
+    }
+    if (!replay) {
+        std::ranges::sort(retained);
+    }
     candidate.CurrentManifests = std::move(manifests);
     if (replay) {
         index.Snapshots.push_back({snapshot->snapshot_id, live.size(), snapshot->sequence_number});
@@ -891,6 +910,8 @@ iceberg::Result<TBaseState> VerifyKVReachable(const std::shared_ptr<iceberg::Fil
         if (*view != *original) {
             return iceberg::ValidationFailed("KV recovery root has an inconsistent current view.");
         }
+        state.RetainedManifestPaths = std::move(replay.RetainedManifestPaths);
+        std::ranges::sort(state.RetainedManifestPaths);
         state.Metadata = std::move(original);
         return state;
     });

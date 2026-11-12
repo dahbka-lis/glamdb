@@ -296,7 +296,14 @@ MigrationOutcome Engine::MigrateAppendToKV(const MigrationRequest& request)
             return *blocked;
         }
         if (auto replay = detail::ReplayMigration(impl_, request, originHash)) {
-            return *replay;
+            if (replay->creation.disposition != CommitDisposition::Committed || replay->mutation ||
+                replay->resolution_error)
+            {
+                return *replay;
+            }
+            // Creation remains authoritative even when the reserved population
+            // never bound and a later source read can no longer proceed.
+            outcome.creation = std::move(replay->creation);
         }
         const auto source = Take(GetCollection(request.source_collection_id));
         Require(source.mode == CollectionMode::Append && source.schema == request.target.schema,

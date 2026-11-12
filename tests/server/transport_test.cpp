@@ -46,6 +46,7 @@ TEST(Transport, EveryCoreErrorHasAnExplicitStatusAndRetryPolicy)
         {"NOT_FOUND", 404, FixInput},
         {"OPERATION_CONFLICT", 409, FixInput},
         {"OPERATION_IN_PROGRESS", 503, SameIdAfterReconcile},
+        {"SNAPSHOT_EXPIRED", 410, FixInput},
         {"PRECONDITION_FAILED", 412, FixInput},
         {"RECOVERY_REQUIRED", 503, SameIdAfterReconcile},
         {"RESOURCE_EXHAUSTED", 429, SameIdAfterReconcile},
@@ -241,7 +242,8 @@ TEST(Transport, AcceptsAdvertisedWideAppendAndTypedValues)
 TEST(Transport, RejectsObjectFloodBeyondTheMaximumSupportedAppend)
 {
     std::string body = "[{}";
-    for (size_t i = 1; i < 650100; ++i) {
+    const size_t maxAppendEvents = 10000 * (2 * MaxSchemaFields + 2) + 100;
+    for (size_t i = 1; i < maxAppendEvents / 2 + 100; ++i) {
         body += ",{}";
     }
     body += ']';

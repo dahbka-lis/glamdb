@@ -116,6 +116,15 @@ TEST(VerifiedKVScan, FixedViewsSelectFileIntervalsAfterRemoval)
         std::ranges::sort(rows);
         EXPECT_EQ(rows, expected);
     }
+    state->ExpiredSnapshotIDs = {55};
+    std::size_t reads = 0;
+    io->OnRead = [&](const auto&) {
+        ++reads;
+    };
+    const auto invalid = OpenScan(context, {.collection_id = collectionID});
+    ASSERT_FALSE(invalid);
+    EXPECT_EQ(invalid.error().code, "CORRUPTION");
+    EXPECT_EQ(reads, 0U);
 }
 
 void CheckAppendChronology(bool merge)
