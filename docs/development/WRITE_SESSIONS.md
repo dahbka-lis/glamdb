@@ -36,6 +36,8 @@ calling Begin. The directory's scope and limits cannot change on reopen.
    Acknowledgment means durable staging, not visible rows. Each part is immutable.
    Retrying the same tuple checks canonical typed values and row order; changing
    Arrow buffer layout or batch boundaries does not change its identity.
+   Replay copies decoded column buffers into bounded owned buffers, so IPC schema
+   and framing bytes do not inflate the core retained-input accounting.
 3. `GetPartReceipt` resolves a lost PutPart reply using the known tuple without
    reexecuting a one-shot producer. Missing receipt means no acknowledged part;
    an expired/cleaned session's status distinguishes reclamation.
@@ -144,6 +146,8 @@ cancellation/malformed rollback; precondition receipts and conflicting original
 bindings; quota/ownership/scope/resource lifetime; lost replies across fresh
 processes; interrupted upload transactions; an abrupt exit after a real staging
 journal fsync; and catalog COMMIT uncertainty before/after real journal unlink.
+A near-limit acknowledged batch is sealed and committed in fresh processes, with
+exact row and saved-receipt comparison after reopen and replay after cleanup.
 A test-only native SQLite VFS injects SQLITE_FULL at xWrite to exercise actual
 rollback/control cleanup, distinct from an admission-quota refusal. These tests
 model I/O faults and process crashes, **not physical power loss or native ENOSPC

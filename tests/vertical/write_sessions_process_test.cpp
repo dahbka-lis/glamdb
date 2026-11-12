@@ -1,3 +1,4 @@
+#include "core/api/codec.h"
 #include "storage/write_session.h"
 #include "tests/support/staging_fault_vfs.h"
 #include "tests/vertical/storage_fault_support.h"
@@ -105,6 +106,103 @@ TEST(WriteSessionChild, Step)
         }
     }
     std::_Exit(::testing::Test::HasFailure() ? 74 : 73);
+}
+TEST(WriteSessionBoundaryChild, Step)
+{
+    const auto* root = std::getenv("GLAMDB_STORAGE_FAULT_ROOT");
+    const auto* setting = std::getenv("GLAMDB_STORAGE_FAULT_COMMITTED");
+    if (!root || !setting) {
+        GTEST_SKIP();
+    }
+    const std::string mode(setting);
+    const std::string value((1 << 20) - 31, 'x');
+    auto engine = OpenExisting({root, test::store_id});
+    ASSERT_TRUE(engine) << engine.error().message;
+    auto opened =
+        TWriteSessions::Open(*engine, (std::filesystem::path(root).parent_path() / "stage").string(), "boundary");
+    ASSERT_TRUE(opened) << opened.error().message;
+    const auto sessions = *opened;
+    const TWriteIdentity id{test::collection_id, FirstOperation};
+    if (mode == "put") {
+        ASSERT_TRUE(sessions->BeginWrite({id}));
+        arrow::StringBuilder keys, values;
+        for (int row = 0; row < 16; ++row) {
+            ASSERT_TRUE(keys.Append("k").ok());
+            ASSERT_TRUE(values.Append(value).ok());
+        }
+        auto keyArray = keys.Finish();
+        auto valueArray = values.Finish();
+        ASSERT_TRUE(keyArray.ok());
+        ASSERT_TRUE(valueArray.ok());
+        auto batch = arrow::RecordBatch::Make(
+            arrow::schema({arrow::field("key", arrow::utf8(), false), arrow::field("value", arrow::utf8(), false)}),
+            16,
+            {*keyArray, *valueArray});
+        auto part = sessions->PutPart(id,
+            {0, 0, 0},
+            [batch = std::move(batch)]() mutable -> Result<std::shared_ptr<arrow::RecordBatch>> {
+                return std::exchange(batch, nullptr);
+            });
+        ASSERT_TRUE(part) << part.error().message;
+        EXPECT_EQ(part->Rows, 16);
+    } else if (mode == "seal") {
+        auto part = sessions->GetPartReceipt(id, {0, 0, 0});
+        ASSERT_TRUE(part);
+        ASSERT_TRUE(*part);
+        EXPECT_EQ((*part)->Rows, 16);
+        auto sealed = sessions->SealWrite(id, {{0, 0, 0}});
+        ASSERT_TRUE(sealed) << sealed.error().code << ": " << sealed.error().message;
+        EXPECT_EQ(sealed->Rows, 16);
+    } else {
+        auto committed = sessions->CommitWrite(id);
+        ASSERT_TRUE(committed) << committed.error().message;
+        ASSERT_EQ(committed->disposition, CommitDisposition::Committed);
+        const auto receiptPath = std::filesystem::path(root).parent_path() / "boundary.outcome";
+        if (mode == "commit") {
+            ASSERT_NO_FATAL_FAILURE(SaveOutcome(receiptPath, *committed));
+        } else {
+            auto encoded = detail::EncodeOutcome(*committed);
+            ASSERT_TRUE(encoded);
+            EXPECT_EQ(*encoded, ReadBytes(receiptPath));
+            ASSERT_TRUE(sessions->Cleanup());
+            auto replay = sessions->CommitWrite(id);
+            ASSERT_TRUE(replay);
+            EXPECT_EQ(*replay, *committed);
+        }
+        auto cursor = (*engine)->Scan({.collection_id = test::collection_id});
+        ASSERT_TRUE(cursor);
+        int64_t rows = 0;
+        for (;;) {
+            auto next = (*cursor)->Next();
+            ASSERT_TRUE(next);
+            if (!*next) {
+                break;
+            }
+            const auto keys = std::static_pointer_cast<arrow::StringArray>((*next)->column(0));
+            const auto values = std::static_pointer_cast<arrow::StringArray>((*next)->column(1));
+            for (int64_t row = 0; row < (*next)->num_rows(); ++row) {
+                EXPECT_EQ(keys->GetView(row), "k");
+                EXPECT_EQ(values->GetView(row), value);
+            }
+            rows += (*next)->num_rows();
+        }
+        EXPECT_EQ(rows, 16);
+    }
+}
+TEST(WriteSessionProcess, NearLimitAcknowledgedPartSealsCommitsAndReplaysInFreshProcesses)
+{
+    test::TempDir temp;
+    const auto root = temp.path / "store";
+    {
+        auto engine = CreateStore({test::store_id, root.string()});
+        ASSERT_TRUE(engine);
+        const SchemaSpec schema{{{"key", FieldType::String, false}, {"value", FieldType::String, false}}};
+        ASSERT_EQ((*engine)->CreateCollection({test::collection_id, "events", schema}).disposition,
+            CommitDisposition::Committed);
+    }
+    for (const auto mode : {"put", "seal", "commit", "replay"}) {
+        ASSERT_NO_FATAL_FAILURE(RunChild(root, {.Test = "WriteSessionBoundaryChild.Step", .State = mode}));
+    }
 }
 TEST(WriteSessionProcess, FreshProcessesRecoverPartialUploadAndLostBeginPartSealCommitReplies)
 {

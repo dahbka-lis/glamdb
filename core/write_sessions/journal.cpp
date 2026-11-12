@@ -1,6 +1,7 @@
 #include "core/write_sessions/journal.h"
 
 #include "core/api/canonical.h"
+#include "core/engine/storage_mapping.h"
 #include <arrow/buffer.h>
 #include <arrow/io/memory.h>
 #include <arrow/ipc/reader.h>
@@ -264,6 +265,9 @@ std::shared_ptr<arrow::RecordBatch> DecodeSessionBatch(std::string bytes)
     auto reader = ArrowTake(arrow::ipc::RecordBatchStreamReader::Open(input));
     auto batch = ArrowTake(reader->Next());
     Require(batch != nullptr && ArrowTake(reader->Next()) == nullptr, "CORRUPTION", "invalid staged batch framing");
-    return batch;
+    // IPC arrays retain the entire framed message as their parent buffer. Replay
+    // must own only column buffers, matching the input admitted by PutPart, so
+    // framing cannot push a valid near-limit batch over the retained-byte bound.
+    return SessionTake(CopyRecordBatch(*batch, nullptr));
 }
 } // namespace glamdb::detail
