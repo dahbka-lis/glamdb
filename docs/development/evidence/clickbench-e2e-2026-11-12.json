@@ -188,7 +188,7 @@
     },
     "standalone_native_workload_e2e": {
       "passed": 8,
-      "seconds": 127.927
+      "seconds": 129.073
     },
     "release_server_and_cli_build": "PASS",
     "standalone_client_build": "PASS",
@@ -204,14 +204,29 @@
     },
     "independent_reviews": "PASS; all actionable findings fixed and independently rechecked",
     "workload_pytest": {
-      "passed": 412,
+      "passed": 420,
       "skipped": 0,
-      "seconds": 114.02,
+      "seconds": 117.79,
       "includes": "CLI process-group signal regressions against the built standalone client"
     },
     "campaign_and_reducer_pytest": {
       "passed": 35,
       "seconds": 16.91
+    },
+    "pre_merge_independent_review": {
+      "reviewed_head": "61ae12458e60be846f7ec390bb96ab2c9ac5dbaa",
+      "findings_fixed": [
+        "restore legacy whole-part plans and authoritative receipts for direct resolve/verify without resending writes",
+        "reject resolved JSON/CSV/Markdown report collisions with saved state, dataset and journal paths before loading"
+      ],
+      "new_regressions": 8,
+      "regressions_failed_before_fixes": true,
+      "focused_ingest_and_plan_passed": 30,
+      "independent_fix_recheck": "PASS; no remaining actionable findings",
+      "fresh_complete_suite_logs": [
+        "artifacts/clickbench-e2e/pr198-workload.log",
+        "artifacts/clickbench-e2e/pr198-native.log"
+      ]
     }
   },
   "limitations": [

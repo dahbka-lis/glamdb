@@ -196,6 +196,20 @@ def _sync_progress(state, log):
     state["confirmed_rows"] = log.summary()["confirmed_rows"]
 
 
+def _restore_plan(state, data, journal):
+    options = state.get("append_plan")
+    if options is None:
+        if state["request_plan_version"] != 1:
+            return None
+        # Original runs sent whole source parts within the SDK's 16 MiB wire
+        # ceiling. Rebuild that mapping without splitting or changing bodies.
+        options = {"batch_rows": 10000, "batch_bytes": 16 * 1024**2, "workers": 1}
+    plan = freeze_plan(journal, data, state, batch_rows=options["batch_rows"],
+                       batch_bytes=options["batch_bytes"], workers=options["workers"])
+    state["append_plan"] = plan
+    return plan
+
+
 def _check_target(client, state, data, timeout):
     info = client.get_collection(state["collection_id"], deadline=timeout)
     if (client.get_schema(state["collection_id"], deadline=timeout) !=
@@ -236,7 +250,8 @@ def load(path, *, resume=False, batch_rows=None, batch_bytes=None, workers=None,
         raise ValueError("load already started; use resume with the original plan")
     original = state.get("append_plan", {})
     batch_rows = original.get("batch_rows", 10000) if batch_rows is None else batch_rows
-    batch_bytes = original.get("batch_bytes", 8 * 1024**2) if batch_bytes is None else batch_bytes
+    default_bytes = 16 * 1024**2 if state["request_plan_version"] == 1 else 8 * 1024**2
+    batch_bytes = original.get("batch_bytes", default_bytes) if batch_bytes is None else batch_bytes
     workers = original.get("workers", 1) if workers is None else workers
     config = _config(state, timeout, ca_file)
     with Ledger(Path(state["run_dir"]) / "worker-000000.sqlite") as journal:
@@ -334,10 +349,8 @@ def resolve(path, *, retry=False, timeout=30, ca_file=None):
     data = _dataset(state)
     with client_for(_config(state, timeout, ca_file)) as client, \
             Ledger(Path(state["run_dir"]) / "worker-000000.sqlite") as journal:
-        if "append_plan" not in state:
+        if _restore_plan(state, data, journal) is None:
             return {"status": "INCOMPLETE", "reason": "no immutable load plan to resolve"}
-        options = state["append_plan"]
-        freeze_plan(journal, data, state, batch_rows=options["batch_rows"], batch_bytes=options["batch_bytes"], workers=options["workers"])
         hydrate_legacy_receipts(client, journal, data, state, timeout=timeout)
         validate_journal(journal, data, state)
         for op in journal.operations(pending=True):
@@ -371,8 +384,11 @@ def verify(path, *, format="arrow", timeout=120, ca_file=None):
         data = _dataset(state)
         with client_for(_config(state, timeout, ca_file)) as client, \
                 Ledger(Path(state["run_dir"]) / "worker-000000.sqlite") as journal:
-            options = state["append_plan"]
-            freeze_plan(journal, data, state, batch_rows=options["batch_rows"], batch_bytes=options["batch_bytes"], workers=options["workers"])
+            if _restore_plan(state, data, journal) is None:
+                raise ValueError("complete verification requires the immutable load plan")
+            hydrate_legacy_receipts(client, journal, data, state, timeout=timeout)
+            if state["request_plan_version"] == 1:
+                _sync_progress(state, journal)
             _check_target(client, state, data, timeout)
             result = verify_contents(client, journal, data, state, format=format, timeout=timeout)
     except BaseException as error:

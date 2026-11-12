@@ -284,6 +284,39 @@ def test_load_report_keeps_timing_and_source_verification_separate(dataset, serv
     assert report.with_suffix(".csv").exists() and report.with_suffix(".md").exists()
 
 
+@pytest.mark.parametrize("suffix", [".csv", ".md"])
+def test_load_report_sidecars_cannot_overwrite_state(dataset, server, tmp_path, suffix):
+    from glamdb_workload.clickbench.ingest import load
+
+    state = tmp_path / ("load" + suffix)
+    initialize(dataset, state)
+    original = state.read_bytes()
+    with pytest.raises(ValueError, match="separate.*path"):
+        load(state, report=tmp_path / "load.json")
+    assert state.read_bytes() == original
+    assert not server.requests
+    assert not (tmp_path / "load.json").exists()
+
+
+@pytest.mark.parametrize("protected", ["dataset", "journal"])
+@pytest.mark.parametrize("suffix", [".csv", ".md"])
+def test_load_report_sidecars_cannot_follow_symlinks_into_run_data(
+        dataset, server, tmp_path, protected, suffix):
+    from glamdb_workload.clickbench.ingest import load
+
+    state = tmp_path / "run.json"
+    initialize(dataset, state)
+    root = dataset if protected == "dataset" else tmp_path / "run-artifacts"
+    target = root / "protected.txt"
+    target.write_text("original")
+    (tmp_path / ("load" + suffix)).symlink_to(target)
+    with pytest.raises(ValueError, match="outside the dataset and journal"):
+        load(state, report=tmp_path / "load.json")
+    assert target.read_text() == "original"
+    assert not server.requests
+    assert not (tmp_path / "load.json").exists()
+
+
 def test_legacy_append_journal_hydrates_receipts_without_resending(dataset, server, tmp_path):
     import sqlite3
 
@@ -310,6 +343,58 @@ def test_legacy_append_journal_hydrates_receipts_without_resending(dataset, serv
     assert len(server.requests) == 5
     with sqlite3.connect(tmp_path / "legacy-artifacts" / "worker-000000.sqlite") as db:
         assert db.execute("SELECT operation_id,body FROM operations ORDER BY rowid").fetchall() == original
+
+
+def legacy_run(dataset, server, tmp_path, *, lose_reply=False):
+    import sqlite3
+
+    from glamdb_workload.clickbench.ingest import load
+    from glamdb_workload.clickbench.model import read_json, save_json
+
+    state = tmp_path / "old-run.json"
+    initialize(dataset, state)
+    saved = read_json(state)
+    saved["request_plan_version"] = 1
+    save_json(state, saved)
+    server.lose_reply = lose_reply
+    result = load(state)
+    assert result["status"] == ("INCOMPLETE" if lose_reply else "PASS")
+    saved = read_json(state)
+    for key in ("append_plan", "collection_mode", "target_schema", "key_encoding",
+                "request_plan_version", "confirmed_rows"):
+        saved.pop(key, None)
+    save_json(state, saved)
+    with sqlite3.connect(tmp_path / "old-run-artifacts" / "worker-000000.sqlite") as db:
+        db.execute("UPDATE operations SET outcome=? WHERE state='committed'",
+                   ('{"server_outcome":"committed","phase":"publication"}',))
+        db.execute("DROP TABLE clickbench_chunks")
+        db.execute("DROP TABLE clickbench_meta")
+    return state
+
+
+def test_legacy_resolve_looks_up_original_requests_before_resume(dataset, server, tmp_path):
+    from glamdb_workload.clickbench.ingest import load, resolve
+
+    state = legacy_run(dataset, server, tmp_path, lose_reply=True)
+    original = server.requests[0]
+    result = resolve(state)
+    assert result["status"] == "PASS" and result["confirmed_rows"] == 7
+    assert server.requests == [original]
+    assert load(state, resume=True)["status"] == "PASS"
+    assert len(server.requests) == 5
+    assert server.requests[0].body == original.body
+
+
+def test_legacy_verify_restores_plan_and_progress_without_resending(dataset, server, tmp_path):
+    from glamdb_workload.clickbench.ingest import verify
+    from glamdb_workload.clickbench.model import read_json
+
+    state = legacy_run(dataset, server, tmp_path)
+    originals = [(request.operation_id, request.body) for request in server.requests]
+    result = verify(state, format="json")
+    assert result["status"] == "PASS" and result["actual_rows"] == 31
+    assert [(request.operation_id, request.body) for request in server.requests] == originals
+    assert read_json(state)["load_complete"] is True
 
 
 def test_failed_verification_revokes_completion_and_can_be_repeated(dataset, server, tmp_path):

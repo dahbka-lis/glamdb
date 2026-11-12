@@ -9,8 +9,12 @@ from .model import save_json
 
 def validate_report(path, state_path, data, run_dir):
     path = Path(path).resolve()
-    if (path.suffix != ".json" or path == Path(state_path).resolve() or path.is_relative_to(data.path) or
-            path.is_relative_to(Path(run_dir).resolve())):
+    destinations = [destination.resolve() for destination in
+                    (path, path.with_suffix(".csv"), path.with_suffix(".md"))]
+    state_path, dataset_path, run_dir = Path(state_path).resolve(), data.path.resolve(), Path(run_dir).resolve()
+    if path.suffix != ".json" or any(
+            destination == state_path or destination.is_relative_to(dataset_path) or destination.is_relative_to(run_dir)
+            for destination in destinations):
         raise ValueError("load report must be a separate .json path outside the dataset and journal")
     return path
 

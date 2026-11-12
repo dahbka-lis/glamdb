@@ -9,10 +9,17 @@ See [the command recipes](../../tools/workload/CLICKBENCH.md) and
 ## Automated checks
 
 Python 3.13 SDK/independent-verifier tests: **1176 passed**. Workload tests:
-**412 passed**, including the standalone CLI process-group signal checks (no
+**420 passed**, including the standalone CLI process-group signal checks (no
 skips). The C++/Python bridge passed **13 tests**. LLVM 18 formatting and tidy
 checks passed for the changed CLI translation unit; documentation links and
-JSON evidence were checked. Both independent reviews report no remaining blocker.
+JSON evidence were checked. Independent reviews report no remaining blocker.
+
+A fresh independent pre-merge review found legacy `resolve`/`verify` compatibility
+and load-report sidecar collisions with saved state, dataset and journal paths.
+Both are fixed and independently rechecked. Eight new regressions failed before
+their fixes; the focused ingestion/plan suite passed 30 tests. The complete
+workload suite (420 tests, 117.79 seconds) and native suite (8 tests, 129.073
+seconds) were rerun locally after these fixes and passed.
 
 ## Native acceptance
 
