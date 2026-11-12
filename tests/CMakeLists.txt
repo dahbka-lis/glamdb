@@ -52,8 +52,10 @@ if(NOT GLAMDB_IO_ONLY)
         target_include_directories(glamdb_vertical PRIVATE "${PROJECT_SOURCE_DIR}")
         target_link_libraries(glamdb_vertical PRIVATE glamdb::core glamdb_storage glamdb_build_options
             GTest::gtest_main SQLite::SQLite3)
+        # Release builds skip the staged-root round-trip parse by default; the
+        # public-API storage tests always verify it.
         gtest_discover_tests(glamdb_vertical TEST_PREFIX glamdb.vertical.
-            PROPERTIES LABELS "vertical;scan" TIMEOUT 60)
+            PROPERTIES LABELS "vertical;scan" TIMEOUT 60 ENVIRONMENT "GLAMDB_VERIFY_ROUNDTRIP=1")
 
         add_executable(glamdb_scan_index_bench "${PROJECT_SOURCE_DIR}/benchmarks/scan_index.cpp" support/fault_fs.cpp)
         target_include_directories(glamdb_scan_index_bench PRIVATE "${PROJECT_SOURCE_DIR}")
@@ -160,10 +162,23 @@ if(TARGET glamdb_server)
 endif()
 if(TARGET glamdb_transport)
     find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-    add_executable(glamdb_transport_test server/transport_test.cpp server/outcome_conformance_test.cpp server/arrow_ipc_test.cpp)
-    target_link_libraries(glamdb_transport_test PRIVATE glamdb_transport glamdb_build_options GTest::gtest_main OpenSSL::Crypto)
+    add_executable(glamdb_transport_test
+        server/transport_test.cpp
+        server/outcome_conformance_test.cpp
+        server/arrow_ipc_test.cpp
+        server/json_codec_test.cpp
+    )
+    target_link_libraries(glamdb_transport_test PRIVATE
+        glamdb_transport
+        glamdb_build_options
+        GTest::gtest_main
+        OpenSSL::Crypto
+    )
     gtest_discover_tests(glamdb_transport_test TEST_PREFIX glamdb.transport.
         PROPERTIES LABELS "unit;http" TIMEOUT 120)
+    # Manual codec micro-benchmark; not a CTest case.
+    add_executable(glamdb_json_codec_bench server/json_codec_bench.cpp)
+    target_link_libraries(glamdb_json_codec_bench PRIVATE glamdb_transport glamdb_build_options)
 endif()
 
 if(TARGET glamdb_routes)
