@@ -63,37 +63,57 @@ alias, preserving the engine's rejection of a symlink used as the store itself.
 Raw JSON and executed logs from this run are retained locally under the ignored
 `artifacts/bulk-ingestion/2026-11-12/` directory.
 
-The measurement candidate used base `47cc955`. Final integration also includes
-`9536a3d` (Arrow ownership/download, HTTP scan quotas, Parquet compression settings,
-combined recovery coverage and observability). Measurements use the default writer encoding;
+The original measurement candidate used base `47cc955`. Final integration also includes
+`85f54cf` (owned Arrow columns and buffered canonical hashing, positional reads,
+pruning and metadata cache, Parquet compression/dictionary/encoding settings,
+HTTP scan quotas, recovery coverage, observability and managed database deletion).
+Measurements use the default writer encoding;
 nondefault compression levels were not included in this memory/timing campaign.
 The final integration repeats correctness checks and independently checks every
 bulk footer, settings changes, exact retries and reopen with catalog schema version 2.
 
+The large campaign was repeated on the reviewed `382d192` candidate (base
+`0dbffa7`) after the owned-column, buffered-hash, pruning and encoding integration.
+Both methods again verified all 1,048,576 rows, original receipts and historical
+views in ingestion and fresh-process reopen under the same 768 MiB address-space
+ceiling. Bulk retained one snapshot/receipt, 128 files and 256 row groups, with
+74,821,632 bytes ingestion peak RSS; ordinary used 256 snapshots/receipts/files
+and 77,471,744 bytes peak RSS. Reachable metadata was 14,988 versus 2,636,722
+bytes, with 131 versus 1,024 external file syncs. Concurrent builds/tests affected
+timings (bulk ingestion 39.934 s, ordinary 114.682 s); this is a correctness and
+memory repeat, not a controlled performance comparison. Raw JSON is retained in
+`artifacts/bulk-ingestion/2026-11-12/review-main-0dbffa7/`.
+
 ## Correctness and quality checks
 
-- Complete Release build and CTest: **zero failures across 960 cases**, including native HTTP/SDK,
-  installed consumer, protocol/fault, storage, I/O, scanner and native metrics suites. Two
-  existing measurements and two manual capacity campaigns were disabled; child-process entrypoints skipped
-  when invoked without their parent environment.
+- Complete Release build and CTest after integration through `85f54cf`:
+  **zero failures across 1,038 enabled cases**, including native HTTP/SDK,
+  installed consumer, protocol/fault, storage, I/O, scanner and native metrics suites.
+  Eleven child/measurement entrypoints skipped without their opt-in environment;
+  four manual measurements/capacity cases were disabled. The complete suite was
+  repeated after the final footer-validator cleanup with the same result.
 - Complete Python suite at base `c5ca585`: **1,030 passed**, one expected skip and
   one external Starlette deprecation warning. After observability integration
   (`9536a3d`), the affected SDK receipt/client/stream, verifier and workload suites
-  passed **542** cases. The complete Node suite passed **204** cases.
-- ASan/UBSan after the final `c5ca585` integration: vertical **315** and storage
-  **174** passed; eight expected child entrypoints skipped across those suites.
-  All **16** active bulk cases passed again after the `9536a3d` observability
-  integration. Earlier unit **122** and I/O **178** cases also passed before the
-  compression integration.
+  passed **542** cases. The fresh review integration through `85f54cf` passed
+  **600** affected SDK, verifier and workload cases and **208** Node unit cases.
+  The Python network cases require localhost access: the restricted-sandbox run
+  reported 23 socket-related failures/errors, then the complete affected selection
+  passed with sockets enabled.
+- ASan/UBSan after the fresh review integration: unit **135**, vertical **339**
+  (including all **17** active bulk cases) and storage **175** passed; eleven
+  expected child/measurement entrypoints skipped across vertical/storage.
+  After the final footer-validator cleanup, all 175 storage cases and the bulk
+  codec/retry/reopen regression passed again on the rebuilt sanitizer binaries.
+  Earlier I/O **178** cases passed before the compression integration.
   Existing measurements and the two manual capacity campaigns were excluded
   from sanitizer execution.
   Leak detection was disabled because LeakSanitizer cannot run under the local
   ptrace-based sandbox; no LSan or TSan result is claimed here.
-- LLVM 18 formatting across 259 project files, clang-tidy on all 17 changed
-  translation units, and quality negative checks passed. Diagnostics were fixed
-  and the affected translation units rechecked; both edited C++ translation units
-  from the compression integration were checked again, followed by the shared
-  coordinator after observability integration.
+- LLVM 18 formatting across **280** project files, clang-tidy on the **10**
+  translation units affected by the fresh integration, and quality negative checks
+  passed. Both diagnostic-bearing translation units were corrected and rechecked.
+  The original feature's 17 changed translation units were checked earlier.
 - Literal shared fixtures cover canonical chunk equivalence, receipt version 2,
   unsupported versions, ordinary limits, precise timestamps and 17 invalid
   receipt mutations in native, SDK, UI and independent verifier tests.
@@ -156,6 +176,27 @@ outcome is recorded once, and pending-call/owned-byte gauges retain balanced RAI
 increments and decrements across retries, admission refusals and all outcomes.
 The final cancellation/deadline check remains under the publication gate. No
 additional blocker was found in this review.
+
+A fresh independent review checked the integration with owned Arrow columns,
+buffered hashing, scan pruning and dictionary/encoding settings. It found that
+the verified scan index now retains each file's metric maps, whose memory is
+not bounded by root JSON size when one bulk snapshot adds many files. The fix
+adds a generation-pinned descriptor/index charge and checks the producer's
+descriptor sum against its 32 MiB envelope. A regression first failed the
+retained-charge assertions. Review of that fix exposed a second issue: the
+same five-file history can have vector capacity six after publication and
+eight after recovery. Charging actual capacity made reconciliation fail under
+saturated metadata. The extended three-plus-two-file regression reproduced that
+failure; stable two-times-element-count vector allowances now let it reconcile,
+return both original receipts and reopen under unchanged limits. The final
+independent re-review found no further actionable blocker.
+
+Conflict resolution preserves owned column lifetimes, hashes the same canonical
+preimage across source chunks and applies the current writer specification to
+every bulk file. Local builds also caught a stale footer-validator name and two
+hash tests that still used the earlier hasher interface; those were corrected.
+Static-analysis diagnostics prompted explicit root/index size fields and a local
+optional reference in the footer validator without changing its settings logic.
 
 The two-pass choice avoids a payload spool and its recovery/cleanup protocol,
 but requires replayable input, repeats hashing on retries and conservatively

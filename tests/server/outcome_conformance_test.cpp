@@ -177,8 +177,8 @@ TEST(OutcomeConformance, BulkCanonicalStreamMatchesIndependentPreimage)
         request.at("repeat_count").get<int64_t>());
     ASSERT_TRUE(header);
     EXPECT_EQ(*header, Unhex(request.at("canonical_header_hex")));
-    detail::Sha256State actual;
-    actual.Update(*header);
+    detail::TCanonicalHasher actual;
+    actual.AddBytes(*header);
     TJson rows = TJson::array();
     for (int row = 0; row < 1000; ++row) {
         rows.push_back(request.at("row"));
@@ -187,7 +187,7 @@ TEST(OutcomeConformance, BulkCanonicalStreamMatchesIndependentPreimage)
     for (int chunk = 0; chunk < 200; ++chunk) {
         ASSERT_TRUE(detail::UpdateFingerprintBatches(schema, {batch}, actual));
     }
-    EXPECT_EQ(actual.Digest(), request.at("payload_hash").get<std::string>());
+    EXPECT_EQ(actual.ComputeDigest(), request.at("payload_hash").get<std::string>());
 }
 
 TEST(OutcomeConformance, InvalidReceiptValuesMatchSharedBounds)

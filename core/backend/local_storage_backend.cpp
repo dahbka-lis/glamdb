@@ -132,22 +132,27 @@ uint64_t ScanIndexMemory(const NStorage::TBaseState& state)
     return bytes;
 }
 
-uint64_t RootMemoryBytes(uint64_t bytes, uint64_t indexBytes)
+struct TRootMemorySize
+{
+    uint64_t RootBytes = 0;
+    uint64_t IndexBytes = 0;
+};
+
+uint64_t RootMemoryBytes(TRootMemorySize size)
 {
     // Snapshot JSON does not bound the number or metric maps of bulk files.
     // Charge those independently and pin both charges to the generation.
-    if (bytes > (64ULL << 20)) {
+    if (size.RootBytes > (64ULL << 20)) {
         throw Failure({"RESOURCE_EXHAUSTED", "root exceeds the metadata profile", RetryHint::OperatorAction});
     }
-    uint64_t total = bytes * 32 + (4ULL << 20);
-    AddMemory(total, indexBytes);
+    uint64_t total = size.RootBytes * 32 + (4ULL << 20);
+    AddMemory(total, size.IndexBytes);
     return total;
 }
 
-std::shared_ptr<ResourceReservation>
-ReserveRoot(const std::shared_ptr<ResourceOwner>& owner, uint64_t bytes, uint64_t indexBytes)
+std::shared_ptr<ResourceReservation> ReserveRoot(const std::shared_ptr<ResourceOwner>& owner, TRootMemorySize size)
 {
-    auto memory = owner->Reserve(ResourceClass::Metadata, RootMemoryBytes(bytes, indexBytes));
+    auto memory = owner->Reserve(ResourceClass::Metadata, RootMemoryBytes(size));
     if (!memory) {
         throw Failure(memory.error());
     }
@@ -1408,7 +1413,8 @@ std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::ResolveBase(co
 std::shared_ptr<ResourceReservation>
 TLocalStorageBackend::ReserveRootMemory(std::string_view collectionID, uint64_t bytes, bool reuse, uint64_t indexBytes)
 {
-    const auto required = RootMemoryBytes(bytes, indexBytes);
+    const TRootMemorySize size{.RootBytes = bytes, .IndexBytes = indexBytes};
+    const auto required = RootMemoryBytes(size);
     if (reuse) {
         std::lock_guard lock(Mutex_);
         const auto found = CacheMemory_.find(collectionID);
@@ -1418,7 +1424,7 @@ TLocalStorageBackend::ReserveRootMemory(std::string_view collectionID, uint64_t 
             return found->second;
         }
     }
-    auto memory = ReserveRoot(Options_.Resources, bytes, indexBytes);
+    auto memory = ReserveRoot(Options_.Resources, size);
     std::lock_guard lock(Mutex_);
     CacheMemory_[std::string(collectionID)] = memory;
     return memory;
@@ -1440,7 +1446,7 @@ std::shared_ptr<const NStorage::TBaseState> TLocalStorageBackend::VerifyCollecti
         "verify retained collection");
     CheckIdentity(state, base);
     const auto indexBytes = ScanIndexMemory(state);
-    if (memory->GetBytes() < RootMemoryBytes(state.Usage.RootBytes, indexBytes)) {
+    if (memory->GetBytes() < RootMemoryBytes({.RootBytes = state.Usage.RootBytes, .IndexBytes = indexBytes})) {
         // Recovery's protected workspace covers reconstruction. Before the
         // state escapes, retain the same index charge used at publication.
         memory.reset();
