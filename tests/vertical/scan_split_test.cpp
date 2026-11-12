@@ -132,6 +132,56 @@ TEST_F(ScanSplit, ConcurrentPagedWorkersHaveExactLiteralUnionAndRepeatableSplits
     EXPECT_EQ(Sorted(all), ExpectedRows);
 }
 
+TEST_F(ScanSplit, ConcurrentZeroColumnWorkersPreserveLiteralCardinalityAcrossUnevenFiles)
+{
+    Append(FirstOperation, FirstRows);
+    Append(SecondOperation, SecondRows);
+    Append(ThirdOperation, {{"tail", 9, 2.0, false, 99}});
+    auto view = View();
+    ASSERT_NE(view, nullptr);
+    const TReadViewScanRequest request{.Projection = std::vector<std::string>{}, .BatchRows = 1};
+    auto plan = Store->PlanScan(view, 0, request, "alice", {.SplitsPerPage = 1, .TargetBytes = 1});
+    ASSERT_TRUE(plan) << plan.error().message;
+    EXPECT_EQ((*plan)->Info().output_schema->num_fields(), 0);
+    const auto splits = Splits(**plan);
+    ASSERT_EQ(splits.size(), 3U);
+    const auto countRows = [](Result<std::shared_ptr<ScanCursor>> scan) {
+        EXPECT_TRUE(scan) << (scan ? "" : scan.error().message);
+        int64_t rows = 0;
+        if (!scan) {
+            return rows;
+        }
+        EXPECT_EQ((*scan)->Info().output_schema->num_fields(), 0);
+        for (;;) {
+            const auto next = (*scan)->Next();
+            EXPECT_TRUE(next) << (next ? "" : next.error().message);
+            if (!next || !*next) {
+                break;
+            }
+            EXPECT_EQ((*next)->num_columns(), 0);
+            rows += (*next)->num_rows();
+        }
+        return rows;
+    };
+    EXPECT_EQ(countRows(Store->ScanReadView(*view, 0, request, "alice")), 6);
+    std::vector<std::future<int64_t>> workers;
+    for (const auto& split : splits) {
+        workers.push_back(std::async(std::launch::async, [&, split] {
+            return countRows(Store->ReadSplit(*split, "alice"));
+        }));
+    }
+    int64_t total = 0;
+    std::vector<int64_t> counts;
+    for (auto& worker : workers) {
+        const auto count = worker.get();
+        total += count;
+        counts.push_back(count);
+    }
+    EXPECT_EQ(total, 6);
+    std::ranges::sort(counts);
+    EXPECT_EQ(counts, (std::vector<int64_t>{1, 2, 3}));
+}
+
 TEST_F(ScanSplit, HistoricalInitialPrunedAndZeroColumnCardinality)
 {
     auto emptyView = View();
