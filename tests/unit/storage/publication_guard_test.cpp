@@ -403,7 +403,8 @@ protected:
         return guard.GetCandidate();
     }
 
-    iceberg::Result<std::shared_ptr<const TBaseState>> RetainLatest(const std::shared_ptr<const TBaseState>& base)
+    iceberg::Result<std::shared_ptr<const TBaseState>> RetainLatest(const std::shared_ptr<const TBaseState>& base,
+        const TStorageLimits& limits = {})
     {
         Scope_.reset();
         constexpr auto attemptID = "33333333-3333-7333-8333-333333333338";
@@ -417,7 +418,10 @@ protected:
         ICEBERG_ASSIGN_OR_RAISE(auto scope, IO_->BindAttempt(Attempt_));
         auto metadata = *base->Metadata;
         const auto prefix = metadata.snapshots.size() - 1;
-        const auto expired = metadata.snapshots[prefix - 1]->sequence_number;
+        ICEBERG_ASSIGN_OR_RAISE(auto expired, ExpiredSequence(metadata));
+        if (prefix != 0) {
+            expired = metadata.snapshots[prefix - 1]->sequence_number;
+        }
         metadata.snapshots.erase(metadata.snapshots.begin(), metadata.snapshots.end() - 1);
         metadata.snapshot_log.erase(metadata.snapshot_log.begin(), metadata.snapshot_log.end() - 1);
         ICEBERG_RETURN_UNEXPECTED(WriteRetentionPolicy(metadata, {1}, expired));
@@ -428,6 +432,7 @@ protected:
         context.StoreUsage = base->Usage;
         context.RetentionPolicy = TRetentionPolicy{1};
         context.ExpirationPrefix = prefix;
+        context.Limits = limits;
         TStoragePublicationGuard guard(std::move(context));
         ICEBERG_RETURN_UNEXPECTED(guard.BeforePointerChange(
             {EPointerOp::UpdateLocation, "test", "events", base->MetadataLocation, location}));
@@ -896,6 +901,33 @@ TEST_P(TMergedClosureLimitTest, CountsRewriteInputsAtTheExactCommitByteBoundary)
 }
 
 INSTANTIATE_TEST_SUITE_P(Bytes, TMergedClosureLimitTest, ::testing::Bool());
+
+TEST_P(TMergedClosureLimitTest, PolicyOnlyMaintenanceRespectsTheLatestAppendCommitBytes)
+{
+    WriteRoot();
+    TStoragePublicationGuard create(Context());
+    ASSERT_TRUE(create.BeforePointerChange(Change()));
+    const auto first = Append(1, create.GetCandidate(), 3);
+    ASSERT_TRUE(first) << first.error().message;
+    const auto& usage = (*first)->Usage;
+    TStorageLimits limits;
+    // With one unmerged append these are exactly its root, list and manifest.
+    limits.CommitBytes = usage.RootBytes + usage.ManifestListBytes + usage.ManifestBytes;
+    if (GetParam()) {
+        limits.CommitBytes += 512;
+    }
+    const auto maintained = RetainLatest(*first, limits);
+    if (GetParam()) {
+        ASSERT_TRUE(maintained) << maintained.error().message;
+        const auto recovered = VerifyReachable(IO_, (*maintained)->MetadataLocation, StoreID, CollectionID, limits);
+        ASSERT_TRUE(recovered) << recovered.error().message;
+        EXPECT_EQ(recovered->Usage, (*maintained)->Usage);
+    } else {
+        ASSERT_FALSE(maintained);
+        EXPECT_TRUE(maintained.error().message.starts_with("CAPACITY:"));
+        EXPECT_TRUE(VerifyReachable(IO_, (*first)->MetadataLocation, StoreID, CollectionID, limits));
+    }
+}
 
 TEST_F(TPublicationGuardTest, OrdinaryMergePreservesEveryFileOfAnEarlierBulkAppend)
 {

@@ -47,6 +47,7 @@ struct TManifestChanges
 {
     std::vector<const iceberg::ManifestFile*> Added;
     std::vector<const iceberg::ManifestFile*> Removed;
+    std::uint64_t MetadataBytes = 0;
 };
 
 iceberg::Result<TManifestChanges> CheckManifestChanges(const std::vector<iceberg::ManifestFile>& previous,
@@ -100,6 +101,7 @@ iceberg::Result<TManifestChanges> CheckManifestChanges(const std::vector<iceberg
             bytes += static_cast<std::uint64_t>(manifest->manifest_length);
         }
     }
+    changes.MetadataBytes = bytes - rootBytes;
     return changes;
 }
 
@@ -569,6 +571,7 @@ iceberg::Status SeedRetainedHistory(const std::shared_ptr<iceberg::FileIO>& file
     {
         return iceberg::ValidationFailed("CAPACITY: Retained checkpoint exceeds commit verification bytes.");
     }
+    state.CurrentCommitMetadataBytes = outputs + listBytes;
     using Fields = iceberg::SnapshotSummaryFields;
     for (std::size_t i = 0; i < history.size(); ++i) {
         const auto& summary = history[i]->summary;
@@ -718,6 +721,7 @@ iceberg::Result<TBaseState> CheckAppendClosureImpl(const std::shared_ptr<iceberg
             return iceberg::ValidationFailed("CAPACITY: Append exceeds storage capacity.");
         }
         candidate.Usage = usage.Value();
+        candidate.CurrentCommitMetadataBytes = changes.MetadataBytes;
         for (const auto* manifest : changes.Added) {
             candidate.RetainedManifestPaths.push_back(manifest->manifest_path);
         }

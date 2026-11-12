@@ -157,6 +157,7 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
         candidate.ScanIndex = Context_.Base->ScanIndex;
         candidate.ExpiredSnapshotIDs = Context_.Base->ExpiredSnapshotIDs;
         candidate.RetainedManifestPaths = Context_.Base->RetainedManifestPaths;
+        candidate.CurrentCommitMetadataBytes = Context_.Base->CurrentCommitMetadataBytes;
     } else {
         const auto location = "store://" + std::string(Context_.Attempt->StoreId()) + "/warehouse/" +
             std::string(Context_.Attempt->CollectionId());
@@ -178,6 +179,13 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
                 Context_.Limits));
     }
     if (Context_.RetentionPolicy) {
+        // Recovery charges the final root with the latest append's metadata.
+        // A policy-only root can grow even when no snapshots are removed.
+        if (candidate.CurrentCommitMetadataBytes > Context_.Limits.CommitBytes ||
+            candidate.Usage.RootBytes > Context_.Limits.CommitBytes - candidate.CurrentCommitMetadataBytes)
+        {
+            return iceberg::ValidationFailed("CAPACITY: Maintenance exceeds commit verification bytes.");
+        }
         candidate.CurrentManifests = Context_.Base->CurrentManifests;
         auto index = std::make_shared<TScanMembership>(*Context_.Base->ScanIndex);
         if (Context_.ExpirationPrefix != 0) {

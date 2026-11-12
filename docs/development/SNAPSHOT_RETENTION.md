@@ -104,6 +104,12 @@ remains recoverable. Data files, roots, manifests, lists, catalog bytes, warehou
 capacity and shared reservations remain finite. Retention cannot make an
 append-only data inventory independent of the number of appends.
 
+Maintenance checks its new root together with the latest verified append's manifest
+and list bytes against `max_commit_bytes` before publication. A policy-only change
+can exceed this budget even when no snapshots expire. Maintenance conservatively
+preserves that verification charge; reclaimed rewrite inputs can remain charged
+until reconciliation rebuilds the retained checkpoint.
+
 ## Validation
 
 Focused native tests are `SnapshotRetention.*`, `TSnapshotRetentionTest.*` and
@@ -134,6 +140,8 @@ Executed on 2026-11-12 with Clang 18, Linux x86-64, a Debug build and disposable
 | Fresh-process reopen | 4,324 ms; every original serialized receipt verified |
 | Full native/SDK/HTTP suite before the final HTTP integration | PASS; 0 failures out of 1,183 enabled entries, with 13 helper/measurement skips |
 | Latest upstream HTTP integration suite | 1,191 enabled entries; one new HTTP timing test failed initially and passed on isolated retry; all other entries passed or were helper skips |
+| Full local suite after the independent byte-budget review fix | PASS; 0 failures out of 1,194 enabled entries, with 13 helper/measurement skips; 198.64 seconds |
+| Tight commit-byte policy changes | PASS; live publication, ordinary reopen and expired checkpoint reopen |
 | Focused retention, planner, adapter and catalog compatibility regressions | PASS; 25 native tests |
 | ASan/UBSan/LSan retention, adapter, settings and cursor lifetime checks | PASS; 108 tests across native, storage and catalog suites |
 | LLVM 18 formatting / changed translation units / quality negative check | PASS; 306 files / 18 translation units / deliberate violations rejected |
@@ -184,6 +192,13 @@ snapshot-ID collision proves that append publication rejects IDs reserved by the
 expiration ledger; a randomly reused expired ID cannot become an unreadable
 committed snapshot. Resource-admission tests cover successful-history bounds,
 large operation settings and refusal before creating a store.
+
+A further independent review found that a policy-only root could exceed the
+current append's recovery verification budget after publication. Maintenance now
+checks that budget before COMMIT using the latest verified non-root byte charge.
+Regressions cover refusal at the exact limit, acceptance with room for the policy,
+and ordinary and expired-checkpoint reopen under the same limits. Refusal preserves
+the previous policy and original permanent receipts.
 
 The retained root and redundant list history are bounded by explicit maintenance;
 permanent receipts and the current append-only file inventory still grow within
