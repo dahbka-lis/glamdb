@@ -264,7 +264,7 @@ statistics remain zero before execution. Staging RSS is sampled separately from
 core execution. The Python preparation test also spills over 16 MiB while
 keeping traced preparation heap below 8 MiB.
 
-The final source is based on official `ad898d7`; recorded checks on 2026-11-12:
+The initial remote validation used official `ad898d7`; recorded checks on 2026-11-12:
 
 | Check | Executed result |
 | --- | --- |
@@ -309,3 +309,24 @@ This evidence does not qualify maximum-size decode RSS, disk-controller behavior
 physical power loss, a 1 TiB load or a universal cgroup memory governor. Source
 callbacks remain cooperative, and CLI callers must preserve their input file and
 UUID for exact retries.
+
+A further independent review before merge found that the standalone CLI discarded
+an available early HTTP refusal when sending a bulk body larger than the server's
+32 MiB rejection-drain ceiling. It reported an unknown outcome instead of the
+complete pre-execution admission or authentication refusal. The client now attempts
+its existing bounded response read after a socket write failure. Only a complete,
+valid response resolves the outcome; absent or malformed replies remain uncertain.
+The native regression first failed all four HTTP/verified-TLS and
+admission/authentication combinations, then passed after the fix, with no operation
+binding or visible rows. It also passed with the CLI under ASan/UBSan and leak
+detection using the compatibility setting above. A follow-up independent inspection
+confirmed the callback lifetimes and unchanged response/deadline validation.
+Official `6adb50c` was incorporated without conflicts before the final checks.
+
+On that combined revision, the native build, full Python suite (1,499 passed,
+31 skipped, 12 subtests; two external deprecation warnings), and the 152-case
+native contour above all passed. LLVM 18 formatting checked 298 project files,
+and clang-tidy passed for the changed client translation unit. The new four-case
+early-refusal regression passed with the ordinary CLI and with the instrumented
+CLI; this focused sanitizer result does not expand the earlier broad sanitizer
+qualification.

@@ -222,6 +222,8 @@ TResponse SendRequest(const TRequest& request)
         stream.next_layer().close(ignored);
     };
     auto readResponse = [&](auto& connection) {
+        // An early refusal may already be readable after a request write fails.
+        // Only a complete, valid response resolves the outcome in that case.
         auto* connectionPtr = &connection;
         asio::async_read_until(*connectionPtr,
             asio::dynamic_buffer(wire, 16384),
@@ -269,7 +271,7 @@ TResponse SendRequest(const TRequest& request)
                     asio::buffer(uploadBuffer.data(), count),
                     [&](const std::error_code& error, size_t) {
                         if (error) {
-                            finish(error);
+                            readResponse(*connectionPtr);
                         } else {
                             uploadNext();
                         }
@@ -284,7 +286,7 @@ TResponse SendRequest(const TRequest& request)
         // Once transmission starts, partial sends have an unresolved outcome.
         asio::async_write(connection, asio::buffer(bytes), [&](const std::error_code& error, size_t) {
             if (error) {
-                finish(error);
+                readResponse(connection);
             } else {
                 uploadNext();
             }

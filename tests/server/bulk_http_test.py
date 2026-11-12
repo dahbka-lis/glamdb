@@ -167,6 +167,48 @@ class BulkHTTP(NativeHTTP):
         print(f'bulk upload wire={length} bytes; staging RSS growth={growth} bytes', flush=True)
         self.assertEqual(self.api(path + '/stats')['rows'], '40001')
 
+    def test_bulk_cli_preserves_early_refusals_for_large_uploads(self):
+        import subprocess
+        from tls_proxy import tls_proxy
+        path = self.collection()
+        cid = path.rsplit('/', 1)[1]
+        operation = str(uuid.uuid4())
+        source = Path(self.tmp.name) / 'refused-upload.ndjson'
+        line = (json.dumps({'rows': [{'key': 'x' * 1024}] * 1000}) + '\n').encode()
+        with source.open('wb') as output:
+            output.write((json.dumps({'operation_id': operation, 'rows': '40000'}) + '\n').encode())
+            for _ in range(40):
+                output.write(line)
+        self.assertGreater(source.stat().st_size, 32 * 1024**2)
+        with socket.create_connection(('127.0.0.1', self.port), timeout=5) as held, \
+                tls_proxy(self.port, self.tmp.name) as (tls_port, _):
+            held.sendall((f'POST /databases/{self.store_id}{path}/bulk-append HTTP/1.1\r\nHost: local\r\n'
+                          f'Authorization: Bearer {TOKEN}\r\nContent-Type: application/x-ndjson\r\n'
+                          'Content-Length: 1048576\r\nExpect: 100-continue\r\n\r\n').encode())
+            interim = b''
+            while not interim.endswith(b'\r\n\r\n'):
+                chunk = held.recv(1)
+                self.assertTrue(chunk, interim)
+                interim += chunk
+            self.assertIn(b'100 Continue', interim)
+            for url, tls_args in ((f'http://127.0.0.1:{self.port}', []),
+                                  (f'https://localhost:{tls_port}',
+                                   ['--ca-file', str(Path(self.tmp.name) / 'certificate.pem')])):
+                for token, code in ((TOKEN, 'SERVER_BUSY'), ('wrong', 'UNAUTHORIZED')):
+                    with self.subTest(url=url, code=code):
+                        result = subprocess.run([CLI, 'bulk-append', '--url', url, *tls_args,
+                            '--database-id', self.store_id, '--collection-id', cid, '--body', str(source),
+                            '--timeout', '30'], env={**self.env, 'GLAMDB_TOKEN': token},
+                            capture_output=True, text=True, timeout=40)
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        refusal = json.loads(result.stdout)
+                        self.assertEqual(refusal['error']['code'], code)
+                        if code == 'SERVER_BUSY':
+                            self.assertIs(refusal['execution_started'], False)
+        self.api(path + '/operations/' + operation, status=404)
+        self.assertEqual(self.api(path + '/stats')['rows'], '0')
+        self.assertEqual(self.api('/healthz')['status'], 'live')
+
     def test_bulk_invalid_tail_and_interrupted_upload_do_not_bind(self):
         path = self.collection()
         for tail in (b'{invalid}\n', b'{"rows":[]}\n', b'{"rows":[{"key":"x"}]}',
