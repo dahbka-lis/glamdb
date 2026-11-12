@@ -132,11 +132,11 @@ additional HTTP settings. Persistent charges do not disappear when a call ends.
 
 | Limit / unit | Bound and scope | Owner and enforcement / release |
 | --- | --- | --- |
-| Catalog collections / operations, counts | Store-wide `max_collections=8` by default (configurable 1–64), `max_operations=4096`; operations include bound, committed and failed records | Catalog capacity check before insert, plus reopen validation. Bindings/outcomes do not expire; closing a store does not refund them. An operation ID is collection-scoped but the cap covers all collections. |
+| Catalog collections / operations, counts | Store-wide `max_collections=8` by default (configurable 1–64), `max_operations=4096` by default (explicit C++ profiles up to 8192); operations include bound, committed and failed records | Catalog capacity check before insert, plus reopen validation. Bindings/outcomes do not expire; closing a store does not refund them. An operation ID is collection-scoped but the cap covers all collections. |
 | Catalog database, page bytes | Store-wide `max_catalog_bytes=256 MiB`, rounded down to whole SQLite pages; minimum configuration 64 KiB | Working connection `max_page_count` and page-count check on open; 24,576 bytes of freelist/growth headroom before a binding or collection creation. Excludes journal, service registry and SQLite heap/cache; catalog cache target is 8 MiB per connection. |
 | Individual metadata files, serialized bytes | Root JSON 16 MiB; manifest 8 MiB; manifest list 16 MiB | Durable FileIO size checks and publication/recovery validation. Keep the disk charge for retained files and orphans. |
 | Aggregate current roots, bytes | Store-wide 64 MiB | Backend aggregate usage and publication guard; root replacement subtracts the previous root before adding the candidate. Superseded roots held by a planning scan still count as physical warehouse usage. |
-| Retained snapshots / snapshot-log entries / manifests / data files, counts | Store-wide 4,096 / 4,096 / 4,096 / 16,384 | Publication guard and `VerifyRetained` aggregate `TStorageUsage` across collections. Per-collection metadata log cap 4,096, at most 8 new manifests per commit. Retained history is not expired to make room. |
+| Retained snapshots / snapshot-log entries / manifests / data files, counts | Store-wide 4,096 / 4,096 / 4,096 / 16,384 by default; explicit retention permits 16,384 current manifests | Publication guard and `VerifyRetained` aggregate `TStorageUsage` across collections. Per-collection metadata log cap 4,096, at most 8 new manifests per commit. Admission never expires history implicitly; explicit maintenance can expire an opted-in oldest prefix. |
 | Retained manifest / manifest-list / footer bytes | Store-wide 256 MiB / 512 MiB / 256 MiB | Guard and recovery count retained serialized structures. These are persisted-structure limits, not shared metadata-memory reservations. |
 | Commit verification, bytes | 32 MiB per commit | Publication guard and recovery use matching commit accounting. Recovery charges each retained commit's manifests/list and only the final current root to its current commit, not all history to one commit. |
 | Attempt new-file / I/O volume, bytes | 256 MiB new files; 512 MiB requested reads plus writes per attempt, including retries | `TIOAttempt` reserves requested writes before I/O and settles new-file usage to accepted bytes, refunding unused file capacity. Requested I/O stays charged even on failure. Handles retain their originating attempt. Attempt completion does not refund physical files left behind. Not a process memory or device-space reservation. |
@@ -161,8 +161,9 @@ external ENOSPC/EIO must still propagate through the durable outcome protocol.
 Decision for [issue #171](https://github.com/glamourdb/glamdb/issues/171):
 **permanent receipts, with a larger operation ceiling derived from
 `max_catalog_bytes`**. Retain every bound operation ID/hash and its successful
-or failed terminal outcome for the lifetime of the store. There is no retention
-window or opt-in expiration policy. Implementation and qualification of the
+or failed terminal outcome for the lifetime of the store. There is no receipt
+retention window or opt-in receipt expiration policy. Implementation and
+qualification of the
 larger operation/history profile belong to
 [issue #156](https://github.com/glamourdb/glamdb/issues/156); this decision
 resolves the retention question without claiming that profile is implemented.
@@ -184,8 +185,13 @@ retaining receipts does not promise unlimited ingestion.
 
 The implementation boundary is explicit:
 
-- **Current:** `max_operations` defaults to 4,096 and accepts only 1–4,096 in
-  the catalog and HTTP configuration. `max_catalog_bytes` independently caps
+- **Current:** `max_operations` defaults to 4,096. The embedded catalog API
+  accepts 1–8,192 with additional shared metadata/recovery reservations above
+  4,096; the HTTP configuration retains its 1–4,096 range. The explicit
+  [snapshot retention campaign](SNAPSHOT_RETENTION.md#validation) exercised
+  4,100 appends under an 8,192-operation profile. This finite extension stays
+  within the existing catalog query row limit; it does not implement the
+  budget-derived profile in #156. `max_catalog_bytes` independently caps
   SQLite pages, and admission requires 24,576 bytes of freelist/growth headroom
   for a binding and terminal receipt. Raising the byte limit alone does not
   raise the operation limit. Aggregate snapshot, manifest and recovery limits
@@ -207,7 +213,8 @@ is uncertain; keep the write barrier until authoritative reconciliation and its
 durability fence succeed. `CommitUnknown` alone does not prove a binding exists:
 if recovery proves the binding rolled back, the original ID can be bound on retry.
 Exhaustion refuses new work without recycling bound IDs or discarding outcomes
-or snapshots.
+or implicitly discarding snapshots. Explicit snapshot maintenance expires only
+snapshot metadata and preserves all bindings and receipts.
 Lower-limit reopen must preserve the store and reject an insufficient profile;
 restoring the original adequate limits must permit recovery. These requirements
 also apply to the larger profile in #156.
@@ -298,3 +305,11 @@ watches, with at most 4,096 events/dirty names per replay; it stores no per-file
 map. Reservation refusal, unsupported filesystems or watcher exhaustion select
 full traversal. Kernel watch/event memory and descriptors are bounded separately
 from this userspace envelope; they are not measured process RSS.
+
+Snapshot retention maintenance does not refund permanent operation capacity.
+Above 4096 configured operations, store admission reserves 16 KiB metadata and
+64 KiB recovery memory per additional slot. Catalog bytes remain independently
+bounded. Retention-enabled roots retain a finite current inventory of at most
+16384 manifests; the default profile retains its 4096-manifest limit. Expired IDs
+remain cataloged and are charged in the verified state alongside scan membership.
+Cleanup records remain durable until unlink and metadata-directory sync complete.

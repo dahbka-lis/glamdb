@@ -7,12 +7,14 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
 namespace iceberg {
 class FileIO;
 struct TableMetadata;
+struct Snapshot;
 }
 
 namespace NGlamDB::NIO {
@@ -28,6 +30,7 @@ struct TBaseState
     std::vector<iceberg::ManifestFile> CurrentManifests;
     TStorageUsage Usage;
     std::shared_ptr<const TScanMembership> ScanIndex{};
+    std::vector<std::int64_t> ExpiredSnapshotIDs{};
 };
 
 iceberg::Result<TBaseState> CheckAppendClosure(const std::shared_ptr<iceberg::FileIO>& fileIO,
@@ -53,6 +56,7 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
     const std::string& storeID,
     const std::string& collectionID,
     const TStorageLimits& limits = {},
-    const std::string& workspaceDirectory = {});
+    const std::string& workspaceDirectory = {},
+    std::span<const std::shared_ptr<iceberg::Snapshot>> expired = {});
 
 }

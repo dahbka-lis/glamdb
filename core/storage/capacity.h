@@ -36,6 +36,8 @@ struct TStorageLimits
     std::uint64_t MinimumFreeBytes = 1ULL << 30;
     std::uint64_t AttemptReserveBytes = 256ULL << 20;
     std::uint64_t JournalReserveBytes = 256ULL << 20;
+    // Only the opt-in retention profile uses this larger current-data inventory.
+    std::uint64_t RetentionManifests = 16384;
 };
 
 struct TUsageChange

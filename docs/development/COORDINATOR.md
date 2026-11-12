@@ -126,7 +126,8 @@ Its result receipt version 2 extends counts without changing old receipts.
   `SameIdAfterReconcile`.
 
 Candidate bounds default to eight collections (configurable 1–64 with shared
-resource admission), 4096 permanent operations, 256 MiB of
+resource admission), 4096 permanent operations by default (explicitly configurable
+up to 8192 with additional shared reservations), 256 MiB of
 catalog pages, 16 pending calls and 128 MiB aggregate owned input. Per append:
 10,000 rows, 16 MiB canonical input, 2 MiB per row, 1 MiB per string and 1024
 bytes per key. Writer wait is at most five seconds; append deadline at most
@@ -372,3 +373,10 @@ reconciliation available, but only reopening can replace that backend instance.
 The [HTTP contract](HTTP_SERVER.md) defines the state table, lifecycle overlays,
 and 200/503 readiness mapping. Every health snapshot remains durability-unqualified;
 backend availability and successful recovery are not qualification evidence.
+
+## Explicit snapshot maintenance
+
+`Engine::ExpireSnapshots` publishes a persisted retention policy and an expired
+oldest prefix through its own exact-base outer transaction. It does not modify
+append receipts or bind an append operation. See [snapshot retention](SNAPSHOT_RETENTION.md)
+for catalog version 3, unknown publication handling, cleanup and read semantics.

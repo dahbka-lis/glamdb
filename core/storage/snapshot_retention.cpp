@@ -1,0 +1,127 @@
+#include "core/storage/snapshot_retention.h"
+
+#include <iceberg/snapshot.h>
+#include <iceberg/table_metadata.h>
+
+#include <algorithm>
+#include <charconv>
+
+namespace NGlamDB::NStorage {
+using iceberg::Error;
+namespace {
+iceberg::Result<std::int64_t>
+ReadInteger(const std::unordered_map<std::string, std::string>& properties, const char* key, std::int64_t missing)
+{
+    const auto found = properties.find(key);
+    if (found == properties.end()) {
+        return missing;
+    }
+    std::int64_t value = 0;
+    const auto& text = found->second;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || std::to_string(value) != text) {
+        return iceberg::ValidationFailed("Invalid snapshot retention integer.");
+    }
+    return value;
+}
+}
+
+iceberg::Status CheckRetentionPolicy(const TRetentionPolicy& policy)
+{
+    if ((policy.KeepLast && (*policy.KeepLast < 1 || *policy.KeepLast > 4096)) || policy.MinAgeMs < 0 ||
+        policy.MinAgeMs > 253402300799999LL)
+    {
+        return iceberg::InvalidArgument(
+            "Retention keep_last must be 1..4096 and min_age must be nonnegative and bounded.");
+    }
+    return {};
+}
+
+iceberg::Status StripRetentionProperties(std::unordered_map<std::string, std::string>& properties)
+{
+    const bool enabled = properties.contains(RetentionVersionKey);
+    if (enabled && properties.at(RetentionVersionKey) != "1") {
+        return iceberg::ValidationFailed("Unsupported snapshot retention version.");
+    }
+    if (!enabled &&
+        (properties.contains(RetentionKeepKey) || properties.contains(RetentionAgeKey) ||
+            properties.contains(ExpiredSequenceKey)))
+    {
+        return iceberg::ValidationFailed("Retention properties lack their version.");
+    }
+    ICEBERG_ASSIGN_OR_RAISE(auto keep, ReadInteger(properties, RetentionKeepKey, 0));
+    ICEBERG_ASSIGN_OR_RAISE(auto age, ReadInteger(properties, RetentionAgeKey, 0));
+    ICEBERG_ASSIGN_OR_RAISE(auto expired, ReadInteger(properties, ExpiredSequenceKey, 0));
+    if (keep < 0 || expired < 0 || (properties.contains(RetentionKeepKey) && keep == 0)) {
+        return iceberg::ValidationFailed("Invalid snapshot retention state.");
+    }
+    ICEBERG_RETURN_UNEXPECTED(CheckRetentionPolicy({keep == 0 ? std::nullopt : std::optional(keep), age}));
+    properties.erase(RetentionVersionKey);
+    properties.erase(RetentionKeepKey);
+    properties.erase(RetentionAgeKey);
+    properties.erase(ExpiredSequenceKey);
+    return {};
+}
+
+iceberg::Result<TRetentionPolicy> ReadRetentionPolicy(const iceberg::TableMetadata& metadata)
+{
+    auto properties = metadata.properties.configs();
+    ICEBERG_RETURN_UNEXPECTED(StripRetentionProperties(properties));
+    ICEBERG_ASSIGN_OR_RAISE(auto keep, ReadInteger(metadata.properties.configs(), RetentionKeepKey, 0));
+    ICEBERG_ASSIGN_OR_RAISE(auto age, ReadInteger(metadata.properties.configs(), RetentionAgeKey, 0));
+    return TRetentionPolicy{keep == 0 ? std::nullopt : std::optional(keep), age};
+}
+
+iceberg::Result<std::int64_t> ExpiredSequence(const iceberg::TableMetadata& metadata)
+{
+    ICEBERG_RETURN_UNEXPECTED(ReadRetentionPolicy(metadata));
+    return ReadInteger(metadata.properties.configs(), ExpiredSequenceKey, 0);
+}
+
+iceberg::Status
+WriteRetentionPolicy(iceberg::TableMetadata& metadata, const TRetentionPolicy& policy, std::int64_t expiredSequence)
+{
+    ICEBERG_RETURN_UNEXPECTED(CheckRetentionPolicy(policy));
+    if (expiredSequence < 0 || (expiredSequence >= metadata.last_sequence_number && expiredSequence != 0)) {
+        return iceberg::ValidationFailed("Expiration cannot remove the current snapshot.");
+    }
+    auto properties = metadata.properties.configs();
+    ICEBERG_RETURN_UNEXPECTED(StripRetentionProperties(properties));
+    properties[RetentionVersionKey] = "1";
+    if (policy.KeepLast) {
+        properties[RetentionKeepKey] = std::to_string(*policy.KeepLast);
+    }
+    properties[RetentionAgeKey] = std::to_string(policy.MinAgeMs);
+    properties[ExpiredSequenceKey] = std::to_string(expiredSequence);
+    metadata.properties = iceberg::TableProperties::FromMap(std::move(properties));
+    return {};
+}
+
+iceberg::Result<std::size_t>
+ExpirationPrefix(const iceberg::TableMetadata& metadata, const TRetentionPolicy& policy, std::int64_t nowMs)
+{
+    ICEBERG_RETURN_UNEXPECTED(CheckRetentionPolicy(policy));
+    if ((!policy.KeepLast && policy.MinAgeMs == 0) || metadata.snapshots.empty()) {
+        return 0;
+    }
+    const auto keep = std::max<std::size_t>(1, static_cast<std::size_t>(policy.KeepLast.value_or(1)));
+    const auto maximum = metadata.snapshots.size() > keep ? metadata.snapshots.size() - keep : 0;
+    std::size_t count = 0;
+    for (; count < maximum; ++count) {
+        const auto timestamp = metadata.snapshots[count]->timestamp_ms.time_since_epoch().count();
+        // Supported timestamps and bounded ages keep this subtraction representable.
+        if (policy.MinAgeMs != 0 && (timestamp > nowMs || nowMs - timestamp < policy.MinAgeMs)) {
+            break;
+        }
+    }
+    return count;
+}
+
+TStorageLimits RetentionLimits(TStorageLimits limits, const iceberg::TableMetadata& metadata)
+{
+    if (metadata.properties.configs().contains(RetentionVersionKey)) {
+        limits.Store.Manifests = limits.RetentionManifests;
+    }
+    return limits;
+}
+}

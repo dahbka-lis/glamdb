@@ -6,6 +6,7 @@
 #include "core/storage/iceberg_error_boundary.h"
 #include "core/storage/metadata_validation.h"
 #include "core/storage/recovery_visited.h"
+#include "core/storage/snapshot_retention.h"
 #include "core/storage/table_profile.h"
 
 #include <iceberg/constants.h>
@@ -527,17 +528,101 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
     const std::string& rootLocation,
     const std::string& storeID,
     const std::string& collectionID,
-    const TStorageLimits& limits,
-    const std::string& workspaceDirectory)
+    const TStorageLimits& configuredLimits,
+    const std::string& workspaceDirectory,
+    std::span<const std::shared_ptr<iceberg::Snapshot>> expired)
 {
     return CatchIcebergExceptions([&]() -> iceberg::Result<TBaseState> {
-        ICEBERG_ASSIGN_OR_RAISE(auto state, ReadRecoveryRoot(fileIO, rootLocation, storeID, collectionID, limits));
+        ICEBERG_ASSIGN_OR_RAISE(auto state,
+            ReadRecoveryRoot(fileIO, rootLocation, storeID, collectionID, configuredLimits));
         const auto original = state.Metadata;
+        const auto limits = RetentionLimits(configuredLimits, *original);
         ICEBERG_ASSIGN_OR_RAISE(auto view, EmptyHistoryView(*original));
         ICEBERG_ASSIGN_OR_RAISE(auto visited, TRecoveryVisited::Make(256ULL << 20, workspaceDirectory));
         auto scanIndex = std::make_shared<TScanMembership>();
         scanIndex->Files.reserve(original->snapshots.size());
         scanIndex->Snapshots.reserve(original->snapshots.size());
+        ICEBERG_ASSIGN_OR_RAISE(auto expiredSequence, ExpiredSequence(*original));
+        if (expiredSequence != static_cast<std::int64_t>(expired.size()) ||
+            (!expired.empty() && original->snapshots.empty()))
+        {
+            return iceberg::ValidationFailed("Expiration ledger differs from the retained root.");
+        }
+        if (!expired.empty()) {
+            const auto table = NIO::TStoreUri::ParseTable(original->location, storeID);
+            if (!table) {
+                return iceberg::ValidationFailed("Invalid retention table location.");
+            }
+            const auto& first = original->snapshots.front();
+            ICEBERG_RETURN_UNEXPECTED(CheckPath(first->manifest_list, table.Value(), NIO::EFileKind::ManifestList));
+            RegisterStorageFormats();
+            ICEBERG_RETURN_UNEXPECTED(CheckAvro(*fileIO,
+                first->manifest_list,
+                -1,
+                NIO::EFileKind::ManifestList,
+                limits.ManifestListBytes,
+                limits.Store.Manifests,
+                nullptr));
+            ICEBERG_ASSIGN_OR_RAISE(auto reader, iceberg::ManifestListReader::Make(first->manifest_list, fileIO));
+            ICEBERG_ASSIGN_OR_RAISE(auto manifests, reader->Files());
+            std::size_t end = manifests.size();
+            std::optional<std::int64_t> parent;
+            for (std::size_t i = 0; i < expired.size(); ++i) {
+                const auto& snapshot = expired[i];
+                if (!snapshot || snapshot->sequence_number != static_cast<std::int64_t>(i + 1) ||
+                    snapshot->parent_snapshot_id != parent)
+                {
+                    return iceberg::ValidationFailed("Invalid expired receipt ancestry.");
+                }
+                std::size_t begin = end;
+                while (begin > 0 && manifests[begin - 1].sequence_number == snapshot->sequence_number) {
+                    --begin;
+                }
+                if (begin == end || end - begin > limits.NewManifests) {
+                    return iceberg::ValidationFailed("Expired receipt has no current manifests.");
+                }
+                TAppendCounts counts;
+                for (const auto& manifest : std::span(manifests).subspan(begin, end - begin)) {
+                    const bool bulk = snapshot->summary.contains("glamdb.bulk-version");
+                    ICEBERG_ASSIGN_OR_RAISE(auto usage,
+                        CheckManifest(fileIO,
+                            manifest,
+                            *snapshot,
+                            *original,
+                            table.Value(),
+                            {},
+                            limits,
+                            visited.get(),
+                            scanIndex.get(),
+                            bulk,
+                            counts));
+                    const auto total = ReplaceUsage(state.Usage, {.Next = usage});
+                    if (!total || CheckStorageCapacity(total.Value(), limits)) {
+                        return iceberg::ValidationFailed("Expired current files exceed capacity.");
+                    }
+                    state.Usage = total.Value();
+                }
+                using Fields = iceberg::SnapshotSummaryFields;
+                if (snapshot->summary.at(Fields::kAddedRecords) != std::to_string(counts.Rows) ||
+                    snapshot->summary.at(Fields::kAddedDataFiles) != std::to_string(counts.Files) ||
+                    snapshot->summary.at(Fields::kAddedFileSize) != std::to_string(counts.Bytes))
+                {
+                    return iceberg::ValidationFailed("Expired receipt counters differ from current files.");
+                }
+                parent = snapshot->snapshot_id;
+                state.ExpiredSnapshotIDs.push_back(snapshot->snapshot_id);
+                end = begin;
+            }
+            state.CurrentManifests.assign(manifests.begin() + static_cast<std::ptrdiff_t>(end), manifests.end());
+            view->snapshots.push_back(expired.back());
+            view->snapshot_log.push_back({expired.back()->timestamp_ms, expired.back()->snapshot_id});
+            view->current_snapshot_id = expired.back()->snapshot_id;
+            view->last_sequence_number = expiredSequence;
+            view->refs["main"] =
+                std::make_shared<iceberg::SnapshotRef>(iceberg::SnapshotRef{.snapshot_id = expired.back()->snapshot_id,
+                    .retention = iceberg::SnapshotRef::Branch{}});
+            std::ranges::sort(state.ExpiredSnapshotIDs);
+        }
         std::unordered_set<std::int64_t> snapshotIDs;
         snapshotIDs.reserve(original->snapshots.size());
         for (std::size_t index = 0; index < original->snapshots.size(); ++index) {

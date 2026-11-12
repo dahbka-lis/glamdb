@@ -337,10 +337,35 @@ struct BulkAppendLimits
     static constexpr uint64_t AttemptInodes = 320;
 };
 
+// An empty policy retains everything. Otherwise retain the union of the last
+// keep_last snapshots, snapshots younger than min_age, and the current snapshot.
+struct SnapshotRetentionPolicy
+{
+    std::optional<int64_t> keep_last{};
+    std::chrono::milliseconds min_age{0};
+    bool operator==(const SnapshotRetentionPolicy&) const = default;
+};
+
+struct SnapshotExpirationRequest
+{
+    std::string collection_id;
+    // Omission uses the persisted policy. An explicit empty policy disables
+    // further expiration; it cannot restore snapshots already expired.
+    std::optional<SnapshotRetentionPolicy> policy{};
+};
+
+struct SnapshotExpirationResult
+{
+    SnapshotRetentionPolicy policy{};
+    int64_t snapshots_expired = 0;
+    int64_t cleanup_pending = 0;
+};
+
 struct Limits
 {
     // Finite supported profile; larger selections also require shared resources.
     static constexpr int64_t MaxSupportedCollections = 64;
+    static constexpr int64_t MaxSupportedOperations = 8192;
     int64_t max_operations = 4096;
     int64_t max_collections = 8;
     int64_t max_catalog_bytes = 256LL * 1024 * 1024;

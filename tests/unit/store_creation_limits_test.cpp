@@ -54,7 +54,8 @@ INSTANTIATE_TEST_SUITE_P(OutOfRangeCatalogLimits,
     StoreCreationLimits,
     testing::Values(InvalidLimitsCase{"TooManyOperations",
                         [](Limits& limits) {
-                            limits.max_operations = 4097;
+                            // Recovery materializes a bounded catalog query of at most 8192 rows.
+                            limits.max_operations = 8193;
                         }},
         InvalidLimitsCase{"TooManyCollections",
             [](Limits& limits) {
