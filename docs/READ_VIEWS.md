@@ -3,8 +3,9 @@
 Contract **1.1** adds `IndependentReadView` for the local storage backend. Default
 contract requests still negotiate **1.0** and do not advertise this feature.
 Native callers use the installed `storage/read_view.h` types through `Engine`;
-there is no HTTP route, remote token or stable ABI for views. Contract 1.2
-adds native split execution through the same captured views.
+there is no HTTP route, remote token or stable ABI for views. Contract **1.2**
+adds [native view-bound split planning and execution](SCAN_SPLITS.md) through
+`PlanScan`, `NextScanSplits` and `ReadSplit`; the 1.1 profile does not expose them.
 
 ## Capture and scan
 
@@ -114,6 +115,6 @@ new view may select newer data and is the caller's decision. Existing recovery,
 corruption, I/O and resource errors remain unchanged.
 
 Contract 1.2 [scan splits](SCAN_SPLITS.md) retain the original shared view handle
-and use this same private planning bridge for bounded pages and repeatable
-physical file ranges. View release, cancellation and expiry stop new split
-admissions; already admitted cursors retain their independent leases.
+for bounded pages and repeatable physical file ranges. View release, cancellation
+and expiry stop new split admissions; already admitted cursors retain their
+independent leases.

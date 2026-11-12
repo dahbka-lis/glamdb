@@ -12,7 +12,7 @@ Physical power-loss durability has not been qualified.
 | [Python SDK](../sdk/python/README.md) | Typed requests, JSON/Arrow scans, exact retries and OAuth access. |
 | [Workbench](WORKBENCH.md) | Use the browser UI, inspect data and recover pending requests. |
 | [HTTP API](HTTP_SERVER.md) | Routes, authentication, limits, pagination and write outcomes. |
-| [Embedded C++ contract](STORAGE_CONTRACT.md) | Negotiate contracts 1.0–1.3 and use the installed Engine facade. |
+| [Embedded C++ contract](STORAGE_CONTRACT.md) | Negotiate contracts 1.0–1.4 and use the installed Engine facade. |
 | [Scalar types](SCALAR_TYPES.md) | Exact decimal/date values, timestamps and format compatibility. |
 | [Scans](SCANNING.md) | Fixed snapshots, predicates, projection, pruning and buffer ownership. |
 | [Read views](READ_VIEWS.md) | Capture coherent per-store snapshot vectors for repeated native scans. |
@@ -20,6 +20,7 @@ Physical power-loss durability has not been qualified.
 | [Scan negotiation](SCAN_NEGOTIATION.md) | Negotiate typed pushdown, residual filters, projections and safe limits. |
 | [Metadata](METADATA.md) | Snapshot history, statistics, files, footers and explain. |
 | [KV collections](KV_MODE.md) | Upsert, delete, lookup, compaction and explicit append migration. |
+| [Write sessions](WRITE_SESSIONS.md) | Durable multipart native append/upsert staging, retry, commit and cleanup. |
 | [Bulk append](BULK_INGESTION.md) | Replayable streaming ingestion through C++, HTTP, SDK and CLI. |
 
 ## Installation and operations

@@ -197,3 +197,12 @@ reserves 4 KiB Control including its page-vector slot; no inventory is copied.
 Failed pages refund partial allocations before any position advance. Explicit
 view termination releases registry pins; surviving handles keep their own charges
 until final destruction. See [scan split ownership](SCAN_SPLITS.md#resource-ownership).
+
+## Native write-session staging
+
+The [write-session resource bounds](WRITE_SESSIONS.md#resource-bounds) describe
+separate session/part/batch and IPC quotas, protected completion space, shared
+Data/Metadata/Completion leases and atomic device headroom admission. A facade
+uses the supplied Engine ResourceOwner and holds its staging database/journal
+envelope until destruction. Commit uses the existing publisher reservations.
+Cleanup retains unresolved sealed replay data and permanent Engine receipts.

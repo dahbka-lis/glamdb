@@ -38,15 +38,17 @@ concurrent snapshot readers. Power-loss durability qualification is still pendin
   configurable through the SDK and [workbench](docs/WORKBENCH.md).
 - **Data inspection.** Browse schemas, snapshot history, statistics, files,
   Parquet row groups, scan plans, and execution profiles.
-- **Native compute contract.** Negotiate versions 1.0–1.3, operation support by append/KV
+- **Native compute contract.** Negotiate versions 1.0–1.4, operation support by append/KV
   mode and effective limits through the installed C++ API. See the
   [storage contract](docs/STORAGE_CONTRACT.md). Contract 1.1 adds bounded
   [native read views](docs/READ_VIEWS.md) for repeated scans across a
   coherent per-store snapshot vector. Contract 1.2 adds bounded, repeatable
   [parallel scan splits](docs/SCAN_SPLITS.md). Contract 1.3 adds
   [scan pushdown negotiation](docs/SCAN_NEGOTIATION.md) with explicit
-  exact/necessary-condition/residual filters and safe global limits. Staging sessions, stable
-  C ABI, remote read views and Flight remain unsupported.
+  exact/necessary-condition/residual filters and safe global limits. Contract 1.4 adds
+  [durable write sessions](docs/WRITE_SESSIONS.md) for one-pass append/KV
+  output through a separate bounded staging journal and the existing Engine publisher.
+  Remote sessions and read views, stable C ABI and Flight remain unsupported.
 - **Connected tools.** Manage multiple databases through one authenticated
   server. Read and write through the UI, CLI, or Python SDK; retrieve scan results
   as JSON or Arrow IPC with fixed-snapshot pagination.
