@@ -152,6 +152,7 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
         candidate.Usage = Context_.Base->Usage;
         candidate.ScanIndex = Context_.Base->ScanIndex;
         candidate.ExpiredSnapshotIDs = Context_.Base->ExpiredSnapshotIDs;
+        candidate.RetainedManifestPaths = Context_.Base->RetainedManifestPaths;
     } else {
         const auto location = "store://" + std::string(Context_.Attempt->StoreId()) + "/warehouse/" +
             std::string(Context_.Attempt->CollectionId());
@@ -175,14 +176,21 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
     if (Context_.RetentionPolicy) {
         candidate.CurrentManifests = Context_.Base->CurrentManifests;
         auto index = std::make_shared<TScanMembership>(*Context_.Base->ScanIndex);
+        if (Context_.ExpirationPrefix != 0) {
+            ICEBERG_ASSIGN_OR_RAISE(auto retirement,
+                FindExpiredMetadata(Context_.FileIO,
+                    *Context_.Base->Metadata,
+                    Context_.ExpirationPrefix,
+                    Context_.Limits));
+            const auto usage = ReplaceUsage(candidate.Usage, {.Previous = retirement.Removed});
+            if (!usage) {
+                return iceberg::ValidationFailed("Invalid expired metadata usage.");
+            }
+            candidate.Usage = usage.Value();
+            candidate.RetainedManifestPaths = std::move(retirement.RetainedManifests);
+        }
         for (std::size_t i = 0; i < Context_.ExpirationPrefix; ++i) {
             const auto& expired = Context_.Base->Metadata->snapshots[i];
-            ICEBERG_ASSIGN_OR_RAISE(auto file, Context_.FileIO->NewInputFile(expired->manifest_list));
-            ICEBERG_ASSIGN_OR_RAISE(auto bytes, file->Size());
-            if (bytes < 0 || static_cast<std::uint64_t>(bytes) > candidate.Usage.ManifestListBytes) {
-                return iceberg::ValidationFailed("Invalid expired manifest-list usage.");
-            }
-            candidate.Usage.ManifestListBytes -= static_cast<std::uint64_t>(bytes);
             candidate.ExpiredSnapshotIDs.push_back(expired->snapshot_id);
             std::erase_if(index->Snapshots, [&](const auto& boundary) {
                 return boundary.SnapshotID == expired->snapshot_id;

@@ -1,10 +1,19 @@
 #include "core/storage/snapshot_retention.h"
 
+#include "core/storage/format_registry.h"
+#include "core/storage/format_verifier.h"
+
+#include <iceberg/file_io.h>
+#include <iceberg/manifest/manifest_list.h>
+#include <iceberg/manifest/manifest_reader.h>
 #include <iceberg/snapshot.h>
 #include <iceberg/table_metadata.h>
+#include <map>
+#include <set>
 
 #include <algorithm>
 #include <charconv>
+#include <limits>
 
 namespace NGlamDB::NStorage {
 using iceberg::Error;
@@ -115,6 +124,81 @@ ExpirationPrefix(const iceberg::TableMetadata& metadata, const TRetentionPolicy&
         }
     }
     return count;
+}
+
+iceberg::Result<TMetadataRetirement> FindExpiredMetadata(const std::shared_ptr<iceberg::FileIO>& fileIO,
+    const iceberg::TableMetadata& metadata,
+    std::size_t prefix,
+    const TStorageLimits& limits)
+{
+    if (!fileIO || limits.ManifestListBytes > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
+        limits.Store.Manifests > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+    {
+        return iceberg::InvalidArgument("Invalid retirement verification limits.");
+    }
+    if (prefix >= metadata.snapshots.size() && prefix != 0) {
+        return iceberg::ValidationFailed("Metadata retirement removes the current snapshot.");
+    }
+    TMetadataRetirement result;
+    if (prefix == 0) {
+        return result;
+    }
+    RegisterStorageFormats();
+    std::map<std::string, std::uint64_t> candidates;
+    std::set<std::string> retained;
+    for (std::size_t i = 0; i < metadata.snapshots.size(); ++i) {
+        const auto& snapshot = metadata.snapshots[i];
+        ICEBERG_ASSIGN_OR_RAISE(auto input, fileIO->NewInputFile(snapshot->manifest_list));
+        ICEBERG_ASSIGN_OR_RAISE(auto bytes, input->Size());
+        if (bytes <= 0 || static_cast<std::uint64_t>(bytes) > limits.ManifestListBytes) {
+            return iceberg::ValidationFailed("Invalid retirement manifest-list bytes.");
+        }
+        ICEBERG_RETURN_UNEXPECTED(CheckAvroContainer(*input,
+            bytes,
+            {static_cast<std::int64_t>(limits.ManifestListBytes),
+                static_cast<std::int64_t>(limits.Store.Manifests),
+                static_cast<std::int64_t>(limits.ManifestListBytes)}));
+        if (i < prefix) {
+            result.Files.push_back(
+                {snapshot->manifest_list, NIO::EFileKind::ManifestList, static_cast<std::uint64_t>(bytes)});
+            result.Removed.ManifestListBytes += static_cast<std::uint64_t>(bytes);
+        }
+        ICEBERG_ASSIGN_OR_RAISE(auto reader, iceberg::ManifestListReader::Make(snapshot->manifest_list, fileIO));
+        ICEBERG_ASSIGN_OR_RAISE(auto manifests, reader->Files());
+        if (manifests.size() > limits.Store.Manifests) {
+            return iceberg::ValidationFailed("Retirement manifest inventory exceeds capacity.");
+        }
+        for (const auto& manifest : manifests) {
+            if (manifest.manifest_length <= 0 ||
+                static_cast<std::uint64_t>(manifest.manifest_length) > limits.ManifestBytes)
+            {
+                return iceberg::ValidationFailed("Invalid retirement manifest bytes.");
+            }
+            if (i < prefix) {
+                const auto [position, added] =
+                    candidates.emplace(manifest.manifest_path, static_cast<std::uint64_t>(manifest.manifest_length));
+                if ((!added && position->second != static_cast<std::uint64_t>(manifest.manifest_length)) ||
+                    candidates.size() > limits.Store.Manifests)
+                {
+                    return iceberg::ValidationFailed("Inconsistent retirement manifest inventory.");
+                }
+            } else {
+                retained.insert(manifest.manifest_path);
+                if (retained.size() > limits.Store.Manifests) {
+                    return iceberg::ValidationFailed("Retained manifest union exceeds capacity.");
+                }
+            }
+        }
+    }
+    for (const auto& [path, bytes] : candidates) {
+        if (!retained.contains(path)) {
+            result.Files.push_back({path, NIO::EFileKind::Manifest, bytes});
+            result.Removed.Manifests += 1;
+            result.Removed.ManifestBytes += bytes;
+        }
+    }
+    result.RetainedManifests.assign(retained.begin(), retained.end());
+    return result;
 }
 
 TStorageLimits RetentionLimits(TStorageLimits limits, const iceberg::TableMetadata& metadata)

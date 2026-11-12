@@ -20,20 +20,23 @@ outer SQLite authority, with a durable expiration ledger and cleanup queue.
 Catalog version 3 is created lazily on the first maintenance publication.
 Versions 1 and 2 remain unchanged until opt-in. Expiration records bind opaque
 snapshot IDs to their original sequence and operation receipt. Recovery verifies
-the retained suffix and all current manifests against the permanent receipts,
-without reading expired manifest lists. The current root carries only a sequence
+the oldest retained inventory against original file provenance and permanent
+receipt totals, then validates later exact manifest rewrites without reading
+expired lists or obsolete manifests. The current root carries only a sequence
 watermark and the retained suffix; snapshot IDs are never compared numerically.
 
 Cleanup follows confirmed publication, waits for collection metadata planners,
 unlinks only ledgered metadata and synchronizes the directory before acknowledging
-the queue. Interrupted cleanup resumes after authoritative recovery. Current
-manifests and Parquet files remain referenced and are never removed. Already
+the queue. Interrupted cleanup resumes in bounded batches after authoritative
+recovery. A manifest is reclaimed only after its last retained snapshot reference
+disappears. Current manifests and Parquet files remain referenced and are never
+removed. Already
 planned cursors continue reading their immutable membership and data; new reads
 and preconditions on expired IDs return `SNAPSHOT_EXPIRED`.
 
 The default operation capacity remains 4,096. An explicitly larger finite
 operation profile (up to 8,192) reserves additional catalog/recovery memory;
-retention-enabled collections can retain up to 16,384 current manifests. Data,
+retention-enabled collections can retain up to 16,384 retained manifests. Data,
 catalog bytes and manifest bytes remain bounded; expiration is not compaction.
 No HTTP/SDK/UI maintenance interface is added in this change.
 

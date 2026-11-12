@@ -86,6 +86,7 @@ public:
         const Body& body);
     std::vector<ExpiredSnapshotRecord> ExpiredSnapshots(std::string_view collection_id);
     bool IsExpiredSnapshot(std::string_view collection_id, int64_t snapshot_id);
+    int64_t PendingMetadataCount(std::string_view id);
     std::vector<std::string> PendingMetadata(std::string_view collection_id);
     void AcknowledgeMetadata(std::string_view collection_id, std::span<const std::string> paths);
     void DurabilityFence();

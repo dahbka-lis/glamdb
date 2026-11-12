@@ -650,5 +650,67 @@ TEST_F(TSnapshotRetentionTest, UnlinkWithoutDirectoryFenceRemainsQueuedAndRetryF
     EXPECT_EQ(Engine_->ListSnapshots(test::collection_id)->snapshots.size(), 1U);
 }
 
+TEST_F(TSnapshotRetentionTest, LastRetainedReferenceProtectsMergedInputsUntilTheNextExpiration)
+{
+    for (int64_t index = 2; index < 100; ++index) {
+        ASSERT_EQ(Engine_->AppendDurable({test::collection_id, RetentionOperation(index), {}, {Batch(FirstRows)}})
+                      .disposition,
+            CommitDisposition::Committed);
+    }
+    const auto metadata = Root_ / "warehouse" / test::collection_id / "metadata";
+    auto expired = Engine_->ExpireSnapshots({test::collection_id, SnapshotRetentionPolicy{2}});
+    ASSERT_TRUE(expired) << expired.error().message;
+    EXPECT_EQ(expired->snapshots_expired, 98);
+    EXPECT_EQ(expired->cleanup_pending, 0);
+    const auto protectedFiles = CountRegularFiles(metadata);
+    EXPECT_GT(protectedFiles, 100U);
+    const auto history = Engine_->ListSnapshots(test::collection_id);
+    ASSERT_TRUE(history);
+    ASSERT_EQ(history->snapshots.size(), 2U);
+    const auto older = history->snapshots.front().receipt.snapshot_id;
+    Reopen();
+    auto scan = Engine_->Scan(ScanRequest{test::collection_id, SnapshotSelector::Id(older)});
+    ASSERT_TRUE(scan);
+    EXPECT_EQ(Collect(**scan).size(), 296U);
+    scan->reset();
+    ASSERT_EQ(
+        Engine_->AppendDurable({test::collection_id, RetentionOperation(100), {}, {Batch(FirstRows)}}).disposition,
+        CommitDisposition::Committed);
+    expired = Engine_->ExpireSnapshots({test::collection_id});
+    ASSERT_TRUE(expired) << expired.error().message;
+    EXPECT_EQ(expired->snapshots_expired, 1);
+    EXPECT_EQ(expired->cleanup_pending, 0);
+    EXPECT_LT(CountRegularFiles(metadata), 8U);
+    Reopen();
+    EXPECT_EQ(Engine_->GetStatistics(test::collection_id)->rows.value, 302);
+    EXPECT_EQ(Engine_->GetStatistics(test::collection_id, SnapshotSelector::Id(older)).error().code,
+        "SNAPSHOT_EXPIRED");
+}
+
+TEST_F(TSnapshotRetentionTest, MergedManifestsReclaimObsoleteInputsAndReopenExpiredAncestry)
+{
+    for (int64_t index = 2; index < 105; ++index) {
+        ASSERT_EQ(Engine_->AppendDurable({test::collection_id, RetentionOperation(index), {}, {Batch(FirstRows)}})
+                      .disposition,
+            CommitDisposition::Committed);
+    }
+    const auto metadata = Root_ / "warehouse" / test::collection_id / "metadata";
+    const auto before = CountRegularFiles(metadata);
+    ASSERT_GT(before, 200U);
+    const auto expired = Engine_->ExpireSnapshots({test::collection_id, SnapshotRetentionPolicy{1}});
+    ASSERT_TRUE(expired) << expired.error().message;
+    EXPECT_EQ(expired->snapshots_expired, 104);
+    EXPECT_EQ(expired->cleanup_pending, 0);
+    EXPECT_LT(CountRegularFiles(metadata), 12U);
+    Close();
+    RunRetentionChild(Root_, "verify", 314);
+    auto opened = OpenExisting({Root_.string(), test::store_id});
+    ASSERT_TRUE(opened) << opened.error().message;
+    Engine_ = std::move(*opened);
+    EXPECT_EQ(Engine_->GetStatistics(test::collection_id)->rows.value, 314);
+    EXPECT_EQ(test::Present(Engine_->FindAppendOutcome(test::collection_id, FirstOperation).value()).result, First_);
+    EXPECT_EQ(test::Present(Engine_->FindAppendOutcome(test::collection_id, SecondOperation).value()).result, Second_);
+}
+
 } // namespace
 } // namespace glamdb

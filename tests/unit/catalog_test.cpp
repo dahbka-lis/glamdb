@@ -288,5 +288,46 @@ TEST_F(CatalogTest, WideSchemaAndHashVersionsDoNotAliasSupportedInt32Values)
     EXPECT_THROW(DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite", info, {}), Failure);
 }
 
+TEST_F(CatalogTest, CleanupBacklogUsesBoundedBatchesAndAnExactCount)
+{
+    CreateCollection();
+    const auto base = catalog->Base(collection_id);
+    std::vector<std::string> garbage;
+    garbage.reserve(8193);
+    for (int i = 0; i < 8193; ++i) {
+        garbage.push_back(Location("obsolete-" + std::to_string(i)));
+    }
+    catalog->PublishExpiration(
+        base,
+        {},
+        garbage,
+        [](std::string_view) -> Status {
+            return {};
+        },
+        [&]() -> iceberg::Status {
+            const auto updated = catalog->UpdateTableMetadataLocation("columnar",
+                "events",
+                Location("maintenance"),
+                base.metadata_location,
+                base.metadata_location);
+            if (!updated) {
+                return std::unexpected(updated.error());
+            }
+            return {};
+        });
+    EXPECT_EQ(catalog->PendingMetadataCount(collection_id), 8193);
+    const auto first = catalog->PendingMetadata(collection_id);
+    ASSERT_EQ(first.size(), 8192U);
+    catalog->AcknowledgeMetadata(collection_id, first);
+    EXPECT_EQ(catalog->PendingMetadataCount(collection_id), 1);
+    const auto last = catalog->PendingMetadata(collection_id);
+    ASSERT_EQ(last.size(), 1U);
+    catalog->AcknowledgeMetadata(collection_id, last);
+    EXPECT_EQ(catalog->PendingMetadataCount(collection_id), 0);
+    catalog.reset();
+    catalog = DurableSqliteCatalogStore::Open(temporary.path / "catalog.sqlite", info, {});
+    EXPECT_TRUE(catalog->PendingMetadata(collection_id).empty());
+}
+
 } // namespace
 } // namespace glamdb::detail

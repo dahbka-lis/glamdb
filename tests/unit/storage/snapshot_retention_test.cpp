@@ -1,6 +1,8 @@
 #include "core/storage/snapshot_retention.h"
 
 #include <gtest/gtest.h>
+#include <iceberg/arrow/arrow_io_util.h>
+#include <iceberg/file_io.h>
 #include <iceberg/snapshot.h>
 #include <iceberg/table_metadata.h>
 
@@ -51,6 +53,26 @@ TEST(SnapshotRetentionPolicy, RejectsUnversionedAndNoncanonicalPersistentPropert
     }
     std::unordered_map<std::string, std::string> properties{{RetentionKeepKey, "1"}};
     EXPECT_FALSE(StripRetentionProperties(properties));
+}
+
+TEST(SnapshotRetentionPolicy, BoundsAvroRecordsBeforeOpeningTheManifestListReader)
+{
+    std::shared_ptr<iceberg::FileIO> io = iceberg::arrow::MakeMockFileIO();
+    const auto marker = std::string(16, 's');
+    // One schema property, then a block claiming two records without any payload.
+    // The container guard must reject the record count before schema materialization.
+    const auto bytes = std::string("Obj\1") + '\x02' + '\x16' + "avro.schema" + '\x0c' + "\"null\"" + '\0' + marker +
+        '\x04' + '\0' + marker;
+    ASSERT_TRUE(io->WriteFile("retired.avro", bytes));
+    auto metadata = History();
+    for (const auto& snapshot : metadata.snapshots) {
+        snapshot->manifest_list = "retired.avro";
+    }
+    TStorageLimits limits;
+    limits.Store.Manifests = 1;
+    const auto result = FindExpiredMetadata(io, metadata, 1, limits);
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().message, "Avro container exceeds its record limit.");
 }
 
 } // namespace

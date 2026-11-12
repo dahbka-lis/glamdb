@@ -28,10 +28,11 @@ reaching retained-history capacity; protected history can still exhaust capacity
 
 The result reports the effective policy, snapshots expired by this call and
 metadata files still queued for cleanup. The current snapshot ID and every
-Parquet row remain unchanged. In the append-only profile, current data references
-all previous manifests, so expiration reclaims old manifest lists and superseded
-roots, not manifests or Parquet. General orphan collection and compaction remain
-outside this feature.
+Parquet row remain unchanged. Expiration reclaims old manifest lists and manifests
+whose last retained snapshot reference disappears. A merged manifest can replace
+its immutable input manifests; those inputs remain until every retained snapshot
+that needs them expires. Current manifests and Parquet files are never deleted.
+General orphan collection and compaction remain outside this feature.
 
 ## Historical reads, preconditions and receipts
 
@@ -54,8 +55,13 @@ root as the statistics; it never substitutes a later root's count.
 Append receipts and their ID/hash bindings never expire. Receipt lookup does not
 need old snapshot metadata. Retained snapshots are cross-checked against their
 original receipts; expired IDs are also bound to exactly one committed receipt.
-Recovery validates expired ancestors' current manifests and Parquet footers
-against those receipts, without opening expired manifest lists.
+Recovery starts from the oldest retained snapshot's complete inventory. It checks
+each file's original snapshot ID, sequence and file sequence against the permanent
+receipts, verifies per-operation row/file/byte totals and ordinary/bulk limits,
+and validates Parquet footers. Later retained transitions still require exact
+EXISTING-entry rewrites. Expired lists and obsolete manifests are not needed.
+Advisory column metrics retain the existing immutable-storage trust contract;
+receipts authenticate operation identity and totals rather than file contents.
 
 ## Publication, recovery and compatibility
 
@@ -68,11 +74,14 @@ queue together. An uncertain result returns `RECOVERY_REQUIRED`, closes
 admission and requires `Reconcile()` followed by repeating the request. Neither
 an error nor a timeout authorizes deletion.
 
-Cleanup checks that each queued path is an unreferenced manifest list in the
-same collection. It waits for collection metadata planners, unlinks the file,
+Cleanup checks each queued path against the verified union of all retained
+manifests and lists in the same collection. It waits for collection metadata planners, unlinks the file,
 synchronizes the metadata directory and then acknowledges the queue in SQLite.
-Failures leave cleanup pending. Exclusive reopen validates the selected root and
-receipts, executes the durability fence and resumes cleanup. Missing expired
+Failures leave cleanup pending. Each writer/recovery pass handles at most 8192
+queued paths per collection; the reported pending count includes the entire
+backlog. Later writes or maintenance resume remaining batches. Exclusive reopen
+validates the selected root and receipts, executes the durability fence and
+resumes cleanup. Missing expired
 ledger entries, invalid ancestry or a missing current data file are corruption.
 Interrupted maintenance can leave an ordinary orphan root; automatic orphan
 collection is not introduced.
@@ -86,7 +95,7 @@ The default permanent operation limit remains 4096. To exceed it, create/open
 with the same explicit `Limits::max_operations` (up to 8192); a larger profile
 reserves additional catalog/recovery memory. This ceiling stays within the
 existing 8192-row catalog inventory query bound. Retention-enabled collections allow
-16384 current manifests; data files, root/manifest/list bytes, catalog bytes,
+16384 retained manifests; data files, root/manifest/list bytes, catalog bytes,
 warehouse capacity and shared reservations remain finite. Retention cannot make
 an append-only data inventory independent of the number of appends.
 
@@ -152,6 +161,13 @@ selector and expiration between statistics and history reads. A keep-last-one
 race used to manufacture a not-found error; a keep-last-two race silently
 undercounted the earlier root. Both now preserve the computed statistics and
 report an unavailable retained count when the root identities differ.
+
+Review of upstream manifest merging added a complete retained checkpoint for
+recovery, union-based last-reference manifest cleanup, and bounded cleanup batches.
+Regressions cover the 99/100 to 100/101 reference transition, original bulk files,
+identical publication/recovery accounting, malformed file provenance, early Avro
+record limits and a cleanup queue larger than 8192 paths. Fresh-process tests
+also cover format-reader initialization before checkpoint recovery.
 
 The retained root and redundant list history are bounded by explicit maintenance;
 permanent receipts and the current append-only file inventory still grow within

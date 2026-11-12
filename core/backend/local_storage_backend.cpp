@@ -121,6 +121,10 @@ uint64_t ScanIndexMemory(const NStorage::TBaseState& state)
     const auto& index = *state.ScanIndex;
     uint64_t bytes = sizeof(index);
     AddMemory(bytes, state.ExpiredSnapshotIDs.capacity(), sizeof(int64_t));
+    AddMemory(bytes, state.RetainedManifestPaths.size() * 2, sizeof(std::string));
+    for (const auto& path : state.RetainedManifestPaths) {
+        AddMemory(bytes, path.capacity() + 1, 1);
+    }
     // Copy-and-grow publication and reserve-and-grow recovery can give the
     // same history different vector capacities. Both are bounded by twice
     // the final element count in the pinned standard library. Charge that
@@ -1331,8 +1335,17 @@ Result<std::unique_ptr<StagedExpiration>> TLocalStorageBackend::PrepareExpiratio
             const auto& snapshot = metadata->snapshots[i];
             staged->Snapshots.push_back(
                 {snapshot->snapshot_id, snapshot->sequence_number, snapshot->summary.at(std::string(OperationKey))});
-            staged->Files.push_back(snapshot->manifest_list);
             expiredSequence = snapshot->sequence_number;
+        }
+        const auto retirement = TakeIceberg(NStorage::FindExpiredMetadata(FileIO_,
+                                                *base->Metadata,
+                                                count,
+                                                NStorage::RetentionLimits(Options_.Storage, *base->Metadata)),
+            "IO_ERROR",
+            "find expired metadata");
+        staged->Files.reserve(retirement.Files.size());
+        for (const auto& file : retirement.Files) {
+            staged->Files.push_back(file.Path);
         }
         metadata->snapshots.erase(metadata->snapshots.begin(),
             metadata->snapshots.begin() + static_cast<std::ptrdiff_t>(count));
@@ -1377,9 +1390,10 @@ Status TLocalStorageBackend::RemoveExpiredMetadata(std::string_view collectionID
 {
     return Guarded<Status>([&]() -> Status {
         const auto uri = NIO::TStoreUri::Parse(path, Store_.store_id);
-        Require(uri && uri.Value().CollectionId() == collectionID && uri.Value().Kind() == NIO::EFileKind::ManifestList,
+        Require(uri && uri.Value().CollectionId() == collectionID &&
+                (uri.Value().Kind() == NIO::EFileKind::ManifestList || uri.Value().Kind() == NIO::EFileKind::Manifest),
             "CORRUPTION",
-            "cleanup path is not an expired manifest list");
+            "cleanup path is not expired metadata");
         {
             std::lock_guard lock(Mutex_);
             RequireVerified();
@@ -1387,6 +1401,9 @@ Status TLocalStorageBackend::RemoveExpiredMetadata(std::string_view collectionID
             Require(found != Collections_.end() && found->second.Confirmed,
                 "CORRUPTION",
                 "cleanup collection is missing");
+            Require(!std::ranges::binary_search(found->second.Confirmed->RetainedManifestPaths, path),
+                "CORRUPTION",
+                "cleanup manifest is still referenced");
             for (const auto& snapshot : found->second.Confirmed->Metadata->snapshots) {
                 Require(snapshot->manifest_list != path, "CORRUPTION", "cleanup path is still referenced");
             }

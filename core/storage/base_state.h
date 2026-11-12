@@ -31,6 +31,8 @@ struct TBaseState
     TStorageUsage Usage;
     std::shared_ptr<const TScanMembership> ScanIndex{};
     std::vector<std::int64_t> ExpiredSnapshotIDs{};
+    // Sorted union across every retained snapshot, including merged-out inputs.
+    std::vector<std::string> RetainedManifestPaths{};
 };
 
 iceberg::Result<TBaseState> CheckAppendClosure(const std::shared_ptr<iceberg::FileIO>& fileIO,
@@ -42,8 +44,8 @@ iceberg::Result<TBaseState> CheckAppendClosure(const std::shared_ptr<iceberg::Fi
 // Verifies one retained append without walking the whole history: the root
 // parses with the supported profile, `snapshotID` is retained, its transition
 // from the parent snapshot is a valid append, and its manifest list, new
-// manifest and data file are intact. Returns the root state (usage covers the
-// root only).
+// manifests and data files are intact, including exact preservation of rewritten
+// parent entries. Returns the root state (usage covers the root only).
 iceberg::Result<TBaseState> VerifyRetainedSnapshot(const std::shared_ptr<iceberg::FileIO>& fileIO,
     const std::string& rootLocation,
     const std::string& storeID,

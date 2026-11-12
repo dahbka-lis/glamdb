@@ -60,9 +60,10 @@ is immutable; overwrite is disabled. The engine removes a metadata root
 superseded by a confirmed publication: the current root carries the whole
 retained history, so recovery and scans never read an older root, and a scan that
 already resolved the old root keeps it until its planning finishes.
-Explicit retention also removes expired manifest lists through a durable cleanup
-queue, after publication and after all collection metadata planners release.
-Current manifests and Parquet files remain referenced. Other cleanup, including
+Explicit retention also removes expired manifest lists and manifests whose last
+retained snapshot reference has disappeared. A durable cleanup queue waits for
+publication and all collection metadata planners. Current manifests and Parquet
+files remain referenced. Other cleanup, including
 orphan removal, is outside the initial engine. While the store is open, warehouse
 mutations belong exclusively to the engine. Linux incremental physical-capacity
 admission detects ordinary notified local mutations but does not promise
@@ -198,7 +199,7 @@ decoded data and 10,000 rows, with one new Parquet file and one snapshot. Curren
 store-wide checks include 4,096 retained snapshots and, by default, 4,096 operation
 bindings/outcomes, including failed operations. The embedded API supports an
 explicit operation limit up to 8,192 with additional shared memory admission.
-An opted-in retention profile allows 16,384 current manifests while preserving
+An opted-in retention profile allows 16,384 retained manifests while preserving
 finite data/metadata byte limits. These development limits do not
 qualify combined memory usage or storage capacity. Canonical bytes, owned-input
 estimates, physical Arrow/writer allocations and HTTP payload bytes have separate

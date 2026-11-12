@@ -24,6 +24,9 @@ recover current files from retained snapshots and permanent append receipts.
 
 - Unknown COMMIT must prevent cleanup until authoritative recovery (task 3).
 - Planning against any older root must delay cleanup (task 3).
+- Merged manifest inputs remain until their last retained reference expires.
+- Checkpoint recovery checks every original file against its receipt profile.
+- Cleanup parsing and queue materialization retain finite preallocation bounds.
 - A larger age guarantee must protect history even when keep-last is small (task 1).
 - An expired parent must not weaken receipt/provenance checks (task 2).
 - Larger operation capacity must remain finite and reserved (task 4).
@@ -48,7 +51,7 @@ Files: `core/catalog/durable_sqlite_catalog.*`,
 
 - [x] Persist version-3 expiration records and cleanup paths with exact-base CAS.
 - [x] Verify retained/expired receipts bidirectionally and rebuild membership
-  from current manifests without expired lists. Test missing/modified ledger
+  from the oldest retained inventory without expired lists or obsolete manifests. Test missing/modified ledger
   and manifest provenance, reopen and original receipt verification.
 
 ### Task 3: Publication, cleanup and concurrency
@@ -69,7 +72,7 @@ Files: `public/storage/types.h`, resource envelopes, development documentation.
 - [x] Reserve larger finite operation profiles, keep defaults unchanged, and
   run >4,096 real appends with periodic explicit maintenance and fresh reopen.
 - [x] Record measured root sizes and reopen time; verify that expired manifest-list
-  bytes are reclaimed.
+  bytes and last-reference manifests are reclaimed.
 - [x] Run relevant native suites, formatting and quality checks; inspect outputs.
 - [x] Obtain a fresh independent whole-change review, critique the design and
   resolve actionable findings with regression tests.

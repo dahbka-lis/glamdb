@@ -1454,7 +1454,7 @@ Result<SnapshotExpirationResult> Engine::ExpireSnapshots(const SnapshotExpiratio
             impl->RetireRoot(*base);
         }
         impl->DrainExpiredMetadata();
-        result.cleanup_pending = static_cast<int64_t>(impl->catalog->PendingMetadata(request.collection_id).size());
+        result.cleanup_pending = impl->catalog->PendingMetadataCount(request.collection_id);
         return result;
     } catch (const Failure& error) {
         if (publicationStarted && impl->backend) {

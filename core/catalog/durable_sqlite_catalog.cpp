@@ -858,6 +858,19 @@ bool DurableSqliteCatalogStore::IsExpiredSnapshot(std::string_view id, int64_t s
              .empty();
 }
 
+int64_t DurableSqliteCatalogStore::PendingMetadataCount(std::string_view id)
+{
+    std::lock_guard lock(mutex_);
+    Require(!uncertain_, "RECOVERY_REQUIRED", "catalog is not authoritative");
+    if (database_.Integer("PRAGMA user_version") < 3) {
+        return 0;
+    }
+    const auto rows = database_.Query("SELECT COUNT(*) FROM metadata_cleanup WHERE collection_id=?", {std::string(id)});
+    const auto count = ParseInteger(Required(rows.at(0), 0));
+    Require(count >= 0 && count <= limits_.max_operations * 9, "CORRUPTION", "cleanup inventory exceeds capacity");
+    return count;
+}
+
 std::vector<std::string> DurableSqliteCatalogStore::PendingMetadata(std::string_view id)
 {
     std::lock_guard lock(mutex_);
@@ -866,10 +879,9 @@ std::vector<std::string> DurableSqliteCatalogStore::PendingMetadata(std::string_
         return {};
     }
     const auto rows =
-        database_.Query("SELECT path FROM metadata_cleanup WHERE collection_id=? ORDER BY path", {std::string(id)});
-    Require(rows.size() <= static_cast<size_t>(limits_.max_operations),
-        "CORRUPTION",
-        "cleanup inventory exceeds capacity");
+        database_.Query("SELECT path FROM metadata_cleanup WHERE collection_id=? ORDER BY path LIMIT 8192",
+            {std::string(id)});
+    (void)PendingMetadataCount(id);
     std::vector<std::string> result;
     result.reserve(rows.size());
     for (const auto& row : rows) {

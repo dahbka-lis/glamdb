@@ -181,7 +181,7 @@ std::error_code TStoreDirs::RemoveMetadataFile(const TStoreUri& location) const
 
 std::error_code TStoreDirs::RemoveExpiredMetadata(const TStoreUri& location) const
 {
-    if (location.Kind() != EFileKind::ManifestList) {
+    if (location.Kind() != EFileKind::ManifestList && location.Kind() != EFileKind::Manifest) {
         return std::make_error_code(std::errc::invalid_argument);
     }
     if (const auto error = CheckIdentity()) {

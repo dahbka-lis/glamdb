@@ -1,16 +1,20 @@
 #pragma once
 
+#include "core/io/store_uri.h"
 #include "core/storage/capacity.h"
 
 #include <iceberg/result.h>
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace iceberg {
 struct TableMetadata;
+class FileIO;
 }
 
 namespace NGlamDB::NStorage {
@@ -21,6 +25,26 @@ struct TRetentionPolicy
     std::int64_t MinAgeMs = 0;
     bool operator==(const TRetentionPolicy&) const = default;
 };
+
+struct TExpiredMetadataFile
+{
+    std::string Path;
+    NIO::EFileKind Kind;
+    std::uint64_t Bytes = 0;
+};
+
+struct TMetadataRetirement
+{
+    std::vector<TExpiredMetadataFile> Files;
+    std::vector<std::string> RetainedManifests;
+    TStorageUsage Removed;
+};
+
+// Finds last-reference metadata across the complete retained snapshot union.
+iceberg::Result<TMetadataRetirement> FindExpiredMetadata(const std::shared_ptr<iceberg::FileIO>& fileIO,
+    const iceberg::TableMetadata& metadata,
+    std::size_t prefix,
+    const TStorageLimits& limits);
 
 inline constexpr char RetentionVersionKey[] = "glamdb.retention.version";
 inline constexpr char RetentionKeepKey[] = "glamdb.retention.keep-last";

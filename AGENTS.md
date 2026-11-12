@@ -137,6 +137,16 @@ run concurrently. Collections are fixed-schema, unpartitioned Iceberg v2 tables.
 Append preserves every input row, including duplicate keys. It provides neither
 key uniqueness nor replacement semantics.
 
+Ordinary and bulk appends use the pinned Iceberg merge append in the existing
+atomic publication. Small manifests merge at the upstream threshold of 100,
+targeting 8 MiB; data files and historical views remain immutable. Publication
+and recovery compare every rewritten EXISTING entry exactly and count only
+ADDED entries as new data. The shared 32 MiB verification guard includes removed
+manifest inputs as well as new outputs, the list and the current root. Keep
+the eight-new-manifest guard and ordinary/bulk added-file limits unchanged.
+See [manifest merging](docs/development/STORAGE_MODULE.md#manifest-merging)
+for retained-history growth and compatibility.
+
 Collections carry Parquet write settings (collection-default compression codec
 and level, dictionary policy and page limit; per-column codec, dictionary and
 value-encoding overrides) that apply to data files of later appends.
@@ -160,7 +170,10 @@ complete inventory, fresh-process validation and measured profile limits.
 Explicit C++ snapshot retention maintenance is available through
 `Engine::ExpireSnapshots`; see [snapshot retention](docs/development/SNAPSHOT_RETENTION.md).
 It lazily introduces catalog version 3, preserves all receipts and current data,
-and resumes queued metadata cleanup after recovery. Already planned cursors keep
+and resumes bounded metadata cleanup after recovery. Cleanup reclaims manifest
+lists and merged inputs only after their last retained reference disappears;
+checkpoint recovery verifies original file provenance and receipt totals.
+Already planned cursors keep
 their fixed data view; new expired reads/preconditions report `SNAPSHOT_EXPIRED`.
 Default history remains unchanged. Explicit operation profiles up to 8192 reserve
 additional catalog/recovery memory; transport maintenance endpoints are not provided.
@@ -574,6 +587,11 @@ Install the pinned formatter before Python/CTest: `python3 -m pip install
 inside the development virtualenv. Run `python3 -m unittest discover -s
 tests/logging -v` or `glamdb.logging` CTest. Tests exercise real Quill, blocked /
 closed stderr, overload, thread churn, shutdown and secret projection.
+
+The shared SHA-256 compressor uses runtime-gated x86 SHA-NI or ARMv8 SHA2,
+with a portable fallback and no new I/O-only dependency. Read
+[SHA-256 validation and measurements](docs/development/SHA256.md) for forced-path
+tests, compatibility checks and the manual `glamdb_sha256_bench` target.
 
 For dependency work, read [third_party/README.md](third_party/README.md).
 Verify checked-out revisions without building them:
