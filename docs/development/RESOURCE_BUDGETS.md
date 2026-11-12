@@ -16,6 +16,10 @@ bounded process. [The shared owner](SHARED_RESOURCES.md) now implements finite
 reservation classes and device admission through public `ResourceLimits`.
 Full-engine RSS, capacity and durability qualification remain open.
 
+The [bulk append profile](BULK_INGESTION.md) extends ingestion through a separate
+entry point. Its bounded two-pass source shares these owners and release points;
+ordinary append units below retain their original values.
+
 ## Accounting units
 
 MiB means 2^20 bytes; GiB means 2^30; TiB means 2^40. Counts, durations,
@@ -27,6 +31,8 @@ logical bytes, allocated memory and physical disk usage are separate units.
 | Owned-input reservation | `4 * decoded_bytes + 2 * null_slot_bytes + rows * (2 * sizeof(Row) + fields * sizeof(Cell)) + 65536`, from `InputReservation`; NULL slots add four bytes for string offsets, one for bool or eight for numeric/timestamp fields, including omitted fields. A conservative admission estimate for normalized rows, hashing and rebuilt Arrow input; not measured RSS or a writer/reader allocation cap. |
 | Physical memory | Allocated capacities, allocator rounding and live parent buffers, including Arrow validity/offset/value buffers, builder growth, STL cells/strings, codecs, Parquet, Avro, Iceberg, JSON and SQLite. Slices can retain an entire parent allocation. |
 | Writer input bytes | The backend estimates the Arrow batch it will build; the writer separately checks its buffers and row groups. NULL fixed-width slots, offsets and bitmaps differ from canonical bytes. Its 16 MiB cap does not redefine canonical input size. |
+| Bulk source and file windows | Per source batch 10,000 rows / 16 MiB canonical bytes / 16 MiB retained root capacities, deduplicating parent buffers. At most 16 MiB Arrow buffers and 100,000 rows per file; target 8 MiB. Source buffers belong to the host; bounded owned copies use a 128 MiB input reservation plus tracked pools. |
+| Bulk operation | At most 256 files, 25,600,000 rows and 4 GiB canonical bytes. 32 MiB descriptor envelope plus existing metadata/writer envelopes. A new bulk attempt reserves 8 GiB + 32 MiB device bytes and 320 inodes; requested I/O is capped at four times that byte envelope. No payload spill. |
 | Wire bytes | UTF-8 HTTP request/response body bytes, including JSON keys, escaping and decimal strings, or a complete Arrow IPC page with schema and EOS. Header bytes have a separate cap. Compressed and chunked requests are rejected in the current profile. |
 | Disk bytes | Warehouse traversal counts the larger of logical length and allocated blocks for regular files, directory blocks, and hard links per entry; includes orphans. Catalog pages, rollback journal and recovery workspace are separate charges. |
 

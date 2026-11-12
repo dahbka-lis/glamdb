@@ -98,7 +98,7 @@ Replay and each outgoing copy have distinct reservations.
 
 Device reservations serialize free-space observation and admission by `st_dev`.
 Different store/workspace paths on that device cannot spend the same pending
-bytes or inodes. Defaults cap pending reservations at 8 GiB and 65,536 inodes per
+bytes or inodes. Defaults cap pending reservations at 16 GiB and 65,536 inodes per
 device, leaving 1 GiB and 128 free inodes. Each open engine protects catalog and
 journal growth plus a 256 MiB recovery workspace; a write reserves another
 256 MiB and 64 inodes. Native recovery creates its bounded SQLite workspace in
@@ -139,3 +139,9 @@ Executed evidence and sanitizer results are recorded in
 [the validation report](SHARED_RESOURCES_VALIDATION.md). This campaign does not
 qualify power-loss durability or certify the conservative envelopes for every
 possible workload.
+
+Bulk append reserves a conservative 8 GiB + 32 MiB device envelope and 320 inodes
+for a new operation, before binding. Its 128 MiB owned-input and 32 MiB descriptor
+envelopes complement existing writer/metadata budgets and tracked Arrow pools.
+See [the bulk contract](BULK_INGESTION.md). Ordinary attempts retain their smaller
+reservations; uncertain attempts retain the appropriate envelope until recovery.

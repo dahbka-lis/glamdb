@@ -99,6 +99,14 @@ no API token or shared backend: tab-local rows/operations disappear on reload.
 JSON export is available there; network SDK and Arrow IPC remain connected-server
 features. Do not present BrowserDemoAPI as the public HTTP or durable core API.
 
+`Engine::BulkAppendDurable` adds a replayable two-pass source for append collections
+before KV. It validates/hash-completes before binding and produces bounded files
+under one atomic snapshot/receipt; ordinary append retains its old limits. Read
+[bulk ingestion](docs/development/BULK_INGESTION.md) for source lifetime, cancellation,
+explicit bulk I/O attempts, result receipt version 2, conservative device reservations
+and measured limits. Keep unmarked ordinary one-file guards strict and change
+publication/recovery bounds together. No bulk HTTP upload endpoint is provided.
+
 The first milestone is an embedded, synchronous, durable **append store** on
 local disk. A store has one owning process and one serialized writer; reads may
 run concurrently. Collections are fixed-schema, unpartitioned Iceberg v2 tables.
