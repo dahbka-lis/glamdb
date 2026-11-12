@@ -67,6 +67,14 @@ Network upload adapters and 1 TiB qualification remain future work.
 These extensions are not part of the current API. Development is tracked in
 [GitHub issues](https://github.com/glamourdb/glamdb/issues).
 
+**[Open the public demo](https://nnrpi.github.io/glamdb/)** — anyone can try it.
+The [organization workbench](docs/development/ORGANIZATIONS.md) uses Keycloak
+sign-in, OAuth2 Proxy sessions and Cerbos policies for isolated database access.
+See the [deployment and operating guide](docs/development/SSO_OPERATIONS.md)
+for HTTPS hosting, native account management and database ownership workflows.
+The static Pages demo contains disposable sample data and remains a separate
+publication; it does not connect to protected database servers.
+
 ## Get started
 
 Clone the repository and start a local server:
@@ -262,6 +270,15 @@ ingestion, backpressure and fresh-process recovery while preserving history caps
 The [combined recovery harness](docs/development/COORDINATOR.md#combined-storage-faults)
 exercises real file/SQLite failures and abrupt process exits; it does not qualify power-loss durability.
 
+For four-state rules and native Telegram setup, see [the alerting guide](ALERTING.md).
+
+For metrics, Grafana dashboards and deployment steps, see [the monitoring guide](docs/development/MONITORING.md).
+
+For a single Linux server, the [complete observability quickstart](deploy/observability/QUICKSTART.ru.md)
+provides one command for Prometheus, Grafana, Loki, Alloy, Alertmanager and host/container
+collectors. Real application endpoints and a dedicated Loki filesystem are inputs;
+repeated deployment preserves owned data and credentials.
+
 ### Client and UI tests
 
 The workbench development environment requires Python 3.13, Node.js 22+, and
@@ -275,6 +292,8 @@ bash scripts/check-workbench.sh
 
 On Linux, add `--with-deps` to the Playwright install command to install browser
 system dependencies. Tests use localhost sockets and disposable stores.
+
+See [Metrics, Grafana dashboards and operator setup](docs/development/MONITORING.md) for monitoring.
 
 ## Contributing
 

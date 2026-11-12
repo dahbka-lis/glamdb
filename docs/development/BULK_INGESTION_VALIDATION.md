@@ -64,31 +64,36 @@ Raw JSON and executed logs from this run are retained locally under the ignored
 `artifacts/bulk-ingestion/2026-11-12/` directory.
 
 The measurement candidate used base `47cc955`. Final integration also includes
-`c5ca585` (Arrow ownership/download, HTTP scan quotas, Parquet compression settings
-and combined recovery coverage). Measurements use the default writer encoding;
+`9536a3d` (Arrow ownership/download, HTTP scan quotas, Parquet compression settings,
+combined recovery coverage and observability). Measurements use the default writer encoding;
 nondefault compression levels were not included in this memory/timing campaign.
 The final integration repeats correctness checks and independently checks every
 bulk footer, settings changes, exact retries and reopen with catalog schema version 2.
 
 ## Correctness and quality checks
 
-- Complete Release build and CTest: **zero failures across 958 cases**, including native HTTP/SDK,
-  installed consumer, protocol/fault, storage, I/O and scanner suites. Two
+- Complete Release build and CTest: **zero failures across 960 cases**, including native HTTP/SDK,
+  installed consumer, protocol/fault, storage, I/O, scanner and native metrics suites. Two
   existing measurements and two manual capacity campaigns were disabled; child-process entrypoints skipped
   when invoked without their parent environment.
-- Complete Python suite after integration with `main`: **1,030 passed**, one expected skip; one
-  external Starlette deprecation warning. Complete Node suite: **192 passed**.
+- Complete Python suite at base `c5ca585`: **1,030 passed**, one expected skip and
+  one external Starlette deprecation warning. After observability integration
+  (`9536a3d`), the affected SDK receipt/client/stream, verifier and workload suites
+  passed **542** cases. The complete Node suite passed **204** cases.
 - ASan/UBSan after the final `c5ca585` integration: vertical **315** and storage
   **174** passed; eight expected child entrypoints skipped across those suites.
-  Earlier unit **122** and I/O **178** cases also passed before this integration.
+  All **16** active bulk cases passed again after the `9536a3d` observability
+  integration. Earlier unit **122** and I/O **178** cases also passed before the
+  compression integration.
   Existing measurements and the two manual capacity campaigns were excluded
   from sanitizer execution.
   Leak detection was disabled because LeakSanitizer cannot run under the local
   ptrace-based sandbox; no LSan or TSan result is claimed here.
-- LLVM 18 formatting across 255 project files, clang-tidy on all 17 changed
+- LLVM 18 formatting across 259 project files, clang-tidy on all 17 changed
   translation units, and quality negative checks passed. Diagnostics were fixed
   and the affected translation units rechecked; both edited C++ translation units
-  from the final integration were checked again.
+  from the compression integration were checked again, followed by the shared
+  coordinator after observability integration.
 - Literal shared fixtures cover canonical chunk equivalence, receipt version 2,
   unsupported versions, ordinary limits, precise timestamps and 17 invalid
   receipt mutations in native, SDK, UI and independent verifier tests.
@@ -144,6 +149,13 @@ independent of result receipt version 2. It clarified the catalog outcome-blob
 encoding wording. Building the immutable writer specification once per operation
 and calibrating reservations across compression levels are further improvements;
 the footer/retry/reopen regression covers the implemented integration.
+
+The final observability integration was independently reviewed as well. Both
+append entry points share exactly one operation metric scope, every returned
+outcome is recorded once, and pending-call/owned-byte gauges retain balanced RAII
+increments and decrements across retries, admission refusals and all outcomes.
+The final cancellation/deadline check remains under the publication gate. No
+additional blocker was found in this review.
 
 The two-pass choice avoids a payload spool and its recovery/cleanup protocol,
 but requires replayable input, repeats hashing on retries and conservatively

@@ -98,6 +98,23 @@ The same UI can publish as a static browser-only demo on GitHub Pages. It has
 no API token or shared backend: tab-local rows/operations disappear on reload.
 JSON export is available there; network SDK and Arrow IPC remain connected-server
 features. Do not present BrowserDemoAPI as the public HTTP or durable core API.
+The organization gateway (`apps/workbench_access/`) uses Keycloak accounts and
+organizations, OAuth2 Proxy browser sessions in a private ephemeral Valkey store,
+Authlib/joserfc token verification
+with live introspection, and the official Cerbos SDK with YAML policies. SQLite
+stores database ownership, transactional audit, idempotent lifecycle receipts and
+unresolved backend write admissions; it stores no passwords or password hashes.
+Every list and direct database route uses current server-owned policy attributes.
+A strict transfer closes admission, waits for requests and streams, and requires
+terminal authoritative backend write outcomes before moving ownership. Unknown
+writes survive restart and keep transfer closed. Cross-service identity failures
+leave explicit pending receipts; emergency disables supersede older pending grants.
+See [ORGANIZATIONS.md](docs/development/ORGANIZATIONS.md) and the detailed
+[operator guide](docs/development/SSO_OPERATIONS.md) for setup, native account
+management, migration, recovery and secret rotation. The former Basic and static
+group modes have been removed. Production deployment of the gateway with the
+native HTTP transport remains unqualified; explicit mock-backend tests do not
+qualify that identity integration or durability.
 
 `Engine::BulkAppendDurable` adds a replayable two-pass source for append collections
 before KV. It validates/hash-completes before binding and produces bounded files
@@ -244,11 +261,14 @@ Preserve these boundaries when adding or changing engine behavior:
 | `tests/` | Native unit/recovery/SqlCatalog/VFS/consumer suites, `vertical/` public-API storage tests, `mock/` in-memory scan tests, verification and actual SDK HTTP/HTTPS tests. |
 | `tests/stress/` | Explicit manual native capacity campaigns; excluded from default pytest/CTest and CI. |
 | `apps/mock_server/` | Disposable Python mock, real HTTP/Arrow, no warehouse/catalog access. |
+| `apps/workbench_access/` | OIDC/Cerbos gateway, ownership/audit catalog, lifecycle CLI and offline migration. |
 | `fixtures/`, `tools/verification/` | Literal canonical/metadata inputs, independent row oracle and evidence helpers. |
 | `sdk/python/`, `ui/` | Standalone Python HTTP SDK; HTML/CSS/ES-module pink workbench and browser/unit tests. |
 | `tools/workload/` | Mimesis datasets, SDK/Locust workloads, per-worker SQLite outcome journals and full verification. |
 | `probes/`, `benchmarks/` | Installed-dependency/compatibility probes and workload measurements. |
 | `scripts/` | Developer tooling, including quality checks. |
+| `deploy/alerting/`, `tools/alerting/` | Four-state Prometheus rules, Alertmanager routing, native Telegram receiver and executable replay/transition tests. |
+| `core/telemetry/metrics.*`, `deploy/monitoring/`, `tools/monitoring/` | Library-backed native/Python telemetry, standard collectors/chart, application panels and checks. |
 | `third_party/` | Pinned upstream submodules and `lock.json`. |
 
 Read [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) when placing new
@@ -264,7 +284,52 @@ For branding/static hosting read [PUBLIC_DEMO.md](docs/development/PUBLIC_DEMO.m
 Preserve the supplied PNGs unchanged. Brand paths must be local assets; sizes
 belong in theme.json. Asset URLs must support both / and /glamdb/.
 
+The complete single-host Linux monitoring/logging/alerting deployment is
+`scripts/observability.py`, implemented in `tools/observability/`. Read the
+[Russian quickstart](deploy/observability/QUICKSTART.ru.md) before deployment.
+It requires local rootful Podman, systemd/cgroup-v2, actual application metrics
+and logs, and a dedicated bounded Loki mount. `init/up/status/check/down` use
+owned resources and preserve persistent data. Run its standard-library unit
+suite with `python3 -m unittest discover -s tools/observability/tests -v`;
+the real lifecycle test requires an explicitly disposable `glamdb-lab-*` config.
+Linux arm64 runtime was exercised; amd64 plans/pins and boot-unit generation do
+not establish an executed amd64 or actual-reboot test. Missing sources never
+become mock producers or synthetic healthy metrics.
+
 ## Build and development commands
+
+For alerting setup and validation, read [ALERTING.md](ALERTING.md) and run
+`python3 tools/alerting/check.py` with the required Prometheus/Alertmanager tools
+on PATH or passed explicitly. Its process tests run real Prometheus/Alertmanager
+with a loopback Telegram protocol peer only.
+The native receiver owns delivery; there is no webhook/outbox service.
+Telegram uses one combined daily current-state summary in the 10:00–10:01
+Europe/Moscow window. State changes outside that window do not notify.
+`deploy/alerting/external-observer/` runs on a separate host/notification path.
+Gateway application metrics cover requests after the edge/OIDC proxy. Separate
+Caddy outer-edge counts include authentication rejections before the application.
+Native operation counters measure actual core operations.
+For real host/container/Kubernetes monitoring, private application endpoints,
+source gaps and deployment steps, read [MONITORING](docs/development/MONITORING.md).
+Install `tools/monitoring/requirements.txt` with hash verification and build the pinned
+prometheus-cpp core/pull installation through `cmake/dependencies` (including
+the recorded CivetWeb atomic stop-flag patch) before `python3 tools/monitoring/check.py
+--promtool PATH`. See the coverage matrix linked from that runbook. Keep missing
+collectors/unsupported fields as NoData; exporter reachability does not establish
+native database health or durability. The short-lived CLI publishes no textfile.
+`GLAMDB_BUILD_METRICS=ON` enables the standalone metric target in IO-only mode;
+the normal engine build always includes its domain instrumentation.
+The native server's `--metrics-listen-address IP:port` opts into a separate private
+Exposer; omission disables the listener. `glamdb_server_ready` samples actual
+managed engine health, without database identifiers. Run `glamdb.native_metrics`
+for real storage/counter/readiness/restart coverage; `GLAMDB_TEST_TMPDIR` selects
+its disposable test parent when `/tmp` cannot meet the storage disk reserve.
+The listener includes bounded native HTTP request/status counters, duration and
+in-flight metrics through asynchronous response completion/cancellation.
+`--log-directory DIR` opts into the existing Quill 13 structured logger with
+8 MiB JSONL rotation and three backups; requests never log tokens, URLs or data.
+Native and IO-only builds consume the pinned header-only `third_party/quill`
+for the structured logger.
 
 Client/mock development uses Python 3.13 and Node 22+:
 
@@ -301,6 +366,23 @@ the first page against requested/opened snapshots and preserves consumer/decode
 errors through owner cleanup; returned batches retain their buffers. See
 [client conformance](docs/development/CLIENT_CONFORMANCE.md) for separate native
 and mock export/ownership tests and the browser framing validator's scope.
+The standard Python suite includes OIDC claim/CSRF/policy-route/admission,
+workflow/retry/migration and disconnect regressions with explicit test doubles.
+Real identity infrastructure tests are opt-in and require a disposable provisioned
+Keycloak/OAuth2 Proxy/Cerbos deployment. They must not silently create accounts on
+an unknown host. Full system verification targets a configured real GlamDB server
+by default; mock backends require explicit selection and cannot certify native
+integration. See [current validation](docs/development/ORGANIZATIONS_VALIDATION.md).
+Initialize ownership state with `python3 -m apps.workbench_access.admin --catalog
+/outside/runtime/resources.sqlite init`; start the private adapter with
+`python3 -m apps.workbench_access --config /outside/runtime/gateway.json
+--operator-socket /outside/runtime/operator.sock`. Only Caddy public HTTPS is exposed;
+identity administration, the operator socket, backends, PDP and metrics stay private.
+Keep catalog and credential files owned by the service user, mode0600, outside UI.
+Do not edit a live catalog or remove its owner lease to bypass the owning process.
+Operational events use the optional stderr logging adapter when installed; runtime
+journals own rotation. They never replace transactional ownership audit. Optional
+metrics are unavailable when the metrics component is absent, rather than fabricated.
 Mock faults require explicit development configuration. Do not give the mock a
 production store path. Every production write must eventually use the C++ core.
 
@@ -519,6 +601,14 @@ mechanical rules; vendor and generated code are excluded.
   of application changes.
 - Keep generated builds, dependencies, and experiment output in the ignored
   `build/`, `.deps/`, and `artifacts/` directories.
+
+The optional monitoring profile in `deploy/monitoring/collectors/` uses actual
+macOS node_exporter, named Podman inventory and narrow read-only cgroup-v2
+exporters. Its pinned collectors keep Mac, VM and container measurements separate
+from Kubernetes. The live Grafana overview separates transport, engine outcomes
+and edge/gateway layers. `tools/monitoring/extend_checks.py` applies optional
+source checks to alerting config; unavailable producers remain NODATA. Validate
+Prometheus and Loki dashboard queries with their respective engines.
 
 ## Validation and reporting
 
