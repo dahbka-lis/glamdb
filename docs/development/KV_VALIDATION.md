@@ -9,7 +9,7 @@ the [layout measurements](KV_LAYOUT_MEASUREMENTS.md) and
 ## Independent review
 
 A separate reviewer examined the whole change and ran public-API reproductions
-without editing the implementation. Six findings were corrected and checked:
+without editing the implementation. Six initial findings were corrected and checked:
 
 | Finding | Correction and regression evidence |
 | --- | --- |
@@ -78,35 +78,35 @@ The component p95/p99 values have five samples and equal the observed maximum;
 OS caches were not flushed. Native runs use a shared development host and one
 exercise sample per size, with raw I/O and RSS. These are measurements, not
 random-write latency guarantees. Physical power loss, 1 TiB qualification,
-retention/GC, remote storage and multiwriter operation remain outside this work.
+KV retention/GC, remote storage and multiwriter operation remain outside this work.
 
 ## Recorded checks after upstream integration
 
-The complete feature was rebased onto official main
-`8f615bc83b8ff026b4e313a714cd565c9aafcc77`. Integration preserves streamed HTTP
+The complete feature integrates official main
+`8532c4966fa1da5ce03c54bb5e0067311648fa29`. Integration preserves streamed HTTP
 bulk append, cached warehouse inventory, merge-append, streamed catalog history,
-configured reader admission, hardened footers and optional cache admission.
+configured reader admission, hardened footers and optional cache admission, plus
+append retention and 128-field schemas.
 
-- Full Release build and CTest: 1,227 enabled entries, zero failures. Thirteen
-  standalone child or opt-in measurement entries skipped; four existing manual
+- Full Release build and CTest: 1,293 enabled entries, zero failures. Fourteen
+  standalone child or opt-in measurement entries skipped; five existing manual
   campaigns remain disabled. Native HTTP KV/all-scalar/restart, streamed HTTP
   bulk, ordinary/bulk append, fault recovery, admin, tooling and the installed
   consumer all passed.
 - Storage-disabled installed consumer: passed separate write/reopen processes
   and explicit dependency-error expectations after rebuilding the public API.
-- Python SDK: 932 passed. UI unit: 251 passed. Native Chromium: 13 passed.
-- Combined ASan/UBSan with leak detection: 172 unit, 217 storage, 24 mock and
-  110 selected vertical cases passed. Three standalone child/measurement entries
+- Python SDK: 945 passed. UI unit: 255 passed. Native Chromium: 13 passed.
+- Combined ASan/UBSan with leak detection: 179 unit, 238 storage, 24 mock and
+  139 selected vertical cases passed. Four standalone child/measurement entries
   skipped; parent fault tests invoke their recovery children separately. The
   selected native set covers KV, bulk, faults, snapshots, scan/index admission
   and owned-input lifetime. No runtime sanitizer error was suppressed.
 - Both 4/16 GiB native campaigns were rebuilt from scratch on the integrated
   implementation; clustered mutation, historical full-row lookup, no-ops,
   compaction and fresh-process reopen passed. The raw record identifies the
-  measured binary separately from subsequent analyzer-only cleanup.
-  The final rebuilt binary also reopened both large fixtures and passed a new
-  64 MiB build/exercise/reopen campaign.
-- LLVM 18 formatting passed across all 328 project files. Quality negative
+  final source, executable hashes and catalog-v4 schema. Creation, exercise,
+  reopen and the final rebuilt benchmark have the same executable hash.
+- LLVM 18 formatting passed across all 339 project files. Quality negative
   checks rejected deliberate format/analyzer violations. Integrated KV
   recovery, scan, producer, API, catalog, native server and CLI units and new
   regressions passed individual tidy checks after resolving their diagnostics.
@@ -115,7 +115,7 @@ configured reader admission, hardened footers and optional cache admission.
   tests, including the existing write-settings suite. This work does not claim
   a clean whole-project analyzer baseline.
 
-A fresh independent integration review also ran five native probes. Its longer
+Independent integration reviews also ran seven fresh v4 native probes. The longer
 probe executed 520 operations across catalog pages, retained 260 distinct no-op
 roots and receipts, held the original cursor across 259 COW transitions, and
 verified latest/history plus exact receipt replay after reopening. All probes
@@ -129,6 +129,9 @@ before output files. The new history test's first run correctly refused its
 tiny recovery workspace through the shared capacity guard; its diagnostic
 assertion was corrected and rerun. The missing direct test reader include and
 three integrated analyzer diagnostics were also corrected before acceptance.
+The inherited HTTP test for rejecting 65 fields now tests 129 fields against the
+new 128-field bound. Two files edited during compilation were forced to rebuild
+before the final complete Release and sanitizer reruns.
 
 The private recovery proof avoids copying all retained COW history per step;
 normal publication still copies the confirmed immutable interval index. Its

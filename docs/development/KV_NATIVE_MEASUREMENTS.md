@@ -4,8 +4,8 @@ Both integrated native 4/16 GiB campaigns passed build, clustered mutation,
 full-row lookup, historical reads, durable no-ops, compaction and fresh-process
 reopen with exact retries. On the actual 17,179,905,360-byte decoded fixture, a
 1,000-row clustered update rewrote two files totaling 17,009,142 bytes in
-298.604 ms, with 68,005,616 requested Parquet read-plus-write bytes. Peak
-recorded process RSS across both campaigns was 130,060,288 bytes.
+305.848 ms, with 68,005,616 requested Parquet read-plus-write bytes. Peak
+recorded process RSS across both campaigns was 125,337,600 bytes.
 
 This benchmark exercises the public `Engine` facade, catalog, bounded KV
 producer and durable Parquet/Iceberg publication. It complements the earlier
@@ -25,7 +25,7 @@ Rows round upward to the requested decoded size. The recorded decoded count is
 actual Arrow `TotalBufferSize` across one complete source pass, including string
 offsets. Current physical Parquet bytes are separate. Immutable historical files
 remain retained; filesystem counts and sizes agree with all added-file receipts,
-and every retained primary Parquet file is below 32 MiB. Both final catalogs
+and every retained primary Parquet file is below 32 MiB. Both final version-4 catalogs
 have identical checked schema fingerprints and pass SQLite `quick_check`.
 
 Each build, exercise and reopen phase uses a fresh process. The exercise holds a
@@ -50,16 +50,13 @@ OS caches were not dropped. The two fixture creation processes ran concurrently;
 development compilation and functional checks could also overlap. Exercise and
 reopen phases ran separately. Each latency is one observed sample, so no native
 percentile or dedicated-device claim is made. The earlier layout experiment
-provides repeated component samples. Both fixtures used the same integrated
-binary and final catalog schema.
-The measured source is `d409c4315b9cd860b45570cdc138bcd3c0edc7fe`, rebased onto
-official main `8f615bc83b8ff026b4e313a714cd565c9aafcc77`. Subsequent analyzer
-cleanup reserves two known-size compaction pointer vectors and separates the
-validated migration ordinal increment; format and layout are unchanged. Raw
-evidence identifies the measured artifact and post-measurement edits.
-The final rebuilt binary also reopened both retained large fixtures with exact
-retries and passed all phases on a new 64 MiB fixture; these checks have their
-own artifact hash and results in the raw record.
+provides repeated component samples. Both fixtures used the same final native
+binary and catalog-v4 schema, including the official append-retention tables.
+The measured source is `bb77751b073da06f5acd5a2a4512ed1c452f0010`, integrating
+official main `8532c4966fa1da5ce03c54bb5e0067311648fa29`. Creation, exercise,
+reopen and the final rebuilt benchmark have the same checked executable SHA-256;
+only documentation changed afterward. Raw evidence identifies the artifact,
+source and independent catalog/file audit.
 
 ## Results
 
@@ -71,17 +68,17 @@ own artifact hash and results in the raw record.
 | Current Parquet bytes after build | 4,316,408,668 | 17,265,626,695 |
 | Current files after build | 508 | 2,031 |
 | Retained primary Parquet bytes after exercise | 4,402,149,685 | 17,555,464,672 |
-| Build time (s) | 83.224 | 310.304 |
+| Build time (s) | 83.606 | 307.761 |
 | Clustered update files removed / added | 2 / 2 | 2 / 2 |
 | Clustered update bytes removed / added | 17,009,142 / 17,009,142 | 17,009,142 / 17,009,142 |
 | Clustered update requested Parquet reads / writes | 50,996,474 / 17,009,142 | 50,996,474 / 17,009,142 |
-| Clustered update time (ms) | 168.522 | 298.604 |
-| Ordered full-row lookup time (ms) | 20.021 | 21.275 |
+| Clustered update time (ms) | 188.828 | 305.848 |
+| Ordered full-row lookup time (ms) | 21.170 | 29.083 |
 | Compaction files removed / added | 4 / 1 | 4 / 1 |
-| Compaction time (ms) | 30.458 | 32.470 |
-| Fresh reopen time (ms) | 1,259.077 | 4,835.291 |
+| Compaction time (ms) | 40.633 | 43.261 |
+| Fresh reopen time (ms) | 1,394.697 | 5,368.063 |
 | Fresh reopen requested Parquet reads | 4,470,969,469 | 17,650,862,921 |
-| Peak RSS: build / exercise / reopen (B) | 114,929,664 / 120,958,976 / 61,571,072 | 117,497,856 / 130,060,288 / 63,516,672 |
+| Peak RSS: build / exercise / reopen (B) | 114,319,360 / 125,337,600 / 59,523,072 | 117,465,088 / 122,671,104 / 63,418,368 |
 
 Raw [operation receipts, artifact hashes and I/O measurements](kv_native_measurements.json)
 retain every bounded build operation and all phase results. File sync counts
