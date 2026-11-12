@@ -18,15 +18,23 @@ class BulkHTTP(NativeHTTP):
         return (json.dumps({'operation_id': operation, 'rows': str(rows), **extra}) + '\n' +
                 ''.join(json.dumps({'rows': batch}) + '\n' for batch in batches)).encode()
 
-    def upload(self, path, body, status=200, content_type='application/x-ndjson'):
-        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=120)
-        conn.request('POST', '/databases/' + self.store_id + path + '/bulk-append', body,
-                     {'Authorization': 'Bearer ' + TOKEN, 'Content-Type': content_type})
-        response = conn.getresponse()
-        raw = response.read()
-        conn.close()
-        self.assertEqual(response.status, status, raw)
-        return json.loads(raw)
+    def upload(self, path, body, status=200, content_type='application/x-ndjson', *, retry_busy=False):
+        expires = time.monotonic() + 5
+        while True:
+            conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=120)
+            conn.request('POST', '/databases/' + self.store_id + path + '/bulk-append', body,
+                         {'Authorization': 'Bearer ' + TOKEN, 'Content-Type': content_type})
+            response = conn.getresponse()
+            raw = response.read()
+            conn.close()
+            value = json.loads(raw)
+            if retry_busy and response.status == 503 and value.get('error', {}).get('code') == 'SERVER_BUSY':
+                self.assertIs(value.get('execution_started'), False)
+                if time.monotonic() < expires:
+                    time.sleep(0.01)
+                    continue
+            self.assertEqual(response.status, status, raw)
+            return value
 
     @unittest.skipUnless(Path('/proc/mounts').exists() and ' /dev/shm tmpfs ' in Path('/proc/mounts').read_text(),
                          'requires a known Linux tmpfs')
@@ -215,7 +223,8 @@ class BulkHTTP(NativeHTTP):
                      b'\n', b'{"rows":[{"unknown":true}]}\n'):
             operation = str(uuid.uuid4())
             body = self.wire(operation, [[{'key': 'first'}]], 2) + tail
-            self.upload(path, body, 400)
+            # A reply can precede worker cleanup and release of the previous upload's permit.
+            self.upload(path, body, 400, retry_busy=True)
             self.api(path + '/operations/' + operation, status=404)
         operation = str(uuid.uuid4())
         body = self.wire(operation, [[{'key': 'first'}]], 20000)

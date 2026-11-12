@@ -330,3 +330,16 @@ and clang-tidy passed for the changed client translation unit. The new four-case
 early-refusal regression passed with the ordinary CLI and with the instrumented
 CLI; this focused sanitizer result does not expand the earlier broad sanitizer
 qualification.
+
+Before merging, official `8677619` added shared SHA acceleration and manifest
+merging. The roadmap conflict was resolved preserving both upstream evidence and
+remote bulk coverage; independent review confirmed unchanged canonical preimages,
+bulk receipt counters, membership and publication/recovery checks. A post-conflict
+run exposed a test assuming that a malformed-upload reply implied cleanup had
+released its permit. That loop now retries its exact request for at most five
+seconds only on `503 SERVER_BUSY` with `execution_started: false`; parsing errors
+and operation-absence checks remain strict. This test correction was independently
+reviewed. The final affected contour passed 75 tests, with one child-process helper
+skipped and two manual capacity tests disabled. It includes native HTTP/CLI, bulk
+publication/recovery, canonical hashes, forced SHA paths and manifest closure.
+The final native build and formatting check (300 project files) passed.
