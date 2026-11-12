@@ -1872,5 +1872,42 @@
       "read_opens": 0,
       "written_bytes": 0
     }
+  },
+  "final_validation": {
+    "official_base": "ad898d7e74e3a402223281260e416e01db14b4d9",
+    "build": "cmake --build build/local --parallel 4",
+    "full_suite": "GLAMDB_REQUIRE_NATIVE_CLIENTS=1 GLAMDB_VALIDATE_SCHEMAS=1 ctest --preset local --parallel 4",
+    "registered_tests": 1114,
+    "ctest_cases": 1110,
+    "skipped": 12,
+    "disabled": 4,
+    "functional_and_integration_failures": 0,
+    "parallel_timing_failure": {
+      "test": "glamdb.unit.IcebergMetadataJsonCost.SerializationIsLinearInRetainedSnapshots",
+      "actual_ratio": 3.0082668337660436,
+      "strict_limit": 3.0,
+      "isolated_command": "ctest --preset local --rerun-failed --repeat until-fail:5 --verbose",
+      "consecutive_passes": 5,
+      "ratios": [
+        1.88,
+        2.46,
+        2.1,
+        2.03,
+        1.43
+      ],
+      "test_changed_or_disabled": false
+    },
+    "measurement_base_full_suite": {
+      "base": "37b58fa",
+      "cases": 1105,
+      "failures": 0
+    },
+    "format_files": 288,
+    "format_pass": true,
+    "quality_negative_pass": true,
+    "affected_clang_tidy_units": 5,
+    "clang_tidy_pass": true,
+    "rebased_closure_clang_tidy_pass": true,
+    "independent_review": "No source blocker; failed-operation exact retry coverage added. Multi-bin and widest-schema memory execution remain broader coverage limits."
   }
 }

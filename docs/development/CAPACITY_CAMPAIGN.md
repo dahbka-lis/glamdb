@@ -266,9 +266,14 @@ manifests in this single-bin regime (K=99 appends between later merges), versus
 O(KN) retained manifest-list entries. Snapshot expiration and #168 remain
 separate work; this change does not remove the history/outcome cap.
 
-Validation: the full native CTest run reported **1,105 tests, zero failures**,
+Validation on the measurement base reported **1,105 CTest cases, zero failures**.
+After rebasing onto official `ad898d7`, the complete suite exercised 1,110 cases
 with twelve expected standalone child/manual skips and four disabled tests
-(1,109 registered). Real repeated-merge tests check every latest manifest count
+(1,114 registered). All functional/integration cases passed. The existing
+`IcebergMetadataJsonCost.SerializationIsLinearInRetainedSnapshots` timing check
+measured 3.008× against a strict 3× limit under parallel load; five consecutive
+isolated reruns passed (ratios 1.88, 2.46, 2.10, 2.03 and 1.43). It was not
+changed or disabled. Real repeated-merge tests check every latest manifest count
 through 205 appends; five fault cases cover the original/merged manifest,
 manifest-list and SQLite commits before/after journal unlink, followed by
 fresh-process rows/history and committed/failed exact retries. Adversarial tests

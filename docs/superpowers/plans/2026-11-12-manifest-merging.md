@@ -37,7 +37,7 @@ tests in `tests/unit/storage/` and `tests/vertical/`.
   count, byte, receipt, profile and membership invariants.
 - [x] Exercise file and SQL faults at a merge boundary, including uncertain COMMIT.
 - [x] Run focused tests, the native CTest suite and relevant C++ quality checks.
-- [ ] Commit the tested implementation and regression tests.
+- [x] Commit the tested implementation and regression tests.
 
 ## Task 2: Measurements and documentation
 
@@ -49,7 +49,7 @@ JSON evidence, storage/scan/resource guides and `AGENTS.md` where affected.
   require 4,096 successful appends and all reopen/history/retry checks.
 - [x] Publish comparable I/O and retained metadata measurements with growth laws,
   limits and explicit qualification boundaries.
-- [ ] Run campaign integration and relevant quality checks; commit the evidence.
+- [x] Run campaign integration and relevant quality checks; commit the evidence.
 
 ## Task 3: Independent review and pull request
 
