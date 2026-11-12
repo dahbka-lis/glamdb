@@ -159,6 +159,7 @@ if(TARGET glamdb_server)
     set_tests_properties(glamdb.scan_http PROPERTIES LABELS "integration;http;scan" TIMEOUT 420)
 endif()
 if(TARGET glamdb_transport)
+    find_package(OpenSSL REQUIRED COMPONENTS Crypto)
     add_executable(glamdb_transport_test server/transport_test.cpp server/outcome_conformance_test.cpp server/arrow_ipc_test.cpp)
     target_link_libraries(glamdb_transport_test PRIVATE glamdb_transport glamdb_build_options GTest::gtest_main OpenSSL::Crypto)
     gtest_discover_tests(glamdb_transport_test TEST_PREFIX glamdb.transport.
