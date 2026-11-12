@@ -255,6 +255,17 @@ check script runs real HTTP/HTTPS tests and Chromium, not only transport doubles
 Node API tests also open localhost sockets to exercise Fetch gzip/Brotli decoding
 and Arrow cancellation. Session-isolation browser tests delay responses across
 collection, snapshot and connection changes.
+Client conformance uses `GLAMDB_TEST_BACKEND=mock|native`; native requires an
+executable `GLAMDB_NATIVE_SERVER` and fails on setup/identity/storage errors.
+The same SDK TCP/TLS scenarios and `shared-contract.spec.mjs` run against both;
+native checks inspect catalog-selected JSON/Avro/Parquet after closing storage.
+`GLAMDB_TEST_BACKEND=static` runs only the browser demo, without an API server.
+See [client conformance](docs/development/CLIENT_CONFORMANCE.md) for commands,
+documented response differences and separate evidence. Normal native acceptance
+runs the shared SDK suite before Chromium and propagates either failure.
+Retain native browser child ownership through bounded shutdown and reaping;
+`tests/integration/test_browser_lifecycle.py` covers interrupts, child exit
+statuses and failed-startup cleanup.
 The check script also packages/serves the public demo under /glamdb/ and verifies no API
 requests, token prompt, cross-visitor state or credential files are introduced.
 See [validation](docs/development/WORKBENCH_VALIDATION.md) for exact evidence and
@@ -352,6 +363,14 @@ strace evidence; passing cases without strace remain incomplete. Recovery path
 deduplication uses a bounded temporary SQLite database, separate from the catalog.
 See [qualification preparation](docs/development/QUALIFICATION.md) for commands,
 temporary-workspace prerequisites and the remaining qualification boundaries.
+
+`glamdb_capacity_bench` and `benchmarks/capacity.py` measure native aggregate
+ingestion, retained history/outcomes, physical orphan space, retained slices and
+fresh-process reopen. The default campaign budgets 5,000 attempts of 1,000 rows
+and records every 100 successes without raising caps; short real-engine checks
+run as `glamdb.capacity_campaign`. See [the campaign guide](docs/development/CAPACITY_CAMPAIGN.md)
+for profiles, counters, evidence and cache/qualification limits. Keep full
+measurement runs manual and separate external-file sync counters from SQLite.
 
 After configuring `local`, check project C++ sources and headers with:
 

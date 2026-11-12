@@ -170,8 +170,10 @@ ctest --preset local --output-on-failure \
 Executed on Linux x86-64 with Clang 18/libc++ on 2026-11-12:
 
 - Full Debug CTest, with native clients and strict schemas required: zero
-  failures across 774 enabled entries (seven helper/manual entries skipped;
+  failures across 775 enabled entries (seven helper/manual entries skipped;
   two benchmarks disabled).
+- Native SDK, backend harness and browser-process lifecycle conformance:
+  all 23 checks passed against the native server and physical file inspector.
 - ASan/UBSan with leak detection: all 26 focused session, rollback, quota and
   real native profile cases passed. LeakSanitizer discovery was rerun outside
   the restricted ptrace sandbox.
