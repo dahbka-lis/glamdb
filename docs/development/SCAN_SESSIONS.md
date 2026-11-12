@@ -79,10 +79,11 @@ admission and can refuse under unrelated shared pressure.
 Explicit manifest, file-source/footer and output-descriptor admission in core
 returns retryable `RESOURCE_EXHAUSTED` without consuming the next batch. File
 descriptors stay pending until open succeeds. HTTP page assembly retains original
-and newly fetched batches until advancement commits, restoring them in order on
-an admission refusal. This also covers refusal after some rows have already been
-assembled, for both JSON and Arrow. Actual decode, I/O and allocator failures
-retain the terminal failed-session contract.
+and newly fetched batches until advancement commits. An admission refusal before
+the first row restores them in order without advancing tokens or replay. After
+collecting rows, both JSON and Arrow finish a nonempty page with a continuation,
+releasing retained batches before more decoding. Actual decode, I/O and allocator
+failures retain the terminal failed-session contract.
 
 EOF destroys the core cursor and its schema lease; only the completed response
 and its descriptor/replay leases remain. Completed retention has separate
@@ -131,6 +132,13 @@ failures retain the existing failed-session contract. HTTP queue/body refusals
 remain the separate listener policy (`SERVER_BUSY`, deadlines, or shared resource
 capacity); they never enter session admission.
 
+If explicit decoder admission fails after a page has accumulated rows, return
+that nonempty page with a continuation instead of rolling it back. This releases
+the page's retained batches before further decoding, so many tiny batches cannot
+keep their own descriptor reservations permanently saturated. A refusal before
+the first row still returns 429 and preserves the cursor and previous replay.
+Neither case treats admission pressure as end of scan.
+
 ## Validation
 
 Independent review and a follow-up review checked registry/session lock order,
@@ -138,7 +146,11 @@ repeated cleanup, outgoing ownership, concurrent EOF, token/snapshot stability,
 and JSON/Arrow rollback. The review prompted regressions and fixes for completed
 replay reclamation before working admission, allocation-free shutdown, and
 decoder admission preserving partially assembled pages. The follow-up review
-found no remaining important correctness defect.
+found no remaining important correctness defect. A later independent PR review
+identified self-induced descriptor pressure with tiny wide batches. The native
+64-field, 10,000-row, one-row-batch regression reproduced the failure under a
+startup-valid 1100 MiB metadata cap before the partial-page fix; it now checks
+progress, exact replay, all row identities and complete reservation cleanup.
 
 Raising the former constants alone would leave aggregate memory unbounded by
 the service profile. Reserving a second permanent decoder envelope in HTTP
@@ -170,11 +182,11 @@ ctest --preset local --output-on-failure \
 Executed on Linux x86-64 with Clang 18/libc++ on 2026-11-12:
 
 - Full Debug CTest, with native clients and strict schemas required: zero
-  failures across 775 enabled entries (seven helper/manual entries skipped;
+  failures across 781 enabled entries (seven helper/manual entries skipped;
   two benchmarks disabled).
 - Native SDK, backend harness and browser-process lifecycle conformance:
   all 23 checks passed against the native server and physical file inspector.
-- ASan/UBSan with leak detection: all 26 focused session, rollback, quota and
+- ASan/UBSan with leak detection: all 27 focused session, rollback, quota and
   real native profile cases passed. LeakSanitizer discovery was rerun outside
   the restricted ptrace sandbox.
 - LLVM 18 formatting and formatting/analyzer negative checks passed.

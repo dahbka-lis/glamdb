@@ -455,7 +455,7 @@ struct TScans::TImpl
             }
         }
     }
-    bool Peek(TSession& session)
+    bool Peek(TSession& session, bool allowPartial = false)
     {
         CheckActive(session);
         while (session.Pending.empty() && !session.Ended) {
@@ -464,6 +464,12 @@ struct TScans::TImpl
             if (!result && result.error().code == "RESOURCE_EXHAUSTED" &&
                 result.error().retry_hint == RetryHint::SameIdAfterReconcile)
             {
+                // Commit a nonempty page before retaining another decoder
+                // output. Otherwise rollback can preserve its own admission
+                // pressure indefinitely when core returns many tiny batches.
+                if (allowPartial) {
+                    return false;
+                }
                 Refuse(EScanRejection::SharedDecode);
             }
             auto batch = Unwrap(std::move(result));
@@ -500,7 +506,7 @@ struct TScans::TImpl
         std::string rows = "[";
         const auto overhead = Envelope(session, std::string(32, '0'), PageRows).dump().size() + 9;
         Require(overhead < MaxResponseBytes, "scan schema exceeds response byte limit");
-        while (count < PageRows && rows.size() < PageBytes && Peek(session)) {
+        while (count < PageRows && rows.size() < PageBytes && Peek(session, count != 0)) {
             const auto take = AppendRowsJson(*session.Pending.front(),
                 rows,
                 {.MaxRows = PageRows - count, .TargetBytes = PageBytes, .HardBytes = MaxResponseBytes - overhead});
@@ -517,7 +523,7 @@ struct TScans::TImpl
     {
         std::vector<std::shared_ptr<arrow::RecordBatch>> pieces, groups;
         size_t bytes = 0;
-        while (count < PageRows && bytes < PageBytes && Peek(session)) {
+        while (count < PageRows && bytes < PageBytes && Peek(session, count != 0)) {
             const auto& pending = session.Pending.front();
             int64_t take = std::min(pending->num_rows(), static_cast<int64_t>(PageRows - count));
             auto slice = pending->Slice(0, take);
@@ -602,7 +608,7 @@ struct TScans::TImpl
         TPageTransaction transaction(*session);
         size_t count = 0;
         auto response = session->Arrow ? ArrowPage(*session, count) : TResponse{200, JsonRows(*session, count)};
-        const auto next = Peek(*session) ? Token() : std::string{};
+        const auto next = (Peek(*session, count != 0) || !session->Ended) ? Token() : std::string{};
         if (session->Arrow) {
             if (!next.empty()) {
                 response.Headers["X-GlamDB-Next-Cursor"] = next;

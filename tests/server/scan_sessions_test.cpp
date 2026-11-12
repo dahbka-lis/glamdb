@@ -676,7 +676,7 @@ class PageRollbackTest
     , public ::testing::WithParamInterface<bool>
 { };
 
-TEST_P(PageRollbackTest, DecoderAdmissionRestoresAllRowsConsumedWhileAssemblingAPage)
+TEST_P(PageRollbackTest, DecoderAdmissionCommitsAvailableRowsAndPreservesContinuation)
 {
     ASSERT_EQ(Db->AppendDurable({test::collection_id, SecondOperation, {}, {Batch({{"other", 2, 2.5, false, 1}})}})
                   .disposition,
@@ -690,12 +690,7 @@ TEST_P(PageRollbackTest, DecoderAdmissionRestoresAllRowsConsumedWhileAssemblingA
         Fs->Armed = true;
     }
     auto reading = std::async(std::launch::async, [&] {
-        try {
-            scans.Open(Db, "a", test::collection_id, {{"cursor", token}}, arrow, false);
-            return false;
-        } catch (const TScanAdmissionFailure&) {
-            return true;
-        }
+        return scans.Open(Db, "a", test::collection_id, {{"cursor", token}}, arrow, false);
     });
     bool entered;
     {
@@ -707,45 +702,131 @@ TEST_P(PageRollbackTest, DecoderAdmissionRestoresAllRowsConsumedWhileAssemblingA
     auto pressure = Resources->Reserve(ResourceClass::Metadata,
         Resources->GetLimits().memory_bytes[1] - Resources->GetUsage().memory_bytes[1]);
     Fs->Release();
-    const bool refused = reading.get();
+    const auto partial = reading.get();
     ASSERT_TRUE(pressure);
     pressure->reset();
     ASSERT_TRUE(entered);
-    ASSERT_TRUE(refused);
     EXPECT_EQ(scans.GetStatistics()["global"]["live_cursors"], 1);
-    const auto resumed = scans.Open(Db, "a", test::collection_id, {{"cursor", token}}, arrow, false);
-    EXPECT_EQ(scans.Open(Db, "a", test::collection_id, {{"cursor", token}}, arrow, false).Body, resumed.Body);
+    EXPECT_EQ(scans.Open(Db, "a", test::collection_id, {{"cursor", token}}, arrow, false).Body, partial.Body);
+    const auto next = arrow ? partial.Headers.at("X-GlamDB-Next-Cursor")
+                            : TJson::parse(partial.Body).at("next_cursor").get<std::string>();
+    const auto resumed = scans.Open(Db, "a", test::collection_id, {{"cursor", next}}, arrow, false);
+    EXPECT_EQ(scans.Open(Db, "a", test::collection_id, {{"cursor", next}}, arrow, false).Body, resumed.Body);
     std::set<std::string> keys;
     size_t count = 0;
-    if (arrow) {
-        auto input = arrow::io::BufferReader::FromString(resumed.Body);
-        const auto reader = arrow::ipc::RecordBatchStreamReader::Open(input.get());
-        ASSERT_TRUE(reader.ok());
-        for (;;) {
-            const auto batch = (*reader)->Next();
-            ASSERT_TRUE(batch.ok());
-            if (!*batch) {
-                break;
+    for (const auto* response : {&partial, &resumed}) {
+        if (arrow) {
+            auto input = arrow::io::BufferReader::FromString(response->Body);
+            const auto reader = arrow::ipc::RecordBatchStreamReader::Open(input.get());
+            ASSERT_TRUE(reader.ok());
+            for (;;) {
+                const auto batch = (*reader)->Next();
+                ASSERT_TRUE(batch.ok());
+                if (!*batch) {
+                    break;
+                }
+                const auto column = std::static_pointer_cast<arrow::StringArray>((*batch)->column(0));
+                for (int64_t row = 0; row < column->length(); ++row) {
+                    ++count;
+                    keys.insert(column->GetString(row));
+                }
             }
-            const auto column = std::static_pointer_cast<arrow::StringArray>((*batch)->column(0));
-            for (int64_t row = 0; row < column->length(); ++row) {
+            EXPECT_EQ(response->Headers.at("X-GlamDB-Snapshot-Id"), opened.at("snapshot_id").get<std::string>());
+        } else {
+            const auto page = TJson::parse(response->Body);
+            for (const auto& row : page.at("rows")) {
                 ++count;
-                keys.insert(column->GetString(row));
+                keys.insert(row.at("key").get<std::string>());
             }
+            EXPECT_EQ(page.at("snapshot_id"), opened.at("snapshot_id"));
         }
-        EXPECT_EQ(resumed.Headers.at("X-GlamDB-Snapshot-Id"), opened.at("snapshot_id").get<std::string>());
-    } else {
-        const auto page = TJson::parse(resumed.Body);
-        for (const auto& row : page.at("rows")) {
-            ++count;
-            keys.insert(row.at("key").get<std::string>());
-        }
-        EXPECT_EQ(page.at("snapshot_id"), opened.at("snapshot_id"));
     }
     EXPECT_EQ(count, 2);
     EXPECT_EQ(keys, (std::set<std::string>{"same", "other"}));
 }
 INSTANTIATE_TEST_SUITE_P(JsonAndArrow, PageRollbackTest, ::testing::Bool());
+
+class NarrowScanProfileTest : public ScanSessionsTest
+{
+    void SetUp() override
+    {
+        ResourceLimits limits;
+        limits.memory_bytes[1] = 1100ULL << 20;
+        Resources = std::make_shared<ResourceOwner>(limits);
+        ScanSessionsTest::SetUp();
+    }
+};
+
+TEST_F(NarrowScanProfileTest, TinyWideBatchesMakeProgressWithoutExternalRelease)
+{
+    constexpr char Collection[] = "00000000-0000-4000-8000-0000000000b3";
+    SchemaSpec schema{{{"key", FieldType::String, false}}};
+    std::vector<std::shared_ptr<arrow::Field>> fields{arrow::field("key", arrow::utf8(), false)};
+    std::vector<std::optional<std::string>> keys;
+    std::vector<std::optional<bool>> flags;
+    for (size_t row = 0; row < 10000; ++row) {
+        keys.emplace_back(std::to_string(row));
+        flags.emplace_back(row % 2 == 0);
+    }
+    std::vector<std::shared_ptr<arrow::Array>> columns{Column<arrow::StringBuilder>(keys, arrow::utf8())};
+    const auto values = Column<arrow::BooleanBuilder>(flags, arrow::boolean());
+    for (size_t field = 1; field < 64; ++field) {
+        const auto name = "f" + std::to_string(field);
+        schema.fields.push_back({name, FieldType::Bool, true});
+        fields.push_back(arrow::field(name, arrow::boolean()));
+        columns.push_back(values);
+    }
+    ASSERT_EQ(Db->CreateCollection({Collection, "wide", schema}).disposition, CommitDisposition::Committed);
+    const auto input = arrow::RecordBatch::Make(arrow::schema(fields), 10000, columns);
+    ASSERT_EQ(Db->AppendDurable({Collection, ThirdOperation, {}, {input}}).disposition, CommitDisposition::Committed);
+    const auto baseline = Resources->GetUsage().memory_bytes;
+    {
+        TScanLimits limits;
+        limits.Live = limits.LivePerDatabase = 1;
+        TScans scans(limits, Resources);
+        auto token = TJson::parse(scans.Open(Db, "a", Collection, {{"batch_rows", 1}}, true, true).Body)
+                         .at("cursor")
+                         .get<std::string>();
+        std::set<std::string> seen;
+        size_t rows = 0;
+        for (size_t page = 0; page < 100 && !token.empty(); ++page) {
+            TResponse response;
+            ASSERT_NO_THROW(response = scans.Open(Db, "a", Collection, {{"cursor", token}}, true, false));
+            const auto replay = scans.Open(Db, "a", Collection, {{"cursor", token}}, true, false);
+            EXPECT_EQ(replay.Body, response.Body);
+            EXPECT_EQ(replay.Headers, response.Headers);
+            auto stream = arrow::io::BufferReader::FromString(response.Body);
+            const auto reader = arrow::ipc::RecordBatchStreamReader::Open(stream.get());
+            ASSERT_TRUE(reader.ok());
+            size_t pageRows = 0;
+            for (;;) {
+                const auto batch = (*reader)->Next();
+                ASSERT_TRUE(batch.ok());
+                if (!*batch) {
+                    break;
+                }
+                const auto key = std::static_pointer_cast<arrow::StringArray>((*batch)->column(0));
+                for (int64_t row = 0; row < key->length(); ++row) {
+                    seen.insert(key->GetString(row));
+                    ++pageRows;
+                }
+            }
+            EXPECT_GT(pageRows, 0);
+            rows += pageRows;
+            const auto next = response.Headers.find("X-GlamDB-Next-Cursor");
+            token = next == response.Headers.end() ? std::string{} : next->second;
+        }
+        EXPECT_TRUE(token.empty());
+        EXPECT_EQ(rows, 10000);
+        EXPECT_EQ(seen.size(), 10000);
+        for (size_t row = 0; row < 10000; ++row) {
+            EXPECT_TRUE(seen.contains(std::to_string(row)));
+        }
+        scans.Clear("a");
+        EXPECT_EQ(scans.GetStatistics()["global"]["live_cursors"], 0);
+    }
+    EXPECT_EQ(Resources->GetUsage().memory_bytes, baseline);
+}
 
 TEST_F(ScanSessionsTest, ReplayByteBoundariesAreIndependentOfLiveQuota)
 {
