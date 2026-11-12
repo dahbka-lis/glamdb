@@ -202,25 +202,44 @@ TEST_F(ReadView, DelayedKVScanKeepsRowsAcrossUpsertDeleteAndCompaction)
 TEST_F(ReadView, CapturesOneCoherentStoreCutUnderSerializedPublications)
 {
     ASSERT_EQ(Store->CreateCollection({SecondCollection, "other", Schema}).disposition, CommitDisposition::Committed);
+    auto request = Request();
+    request.Entries.push_back({SecondCollection});
+    request.Entries.push_back({test::collection_id});
+    auto initial = Store->AcquireReadView(request);
+    ASSERT_TRUE(initial);
+    std::promise<void> aPublished;
+    std::promise<void> allowB;
+    auto aReady = aPublished.get_future();
+    auto bAllowed = allowB.get_future();
     auto writer = std::async(std::launch::async, [&] {
-        for (int n = 1; n <= 5; ++n) {
-            const auto operation = "00000000-0000-4000-8000-00000000000" + std::to_string(n);
-            Append(operation, FirstRows);
-            Append(operation, FirstRows, SecondCollection);
-        }
+        Append(FirstOperation, FirstRows);
+        aPublished.set_value();
+        bAllowed.wait();
+        Append(FirstOperation, FirstRows, SecondCollection);
     });
-    for (int n = 0; n < 12; ++n) {
-        auto request = Request();
-        request.Entries.push_back({SecondCollection});
-        request.Entries.push_back({test::collection_id});
-        auto view = Store->AcquireReadView(request);
-        ASSERT_TRUE(view) << view.error().code;
-        const auto a = Rows(**view).size();
-        const auto b = Rows(**view, 1).size();
-        EXPECT_TRUE(a == b || a == b + 3) << a << ", " << b;
-        EXPECT_EQ(Rows(**view, 2).size(), a);
-    }
+    aReady.wait();
+    // The writer cannot publish B until this intermediate A-after/B-before cut
+    // is acquired. Unblock/join before assertions so failure cannot strand it.
+    auto intermediate = Store->AcquireReadView(request);
+    allowB.set_value();
     writer.get();
+    ASSERT_TRUE(intermediate) << intermediate.error().code;
+    auto final = Store->AcquireReadView(request);
+    ASSERT_TRUE(final);
+    EXPECT_TRUE(Rows(**initial).empty());
+    EXPECT_TRUE(Rows(**initial, 1).empty());
+    EXPECT_EQ(Rows(**intermediate), Expected({&FirstRows}));
+    EXPECT_TRUE(Rows(**intermediate, 1).empty());
+    EXPECT_EQ(Rows(**final), Expected({&FirstRows}));
+    EXPECT_EQ(Rows(**final, 1), Expected({&FirstRows}));
+    // All three vectors are checked after B advanced. Reject impossible cuts
+    // and verify duplicate entries still share the same captured table version.
+    for (const auto& view : {*initial, *intermediate, *final}) {
+        const auto a = Rows(*view).size();
+        const auto b = Rows(*view, 1).size();
+        EXPECT_TRUE(a == b || a == b + 3) << a << ", " << b;
+        EXPECT_EQ(Rows(*view, 2).size(), a);
+    }
 }
 
 TEST_F(ReadView, EnforcesScopesBoundsAndAllOrNothingAcquisition)
@@ -310,6 +329,75 @@ TEST_F(ReadView, GlobalViewAndEntryQuotasReleaseOnEveryTerminalPath)
     ASSERT_TRUE(resumed);
     held.clear();
     resumed->reset();
+    EXPECT_EQ(resources->GetUsage().memory_bytes, baseline);
+}
+
+TEST_F(ReadView, AcquisitionReclaimsExpiredMetadataBeforeSharedAdmission)
+{
+    const auto resources = Store->GetResourceOwner();
+    const auto baseline = resources->GetUsage().memory_bytes;
+    auto expiring = Store->AcquireReadView(Request());
+    ASSERT_TRUE(expiring);
+    auto info = Store->GetReadViewInfo(**expiring, "alice");
+    ASSERT_TRUE(info);
+    const std::weak_ptr<const TReadViewInfo> expiredInfo = *info;
+    info->reset();
+    const auto pinned = resources->GetUsage().memory_bytes;
+    const auto metadata = static_cast<size_t>(ResourceClass::Metadata);
+    const auto control = static_cast<size_t>(ResourceClass::Control);
+    ASSERT_GT(pinned[metadata], baseline[metadata]);
+    ASSERT_GT(pinned[control], baseline[control]);
+    auto pressure =
+        resources->Reserve(ResourceClass::Metadata, resources->GetLimits().memory_bytes[metadata] - pinned[metadata]);
+    ASSERT_TRUE(pressure);
+    ASSERT_TRUE(Store->RenewReadView(**expiring, "alice", 1ms));
+    std::this_thread::sleep_for(5ms);
+    // No view API or writer may sweep expiry before this acquisition. The expired
+    // registry's reservation is the only memory available for its replacement.
+    auto replacement = Store->AcquireReadView(Request());
+    ASSERT_TRUE(replacement) << replacement.error().code << ": " << replacement.error().message;
+    EXPECT_TRUE(expiredInfo.expired());
+    auto expired = Store->GetReadViewInfo(**expiring, "alice");
+    ASSERT_FALSE(expired);
+    EXPECT_EQ(expired.error().code, "READ_VIEW_EXPIRED");
+    replacement->reset();
+    // Expiry reclaims the pin but the caller still owns its charged terminal handle.
+    EXPECT_EQ(resources->GetUsage().memory_bytes[control], pinned[control]);
+    expiring->reset();
+    EXPECT_EQ(resources->GetUsage().memory_bytes[control], baseline[control]);
+    pressure->reset();
+    EXPECT_EQ(resources->GetUsage().memory_bytes, baseline);
+}
+
+TEST_F(ReadView, ExpiryCannotReclaimExternallyRetainedInfoToAdmitAnotherView)
+{
+    const auto resources = Store->GetResourceOwner();
+    const auto baseline = resources->GetUsage().memory_bytes;
+    auto expiring = Store->AcquireReadView(Request());
+    ASSERT_TRUE(expiring);
+    auto retained = Store->GetReadViewInfo(**expiring, "alice");
+    ASSERT_TRUE(retained);
+    const auto pinned = resources->GetUsage().memory_bytes;
+    const auto metadata = static_cast<size_t>(ResourceClass::Metadata);
+    auto pressure =
+        resources->Reserve(ResourceClass::Metadata, resources->GetLimits().memory_bytes[metadata] - pinned[metadata]);
+    ASSERT_TRUE(pressure);
+    ASSERT_TRUE(Store->RenewReadView(**expiring, "alice", 1ms));
+    std::this_thread::sleep_for(5ms);
+    auto refused = Store->AcquireReadView(Request());
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "RESOURCE_EXHAUSTED");
+    EXPECT_EQ((*retained)->Entries[0].Collection.schema, Schema);
+    auto expired = Store->GetReadViewInfo(**expiring, "alice");
+    ASSERT_FALSE(expired);
+    EXPECT_EQ(expired.error().code, "READ_VIEW_EXPIRED");
+    expiring->reset();
+    EXPECT_GT(resources->GetUsage().memory_bytes[metadata], baseline[metadata]);
+    retained->reset();
+    auto replacement = Store->AcquireReadView(Request());
+    ASSERT_TRUE(replacement);
+    replacement->reset();
+    pressure->reset();
     EXPECT_EQ(resources->GetUsage().memory_bytes, baseline);
 }
 

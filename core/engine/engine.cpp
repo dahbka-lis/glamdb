@@ -2683,6 +2683,15 @@ Result<std::shared_ptr<TReadView>> Engine::AcquireReadView(const TReadViewReques
             "UNSUPPORTED_FEATURE",
             "pinned read views require the native local scanner");
 #if GLAMDB_HAS_STORAGE
+        {
+            // Reclaim expired pins before their shared reservations can refuse
+            // this acquisition. Admission below can race other acquisitions or
+            // shutdown, so capture repeats expiry/readiness/quota checks.
+            std::lock_guard lock(impl->state_mutex);
+            impl->read_views.Expire();
+            impl->CheckReady();
+            impl->read_views.CheckCapacity(request);
+        }
         auto controlMemory = Take(impl->resources->Reserve(ResourceClass::Control, TReadViews::ControlMemoryBytes));
         auto memory = Take(impl->resources->Reserve(ResourceClass::Metadata,
             TReadViews::ControlMemoryBytes + request.Entries.size() * TReadViews::EntryMemoryBytes));

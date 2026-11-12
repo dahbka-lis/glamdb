@@ -67,7 +67,9 @@ Expiration is observed and reclaimed on view API calls and writer root/retention
 cleanup. There is no timer thread: an idle expired view may retain its bounded
 resources until one of these boundaries, final handle destruction, engine
 destruction or shutdown. It cannot admit a new operation after its deadline.
-Quotas are swept before acquisition. Last shared-handle destruction releases the
+Expired pins are swept before acquisition reserves shared memory, then expiry,
+readiness and quotas are rechecked under the coherent-capture mutex. Retained
+info and terminal handles keep their independent reservations. Last shared-handle destruction releases the
 pin; `ReleaseReadView` releases it explicitly. `CancelReadView` also releases it,
 with a distinct terminal error. A terminal handle keeps only its small, charged
 control record until the caller releases it; retained info keeps its own metadata
