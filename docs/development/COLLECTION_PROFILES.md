@@ -49,7 +49,9 @@ The added envelopes cover bounded SQLite query/schema decoding, collection and
 confirmed-view copies, backend map/control entries and recovery descriptors.
 They reserve the selected capacity even for an empty store. Cached Iceberg
 roots independently reserve 32 times serialized root bytes plus 4 MiB per root;
-inventories and returned pages retain capacity-sized metadata leases, including
+verified scan indexes and retained file descriptors charge separately under
+the [shared resource policy](SHARED_RESOURCES.md).
+Inventories and returned pages retain capacity-sized metadata leases, including
 per-column write settings. Failed collection-profile admission releases partial
 reservations before filesystem changes. The native immutable metadata/footer
 cache separately reserves 32 MiB per store after root creation; refusal of that

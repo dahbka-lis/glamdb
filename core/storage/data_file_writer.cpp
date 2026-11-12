@@ -346,7 +346,8 @@ CheckColumnChunks(const parquet::FileMetaData& footer, const iceberg::Schema& sc
         column.Dictionary = spec.Dictionary.value_or(true);
         const auto own = std::ranges::find(spec.Columns, std::string(fields[index].name()), &TParquetColumnSpec::Name);
         if (own != spec.Columns.end()) {
-            if (const auto compression = own->Compression) {
+            const auto& compression = own->Compression;
+            if (compression) {
                 column.Codec = compression->Codec;
             }
             column.Dictionary = own->Dictionary.value_or(column.Dictionary);
