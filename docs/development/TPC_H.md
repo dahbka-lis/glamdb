@@ -371,7 +371,7 @@ for a completed manifest; cleanup returns 0 only for a validated drop response.
 | Evidence | Status and boundary |
 | --- | --- |
 | Command routing and exact cleanup | Focused Python boundary tests, real HTTP cleanup and standalone CLI bridge checks cover options, status exits, argv, identity checks and child lifecycle. |
-| Native SF=0.01 HTTP and verified-TLS lifecycles | **PASS**, native and legacy encodings, 86,805 rows, Q1–Q22 candidate scans, exact Q1/Q6, restart/resume, cleanup/reload and fault cases. See [validation and independent review](TPC_H_VALIDATION.md) for executed scope and runtime qualification. |
+| Native SF=0.01 HTTP and verified-TLS lifecycles | **PASS**, append and KV targets, native and legacy encodings, 86,805 rows, Q1–Q22 candidate scans, exact Q1/Q6, restart/resume, cleanup/reload and fault cases. See [validation and independent review](TPC_H_VALIDATION.md) for executed scope and runtime qualification. |
 | Full SF=1 CLI HTTP lifecycle and measurements | **NOT RUN**. |
 | Full SF=10 CLI HTTP lifecycle and measurements | **NOT RUN**. Requires an explicit sufficient operation/history/device profile. |
 | Earlier SF=10 retained-history campaign | Separate [executed capacity evidence](SCALABLE_HISTORY_VALIDATION.md), using its documented producer and scalar profile; does not validate this command family or native DECIMAL/DATE ingestion. |
