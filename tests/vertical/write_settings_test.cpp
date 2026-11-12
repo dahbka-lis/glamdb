@@ -460,7 +460,7 @@ TEST_F(TWriteSettingsTest, NewerCatalogVersionsFailClosed)
     {
         detail::Database database;
         database.Open(Root_ / "catalog.sqlite", SQLITE_OPEN_READWRITE, {});
-        database.Execute("PRAGMA user_version=3");
+        database.Execute("PRAGMA user_version=4");
     }
     opened = detail::EngineFactory::OpenWith({Root_.string(), test::store_id}, THookBackend::Factory(Backend_));
     ASSERT_FALSE(opened);

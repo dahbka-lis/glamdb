@@ -170,8 +170,14 @@ The SDK (`create_collection(write_settings=...)`, `update_write_settings`) and t
 workbench (creation controls, Schema panel) expose them only when capabilities
 advertise `features.write_settings`; the mock and static demo do not.
 
-Key-value upserts and deletes are a subsequent extension using copy-on-write
-and an explicit KV collection mode. Native capabilities, receipt-backed snapshot
+[Explicit KV mode](docs/development/KV_MODE.md) adds full-row COW upsert/delete,
+durable no-op receipts, fixed-view batched lookup, bounded bulk upsert, explicit
+append migration and contiguous small-file compaction. Collection mode and table
+marker must agree. Version-3 receipts and interval membership are mode-dispatched;
+never relax legacy append validation/hashes/receipt bytes. No-op COMMIT uncertainty
+uses the same recovery fence despite having no candidate root. Retained physical
+usage never shrinks on deletion/compaction. The measured layout decision and
+component-versus-native evidence are linked from that guide. Native capabilities, receipt-backed snapshot
 history, selected-view statistics, snapshot-bound file/row-group details,
 fixed-view collection/history/file pages, explain and cursor profiles use the public
 facade; see [the metadata guide](docs/development/METADATA.md). HTTP/SDK/UI metadata,
@@ -180,7 +186,7 @@ storage remains a later extension. Collection limits default to eight and accept
 1–64 with additional shared catalog/control/recovery reservations. See
 [collection profiles](docs/development/COLLECTION_PROFILES.md) for configuration,
 complete inventory, fresh-process validation and measured profile limits.
-Compaction, snapshot expiration,
+Snapshot expiration,
 garbage collection, asynchronous admission, replication, multiple writers, and
 schema evolution are outside the initial append scope. Consult
 [docs/ROADMAP.md](docs/ROADMAP.md) when assessing feature scope; its current

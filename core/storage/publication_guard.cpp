@@ -4,6 +4,7 @@
 #include "core/io/store_uri.h"
 #include "core/storage/format_verifier.h"
 #include "core/storage/iceberg_error_boundary.h"
+#include "core/storage/kv_state.h"
 #include "core/storage/metadata_validation.h"
 
 #include <iceberg/file_io.h>
@@ -127,15 +128,18 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
         candidate.Metadata = std::shared_ptr<iceberg::TableMetadata>(std::move(metadata));
     }
     if (Context_.Base) {
-        ICEBERG_RETURN_UNEXPECTED(
-            CheckAppendMetadata(*Context_.Base->Metadata, *candidate.Metadata, Context_.ExpectedSummary));
+        ICEBERG_RETURN_UNEXPECTED((IsKVMetadata(*Context_.Base->Metadata)
+                ? CheckKVMetadata(*Context_.Base->Metadata, *candidate.Metadata, Context_.ExpectedSummary)
+                : CheckAppendMetadata(*Context_.Base->Metadata, *candidate.Metadata, Context_.ExpectedSummary)));
         candidate.Usage = Context_.Base->Usage;
         candidate.ScanIndex = Context_.Base->ScanIndex;
     } else {
         const auto location = "store://" + std::string(Context_.Attempt->StoreId()) + "/warehouse/" +
             std::string(Context_.Attempt->CollectionId());
         ICEBERG_RETURN_UNEXPECTED(CheckCreateMetadata(*candidate.Metadata, Context_.Profile, location));
-        candidate.ScanIndex = std::make_shared<const TScanMembership>();
+        auto membership = std::make_shared<TScanMembership>();
+        membership->KeyValue = IsKVMetadata(*candidate.Metadata);
+        candidate.ScanIndex = std::move(membership);
     }
     candidate.Usage.RootBytes = record.Value().Length;
     candidate.Usage.Snapshots = candidate.Metadata->snapshots.size();
@@ -145,11 +149,16 @@ iceberg::Status TStoragePublicationGuard::CheckCandidate(const TPointerChange& c
     }
     if (Context_.Base) {
         ICEBERG_ASSIGN_OR_RAISE(candidate,
-            CheckAppendClosure(Context_.FileIO,
-                std::move(candidate),
-                Context_.Base->CurrentManifests,
-                Context_.Attempt,
-                Context_.Limits));
+            (IsKVMetadata(*candidate.Metadata) ? CheckKVClosure(Context_.FileIO,
+                                                     std::move(candidate),
+                                                     *Context_.Base,
+                                                     Context_.Attempt,
+                                                     Context_.Limits)
+                                               : CheckAppendClosure(Context_.FileIO,
+                                                     std::move(candidate),
+                                                     Context_.Base->CurrentManifests,
+                                                     Context_.Attempt,
+                                                     Context_.Limits)));
     }
     const auto total = ReplaceUsage(Context_.StoreUsage,
         {.Previous = Context_.Base ? Context_.Base->Usage : TStorageUsage{}, .Next = candidate.Usage});

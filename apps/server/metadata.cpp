@@ -106,6 +106,7 @@ EngineCapabilities InstalledCapabilities()
         .write_settings = true,
         .parquet_codecs = detail::ParquetCodecCapabilities()};
     detail::AddEncodingCapabilities(capabilities);
+    capabilities.key_value = true;
     return capabilities;
 #else
     return {};
@@ -181,10 +182,18 @@ TJson CapabilitiesJson(const EngineCapabilities& capabilities,
         {"row_group_pruning", capabilities.row_group_pruning},
         {"page_pruning", false},
         {"bloom_pruning", false},
-        {"collection_modes", {"append"}},
+        {"collection_modes", capabilities.key_value ? TJson{"append", "kv"} : TJson{"append"}},
+        {"native_only", {{"bulk_upsert", capabilities.key_value}, {"migration", capabilities.key_value}}},
         {"features",
             {{"database_management", databaseManagement},
                 {"append", capabilities.append},
+                {"key_value", capabilities.key_value},
+                {"upsert", capabilities.key_value},
+                {"delete", capabilities.key_value},
+                {"lookup", capabilities.key_value},
+                {"compact", capabilities.key_value},
+                {"bulk_upsert", false},
+                {"migration", false},
                 {"scan", capabilities.scan},
                 {"scan_pagination", capabilities.scan},
                 {"scan_cancel", capabilities.scan},
@@ -208,6 +217,9 @@ TJson CapabilitiesJson(const EngineCapabilities& capabilities,
                 {"collection_lifetime_seconds", 300},
                 {"response_bytes", MaxResponseBytes},
                 {"append_rows", 10000},
+                {"upsert_rows", 10000},
+                {"delete_keys", 10000},
+                {"lookup_keys", 4096},
                 {"scan_page_rows", 10000},
                 {"scan_sessions", scans.Live},
                 {"scan_sessions_per_database", scans.LivePerDatabase},

@@ -4,6 +4,7 @@
 #include "core/storage/format_registry.h"
 #include "core/storage/format_verifier.h"
 #include "core/storage/iceberg_error_boundary.h"
+#include "core/storage/kv_state.h"
 #include "core/storage/metadata_validation.h"
 #include "core/storage/recovery_visited.h"
 #include "core/storage/table_profile.h"
@@ -558,7 +559,7 @@ iceberg::Result<TBaseState> CheckAppendClosure(const std::shared_ptr<iceberg::Fi
     const TStorageLimits& limits)
 {
     return CatchIcebergExceptions([&]() -> iceberg::Result<TBaseState> {
-        if (!candidate.ScanIndex) {
+        if (!candidate.ScanIndex || !candidate.Metadata || IsKVMetadata(*candidate.Metadata)) {
             return iceberg::ValidationFailed("Append has no verified scan index.");
         }
         auto scanIndex = std::make_shared<TScanMembership>(*candidate.ScanIndex);
@@ -585,6 +586,17 @@ iceberg::Result<TBaseState> VerifyRetainedSnapshot(const std::shared_ptr<iceberg
 {
     return CatchIcebergExceptions([&]() -> iceberg::Result<TBaseState> {
         ICEBERG_ASSIGN_OR_RAISE(auto state, ReadRecoveryRoot(fileIO, rootLocation, storeID, collectionID, limits));
+        if (IsKVMetadata(*state.Metadata)) {
+            ICEBERG_ASSIGN_OR_RAISE(auto verified,
+                VerifyKVReachable(fileIO, rootLocation, storeID, collectionID, limits));
+            if (!std::ranges::any_of(verified.Metadata->snapshots, [&](const auto& item) {
+                    return item && item->snapshot_id == snapshotID;
+                }))
+            {
+                return iceberg::ValidationFailed("Committed KV snapshot is not retained.");
+            }
+            return verified;
+        }
         const auto& snapshots = state.Metadata->snapshots;
         const auto found = std::ranges::find_if(snapshots, [&](const auto& snapshot) {
             return snapshot && snapshot->snapshot_id == snapshotID;
@@ -640,6 +652,9 @@ iceberg::Result<TBaseState> VerifyReachable(const std::shared_ptr<iceberg::FileI
 {
     return CatchIcebergExceptions([&]() -> iceberg::Result<TBaseState> {
         ICEBERG_ASSIGN_OR_RAISE(auto state, ReadRecoveryRoot(fileIO, rootLocation, storeID, collectionID, limits));
+        if (IsKVMetadata(*state.Metadata)) {
+            return VerifyKVReachable(fileIO, rootLocation, storeID, collectionID, limits, workspaceDirectory);
+        }
         const auto original = state.Metadata;
         ICEBERG_ASSIGN_OR_RAISE(auto view, EmptyHistoryView(*original));
         ICEBERG_ASSIGN_OR_RAISE(auto visited,

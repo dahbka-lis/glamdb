@@ -46,7 +46,8 @@ bool EqualSchemas(const iceberg::TableMetadata& left, const iceberg::TableMetada
 
 iceberg::Status CheckNewSnapshot(const iceberg::TableMetadata& base,
     const iceberg::TableMetadata& candidate,
-    const std::unordered_map<std::string, std::string>& expectedSummary)
+    const std::unordered_map<std::string, std::string>& expectedSummary,
+    bool keyValue)
 {
     const auto& snapshot = *candidate.snapshots.back();
     ICEBERG_RETURN_UNEXPECTED(CheckSnapshotTimestamp(snapshot));
@@ -69,7 +70,23 @@ iceberg::Status CheckNewSnapshot(const iceberg::TableMetadata& base,
         return iceberg::ValidationFailed("Append reuses a snapshot ID.");
     }
     const auto operation = snapshot.summary.find("operation");
-    if (operation == snapshot.summary.end() || operation->second != "append") {
+    if (operation == snapshot.summary.end()) {
+        return iceberg::ValidationFailed("Snapshot has no operation.");
+    }
+    if (keyValue) {
+        const auto version = snapshot.summary.find("glamdb.kv-version");
+        const auto kind = snapshot.summary.find("glamdb.kv-kind");
+        if (version == snapshot.summary.end() || version->second != "1" || kind == snapshot.summary.end() ||
+            snapshot.summary.contains("glamdb.bulk-version") ||
+            !((kind->second == "upsert" && (operation->second == "append" || operation->second == "overwrite")) ||
+                (kind->second == "delete" && (operation->second == "delete" || operation->second == "overwrite")) ||
+                (kind->second == "compact" && operation->second == "replace")))
+        {
+            return iceberg::ValidationFailed("Unsupported KV snapshot operation or profile.");
+        }
+    } else if (operation->second != "append" || snapshot.summary.contains("glamdb.kv-version") ||
+        snapshot.summary.contains("glamdb.kv-kind"))
+    {
         return iceberg::ValidationFailed("Snapshot is not an append.");
     }
     for (const auto& [key, value] : expectedSummary) {
@@ -144,12 +161,16 @@ CheckCreateMetadata(const iceberg::TableMetadata& candidate, const TTableProfile
     });
 }
 
-iceberg::Status CheckAppendMetadata(const iceberg::TableMetadata& base,
+namespace {
+
+iceberg::Status CheckMetadataDelta(const iceberg::TableMetadata& base,
     const iceberg::TableMetadata& candidate,
-    const std::unordered_map<std::string, std::string>& expectedSummary)
+    const std::unordered_map<std::string, std::string>& expectedSummary,
+    bool keyValue)
 {
     return CatchIcebergExceptions([&]() -> iceberg::Status {
-        if (HasNullObjects(base) || HasNullObjects(candidate) || base.format_version != 2 ||
+        if (IsKVMetadata(base) != keyValue || IsKVMetadata(candidate) != keyValue || HasNullObjects(base) ||
+            HasNullObjects(candidate) || base.format_version != 2 ||
             candidate.snapshots.size() != base.snapshots.size() + 1 ||
             candidate.snapshot_log.size() != base.snapshot_log.size() + 1 ||
             base.last_sequence_number == std::numeric_limits<std::int64_t>::max() ||
@@ -169,7 +190,7 @@ iceberg::Status CheckAppendMetadata(const iceberg::TableMetadata& base,
         {
             return iceberg::ValidationFailed("Append changes a retained snapshot.");
         }
-        auto status = CheckNewSnapshot(base, candidate, expectedSummary);
+        auto status = CheckNewSnapshot(base, candidate, expectedSummary, keyValue);
         if (!status) {
             return status;
         }
@@ -194,6 +215,22 @@ iceberg::Status CheckAppendMetadata(const iceberg::TableMetadata& base,
         }
         return {};
     });
+}
+
+} // namespace
+
+iceberg::Status CheckAppendMetadata(const iceberg::TableMetadata& base,
+    const iceberg::TableMetadata& candidate,
+    const std::unordered_map<std::string, std::string>& expectedSummary)
+{
+    return CheckMetadataDelta(base, candidate, expectedSummary, false);
+}
+
+iceberg::Status CheckKVMetadata(const iceberg::TableMetadata& base,
+    const iceberg::TableMetadata& candidate,
+    const std::unordered_map<std::string, std::string>& expectedSummary)
+{
+    return CheckMetadataDelta(base, candidate, expectedSummary, true);
 }
 
 bool EqualManifest(const iceberg::ManifestFile& left, const iceberg::ManifestFile& right)

@@ -10,6 +10,7 @@
 
 namespace iceberg {
 class Schema;
+struct TableMetadata;
 }
 
 namespace NGlamDB::NStorage {
@@ -21,8 +22,10 @@ struct TTableProfile
 };
 
 iceberg::Result<TTableProfile> MakeTableProfile(const TSchemaSpec& spec);
+iceberg::Result<TTableProfile> MakeKVTableProfile(const TSchemaSpec& spec);
+bool IsKVMetadata(const iceberg::TableMetadata& metadata);
 
-// Only profiles produced by MakeTableProfile are supported; schema or property extensions are rejected.
+// Only profiles produced by MakeTableProfile/MakeKVTableProfile are supported; other extensions are rejected.
 iceberg::Status CheckTableProfile(const TTableProfile& profile);
 
 }

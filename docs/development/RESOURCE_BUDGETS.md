@@ -307,3 +307,22 @@ its independent `32 * serialized_bytes + 4 MiB` reservation. Publication/reopen
 also check `8192 * (1 + snapshots + manifests + data_files)` against the configured
 recovery workspace without overflowing arithmetic. These are reservation/check
 units; see [the profile and measurement limits](SCALABLE_HISTORY.md).
+
+## Explicit KV extension
+
+The [KV profile](KV_MODE.md) keeps append's finite limits and adds separate
+spool/COW/read budgets. Coordinator admission reserves KV output growth plus
+scratch before binding; the scratch VFS charges requests before access and
+refuses its 4 GiB file / 16 GiB I/O ceilings. COW's 8 GiB attempt ceiling includes
+verification rereads. Delete reserves its temporary Arrow key copy before
+building it; an allocation-free fingerprint still resolves permanent retries
+under shared memory pressure. Lookup reserves working/result envelopes before
+allocating maps or copying rows and charges duplicate output positions.
+
+Read-only lookup/migration streams share one requested-byte budget across all
+files and replays. This matters because an ordinary read-only FileIO view does
+not automatically join the writer's attempt. Deadline/cancellation errors stay
+latched through read failure mapping. Scratch and decoder caps complement shared
+owner admission; none of these envelopes is a total process-RSS guarantee.
+No-op bound roots have charged retention pins and remain in physical warehouse
+accounting. Retained snapshot files are never refunded by deletion/compaction.

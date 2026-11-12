@@ -9,6 +9,7 @@
 #include "core/storage/capacity.h"
 #include "core/storage/format_registry.h"
 #include "core/storage/format_verifier.h"
+#include "core/storage/table_profile.h"
 
 #include <iceberg/constants.h>
 #include <iceberg/file_format.h>
@@ -231,6 +232,7 @@ Result<TScanManifests> PlanManifests(const std::shared_ptr<iceberg::FileIO>& io,
             return plan;
         }
         plan.SnapshotID = snapshot->snapshot_id;
+        plan.SequenceNumber = snapshot->sequence_number;
         plan.Schema = Take(metadata->Schema(), "CORRUPTION", "table schema");
         plan.Specs = metadata->partition_specs;
         if (cache != nullptr) {
@@ -273,6 +275,9 @@ PlanVerifiedScan(const NGlamDB::NStorage::TBaseState& state, const BaseIdentity&
             "CORRUPTION",
             "scan index does not match the confirmed root");
         CheckRoot(*state.Metadata, base);
+        Require(state.ScanIndex->KeyValue == NGlamDB::NStorage::IsKVMetadata(*state.Metadata),
+            "CORRUPTION",
+            "scan membership mode differs from its confirmed root");
         TScanManifests plan;
         plan.Index = state.ScanIndex;
         switch (selector.kind) {
@@ -298,7 +303,13 @@ PlanVerifiedScan(const NGlamDB::NStorage::TBaseState& state, const BaseIdentity&
             Require(boundary->FileCount <= plan.Index->Files.size(),
                 "CORRUPTION",
                 "selected snapshot has an invalid membership boundary");
-            plan.FileCount = boundary->FileCount;
+            if (plan.Index->KeyValue) {
+                Require(boundary->SequenceNumber > 0, "CORRUPTION", "KV snapshot has no membership sequence");
+                plan.SequenceNumber = boundary->SequenceNumber;
+                plan.FileCount = plan.Index->Files.size();
+            } else {
+                plan.FileCount = boundary->FileCount;
+            }
         }
         return plan;
     } catch (const Failure& error) {
