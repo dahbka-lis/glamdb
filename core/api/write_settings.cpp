@@ -147,7 +147,9 @@ TOptions DecodeOptions(Decoder& in, bool column)
                 break;
             }
             case ETag::Level:
-                Require(result.Compression.has_value(), "CORRUPTION", "write settings level without a codec");
+                if (!result.Compression) {
+                    RequireFailed("CORRUPTION", "write settings level without a codec");
+                }
                 result.Compression->level = in.Number<int32_t>();
                 break;
             case ETag::Dictionary: {

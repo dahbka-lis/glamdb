@@ -302,6 +302,8 @@ private:
         }
         const std::chrono::year_month_day date{std::chrono::sys_days{std::chrono::days{days}}};
         const auto year = static_cast<int>(date.year());
+        // Write a value into the fixed-width decimal field at the destination.
+        // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
         const auto put = [](char* at, int64_t value, int width) {
             for (int i = width - 1; i >= 0; --i) {
                 at[i] = static_cast<char>('0' + value % 10);

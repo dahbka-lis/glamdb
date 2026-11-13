@@ -217,6 +217,8 @@ const std::shared_ptr<THttpMetrics>& GetHttpMetrics() noexcept
     return Metrics;
 }
 
+// Route and method are indices into separate bounded label tables.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 NGlamDB::NTelemetry::ELogOperation ClassifyOperation(size_t route, size_t method, std::string_view path) noexcept
 {
     using NGlamDB::NTelemetry::ELogOperation;
@@ -311,6 +313,8 @@ THttpScope::~THttpScope()
     Finish(0, false);
 }
 
+// Preserve the HTTP request's conventional method/target order at this boundary.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 void THttpScope::SetRequest(std::string_view method, std::string_view target) noexcept
 try {
     Method_ = FindLabel(Methods, method);

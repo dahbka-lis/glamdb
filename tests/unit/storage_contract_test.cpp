@@ -2,6 +2,7 @@
 #include "storage/engine.h"
 
 #include "core/engine/engine_factory.h"
+#include "tests/support/checked.h"
 #include "tests/support/fake_storage.h"
 #include "tests/support/temp_dir.h"
 
@@ -103,9 +104,10 @@ TEST(StorageContract, ReadViewsAreAdditiveAndNativeOnly)
     EXPECT_TRUE(latest->HasOperation(EStorageOperation::RenewReadView));
     EXPECT_TRUE(latest->HasOperation(EStorageOperation::ReleaseReadView));
     EXPECT_TRUE(latest->HasOperation(EStorageOperation::CancelReadView));
-    ASSERT_TRUE(latest->EffectiveLimits.ReadViews);
-    EXPECT_EQ(latest->EffectiveLimits.ReadViews->MaxViews, 32U);
-    EXPECT_EQ(latest->EffectiveLimits.ReadViews->MaxEntries, 256U);
+    const auto& readViews = latest->EffectiveLimits.ReadViews;
+    ASSERT_TRUE(readViews.has_value());
+    EXPECT_EQ(test::Present(readViews).MaxViews, 32U);
+    EXPECT_EQ(test::Present(readViews).MaxEntries, 256U);
     request.Mode = CollectionMode::KeyValue;
     EXPECT_TRUE(NegotiateStorageContract(request, LocalCapabilities(), {}));
     request.Mode = CollectionMode::Append;
@@ -140,7 +142,8 @@ TEST(StorageContract, RejectsDisjointVersionRangesAndMalformedRequests)
     ASSERT_FALSE(reversed);
     EXPECT_EQ(reversed.error().code, "INVALID_ARGUMENT");
     request = {};
-    request.Mode = static_cast<CollectionMode>(99);
+    // Unknown IDs fit the fixed underlying type and must fail negotiation.
+    request.Mode = static_cast<CollectionMode>(99); // NOLINT(clang-analyzer-optin.core.EnumCastOutOfRange)
     const auto unknownMode = NegotiateStorageContract(request, LocalCapabilities(), {});
     ASSERT_FALSE(unknownMode);
     EXPECT_EQ(unknownMode.error().code, "INVALID_ARGUMENT");
@@ -194,7 +197,7 @@ TEST(StorageContract, RejectsUnsupportedRequiredFeaturesAndUnknownEnumValues)
              EStorageFeature::SqlMutations,
              EStorageFeature::SchemaEvolution,
              EStorageFeature::CrossCollectionTransactions,
-             static_cast<EStorageFeature>(65535)})
+             static_cast<EStorageFeature>(65535)}) // NOLINT(clang-analyzer-optin.core.EnumCastOutOfRange)
     {
         TStorageContractRequest request;
         request.RequiredFeatures = {feature};
@@ -204,7 +207,8 @@ TEST(StorageContract, RejectsUnsupportedRequiredFeaturesAndUnknownEnumValues)
         EXPECT_EQ(result.error().retry_hint, RetryHint::FixInput);
     }
     TStorageContractRequest request;
-    request.RequiredOperations = {static_cast<EStorageOperation>(65535)};
+    request.RequiredOperations = {
+        static_cast<EStorageOperation>(65535)}; // NOLINT(clang-analyzer-optin.core.EnumCastOutOfRange)
     const auto unknown = NegotiateStorageContract(request, LocalCapabilities(), {});
     ASSERT_FALSE(unknown);
     EXPECT_EQ(unknown.error().code, "UNSUPPORTED_OPERATION");

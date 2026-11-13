@@ -174,6 +174,7 @@ void RunChild(const std::string& test, const std::vector<std::string>& extra)
     }
     environment.insert(environment.end(), extra.begin(), extra.end());
     std::vector<char*> variables;
+    variables.reserve(environment.size() + 1);
     for (auto& value : environment) {
         variables.push_back(value.data());
     }
@@ -324,9 +325,10 @@ TEST(RowGroupLayoutReopenChild, ReadsAndRetriesMixedLayout)
     const auto retried = engine->AppendDurable(MixedRequest(PayloadBatch(MixedRows())));
     ASSERT_EQ(retried.disposition, CommitDisposition::Committed)
         << (retried.error ? retried.error->message : std::string());
-    ASSERT_TRUE(retried.result);
-    EXPECT_EQ(std::to_string(retried.result->snapshot_id), snapshot);
-    EXPECT_EQ(std::to_string(retried.result->compressed_data_bytes_added), added);
+    const auto& result = retried.result;
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(std::to_string(test::Present(result).snapshot_id), snapshot);
+    EXPECT_EQ(std::to_string(test::Present(result).compressed_data_bytes_added), added);
     EXPECT_EQ(FilesIn(std::filesystem::path(root) / "warehouse" / test::collection_id / "data").size(), 1U);
     EXPECT_EQ(Describe(ExpectMixedState(*engine, root)), listed);
     EXPECT_TRUE(engine->Shutdown(1000ms));
@@ -401,15 +403,16 @@ TEST_F(RowGroupLayoutTest, MixedLayoutSurvivesScanFreshProcessReopenAndRetry)
     const auto committed = Engine_->AppendDurable(request);
     ASSERT_EQ(committed.disposition, CommitDisposition::Committed)
         << (committed.error ? committed.error->message : std::string());
-    ASSERT_TRUE(committed.result);
+    const auto& result = committed.result;
+    ASSERT_TRUE(result.has_value());
     const auto file = ExpectMixedState(*Engine_, Root_);
     EXPECT_EQ(Engine_->AppendDurable(request), committed);
     ASSERT_TRUE(Engine_->Shutdown(1000ms));
     Engine_.reset();
     ASSERT_NO_FATAL_FAILURE(RunChild("RowGroupLayoutReopenChild.ReadsAndRetriesMixedLayout",
         {"GLAMDB_RGL_ROOT=" + Root_.string(),
-            "GLAMDB_RGL_SNAPSHOT=" + std::to_string(committed.result->snapshot_id),
-            "GLAMDB_RGL_ADDED=" + std::to_string(committed.result->compressed_data_bytes_added),
+            "GLAMDB_RGL_SNAPSHOT=" + std::to_string(test::Present(result).snapshot_id),
+            "GLAMDB_RGL_ADDED=" + std::to_string(test::Present(result).compressed_data_bytes_added),
             "GLAMDB_RGL_FILE=" + Describe(file)}));
 }
 
@@ -427,7 +430,11 @@ TEST_F(RowGroupLayoutTest, RowOverTheBoundIsStillRefused)
     const auto found = Engine_->FindAppendOutcome(test::collection_id, FirstOperation);
     ASSERT_TRUE(found);
     EXPECT_FALSE(found->has_value());
-    rows[1].Payload->pop_back();
+    auto& payload = rows[1].Payload;
+    ASSERT_TRUE(payload.has_value());
+    if (payload) {
+        payload->pop_back();
+    }
     const auto committed = Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {PayloadBatch(rows)}});
     ASSERT_EQ(committed.disposition, CommitDisposition::Committed);
     EXPECT_EQ(ReadFooter(OnlyDataFile()).GroupRows, (std::vector<int64_t>{1, 1}));
@@ -435,6 +442,8 @@ TEST_F(RowGroupLayoutTest, RowOverTheBoundIsStillRefused)
 
 // Measurement fixtures. Near-cap inputs fill one row group to within 0.2% of
 // the default 8 MiB bound with pseudo-random letters (not run-length trivial).
+// Output length and deterministic generator seed are independent fixture inputs.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 std::string Letters(size_t length, uint64_t seed)
 {
     std::string text(length, 'a');
@@ -464,7 +473,7 @@ std::optional<TMeasureFixture> MeasureFixture(std::string_view name)
         for (int64_t row = 0; row < 10000; ++row) {
             ordinary.push_back({"key-" + std::to_string(row % 4000),
                 row % 3 == 0 ? std::nullopt : std::optional<int64_t>(row),
-                row % 7 == 0 ? std::nullopt : std::optional<double>(row * 0.5),
+                row % 7 == 0 ? std::nullopt : std::optional<double>(static_cast<double>(row) * 0.5),
                 row % 2 == 0,
                 row % 11 == 0 ? std::nullopt : std::optional<int64_t>(row * 1000)});
         }
@@ -544,20 +553,21 @@ TEST(RowGroupLayoutMeasurementChild, Phase)
         GTEST_SKIP() << "Invoked by RowGroupLayoutMeasurement in a fresh process.";
     }
     const auto fixture = MeasureFixture(name);
-    ASSERT_TRUE(fixture) << name;
+    ASSERT_TRUE(fixture.has_value()) << name;
     auto* pool = arrow::default_memory_pool();
     std::map<std::string, double> results;
     if (std::string_view(phase) == "write") {
         auto created = CreateStore({test::store_id, root});
         ASSERT_TRUE(created) << created.error().message;
         auto engine = *created;
-        ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", fixture->Schema}).disposition,
+        ASSERT_EQ(engine->CreateCollection({test::collection_id, "events", test::Present(fixture).Schema}).disposition,
             CommitDisposition::Committed);
         const auto live = pool->bytes_allocated();
         const auto earlierPeak = pool->max_memory();
         results["rss_before_kib"] = static_cast<double>(CurrentRssKiB());
         const auto started = std::chrono::steady_clock::now();
-        const auto outcome = engine->AppendDurable({test::collection_id, FirstOperation, {}, {fixture->Batch}});
+        const auto outcome =
+            engine->AppendDurable({test::collection_id, FirstOperation, {}, {test::Present(fixture).Batch}});
         results["write_ms"] = Milliseconds(std::chrono::steady_clock::now() - started);
         ASSERT_EQ(outcome.disposition, CommitDisposition::Committed)
             << (outcome.error ? outcome.error->message : std::string());
@@ -578,12 +588,12 @@ TEST(RowGroupLayoutMeasurementChild, Phase)
         auto engine = *opened;
         const auto live = pool->bytes_allocated();
         auto started = std::chrono::steady_clock::now();
-        EXPECT_EQ(DrainRows(*engine, {}), fixture->Batch->num_rows());
+        EXPECT_EQ(DrainRows(*engine, {}), test::Present(fixture).Batch->num_rows());
         results["full_scan_ms"] = Milliseconds(std::chrono::steady_clock::now() - started);
         started = std::chrono::steady_clock::now();
         EXPECT_GE(DrainRows(*engine,
                       {.projection = std::vector<std::string>{"key"},
-                          .predicate = Predicate::Compare("key", CompareOp::Eq, fixture->SelectiveKey)}),
+                          .predicate = Predicate::Compare("key", CompareOp::Eq, test::Present(fixture).SelectiveKey)}),
             1);
         results["selective_scan_ms"] = Milliseconds(std::chrono::steady_clock::now() - started);
         results["scan_pool_peak_mib"] = static_cast<double>(pool->max_memory() - live) / (1 << 20);
@@ -624,7 +634,7 @@ TEST(RowGroupLayoutMeasurement, DISABLED_AppendAndScan)
 {
     std::string diagnostic;
     const auto runs = BenchRuns(diagnostic);
-    ASSERT_TRUE(runs) << diagnostic;
+    ASSERT_TRUE(runs.has_value()) << diagnostic;
     std::vector<std::string> names{"uniform",
         "skewed",
         "ordinary",
@@ -641,7 +651,7 @@ TEST(RowGroupLayoutMeasurement, DISABLED_AppendAndScan)
     }
     for (const auto& name : names) {
         std::map<std::string, std::vector<double>> samples;
-        for (int run = 0; run < *runs; ++run) {
+        for (int run = 0; run < test::Present(runs); ++run) {
             test::TempDir temporary;
             const auto root = temporary.path / "store";
             for (const auto* phase : {"write", "scan"}) {
@@ -659,9 +669,9 @@ TEST(RowGroupLayoutMeasurement, DISABLED_AppendAndScan)
                 }
             }
         }
-        std::string line = std::format("MEASURE fixture={} runs={}", name, *runs);
+        std::string line = std::format("MEASURE fixture={} runs={}", name, test::Present(runs));
         for (auto& [key, values] : samples) {
-            ASSERT_EQ(values.size(), static_cast<size_t>(*runs)) << key;
+            ASSERT_EQ(values.size(), static_cast<size_t>(test::Present(runs))) << key;
             std::ranges::sort(values);
             line +=
                 std::format(" {}={:.2f}[{:.2f},{:.2f}]", key, values[values.size() / 2], values.front(), values.back());

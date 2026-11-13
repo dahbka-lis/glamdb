@@ -2,6 +2,7 @@
 #include "core/engine/storage_mapping.h"
 #include "storage/resources.h"
 #include "storage/write_session.h"
+#include "tests/support/checked.h"
 #include "tests/support/staging_fault_vfs.h"
 #include "tests/vertical/vertical_support.h"
 
@@ -121,7 +122,7 @@ TEST_F(WriteSession, CanonicalPartRetryIgnoresBatchBoundariesAndRejectsChanges)
     ASSERT_TRUE(original);
     auto split = Sessions->PutPart(ID,
         {3, 2, 1},
-        [rows, i = size_t{0}]() mutable -> Result<std::shared_ptr<arrow::RecordBatch>> {
+        [&rows, i = size_t{0}]() mutable -> Result<std::shared_ptr<arrow::RecordBatch>> {
             if (i == rows.size()) {
                 return nullptr;
             }
@@ -164,7 +165,7 @@ TEST_F(WriteSession, KvLastWinsUsesTaskPartAndRowOrderAcrossParts)
     auto outcome = Sessions->CommitWrite(id);
     ASSERT_TRUE(outcome);
     ASSERT_TRUE(outcome->result);
-    EXPECT_EQ(outcome->result->input_rows, 5);
+    EXPECT_EQ(test::Present(outcome->result).input_rows, 5);
     auto cursor = Store->Scan({.collection_id = SecondCollection});
     ASSERT_TRUE(cursor);
     auto next = (*cursor)->Next();
@@ -218,7 +219,7 @@ TEST_F(WriteSession, StalePreconditionIsPermanentAndCleanupPreservesReceipt)
     auto receipt = Sessions->GetWriteOutcome(ID);
     ASSERT_TRUE(receipt);
     ASSERT_TRUE(*receipt);
-    EXPECT_EQ(**receipt, *outcome);
+    EXPECT_EQ(test::Present(*receipt), *outcome);
     ASSERT_TRUE(Sessions->Cleanup());
     auto retry = Sessions->CommitWrite(ID);
     ASSERT_TRUE(retry);

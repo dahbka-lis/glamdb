@@ -1,5 +1,6 @@
 #include "core/engine/storage_mapping.h"
 #include "core/scan/predicate.h"
+#include "tests/support/checked.h"
 
 #include <gtest/gtest.h>
 
@@ -685,8 +686,9 @@ TEST(ScanPruningUnitTest, DiscardsMalformedAndContradictoryManifestAndParquetSta
         negZeroManifest.lower_bounds[5] = EncodeDouble(-0.0);
         const auto ok = ExtractFileZoneStats(negZeroManifest, icebergSchema, FullSchema, allFields);
         ASSERT_TRUE(ok) << ok.error().message;
-        ASSERT_TRUE((*ok)[4].LowerBound.has_value());
-        EXPECT_FALSE(std::signbit(std::get<double>(*(*ok)[4].LowerBound)));
+        const auto& lowerBound = (*ok)[4].LowerBound;
+        ASSERT_TRUE(lowerBound.has_value());
+        EXPECT_FALSE(std::signbit(std::get<double>(test::Present(lowerBound))));
     }
 
     // `truncate(16)` on non-key String (`label`, fieldID 2) drops >= 16-codepoint upper_bound
@@ -737,7 +739,7 @@ TEST(ScanPruningUnitTest, DiscardsMalformedAndContradictoryManifestAndParquetSta
     const auto buildCustomRowGroupMeta =
         [&](int64_t numRows,
             const std::function<void(int col, int64_t& numValues, parquet::EncodedStatistics& enc)>& customize) {
-            auto props = parquet::default_writer_properties();
+            const auto& props = parquet::default_writer_properties();
             auto fb = parquet::FileMetaDataBuilder::Make(parquetSchema, props);
             auto* rgb = fb->AppendRowGroup();
             rgb->set_num_rows(numRows);
@@ -764,6 +766,9 @@ TEST(ScanPruningUnitTest, DiscardsMalformedAndContradictoryManifestAndParquetSta
                         break;
                     case 5:
                         enc.set_min(makeBytesString(EncodeInt64(100))).set_max(makeBytesString(EncodeInt64(200)));
+                        break;
+                    default:
+                        ADD_FAILURE() << "unexpected test column " << col;
                         break;
                 }
                 int64_t numValues = numRows;

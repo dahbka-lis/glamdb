@@ -117,6 +117,7 @@ TEST(ResourceOwner, StagingHeadroomIsSharedAndNotDoubleReservedForCompletion)
     std::vector<std::shared_ptr<ResourceReservation>> stages;
     std::barrier start(5);
     std::vector<std::future<Result<std::shared_ptr<ResourceReservation>>>> attempts;
+    attempts.reserve(5);
     for (int i = 0; i < 5; ++i) {
         attempts.push_back(std::async(std::launch::async, [&] {
             start.arrive_and_wait();

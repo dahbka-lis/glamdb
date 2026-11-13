@@ -110,6 +110,7 @@ TEST_F(ScanSplit, ConcurrentPagedWorkersHaveExactLiteralUnionAndRepeatableSplits
         EXPECT_GT(split->EstimatedBytes(), 1U);
     }
     std::vector<std::future<std::vector<std::string>>> workers;
+    workers.reserve(splits.size());
     for (const auto& split : splits) {
         workers.push_back(std::async(std::launch::async, [&, split] {
             return Rows(Store->ReadSplit(*split, "alice"));
@@ -165,6 +166,7 @@ TEST_F(ScanSplit, ConcurrentZeroColumnWorkersPreserveLiteralCardinalityAcrossUne
     };
     EXPECT_EQ(countRows(Store->ScanReadView(*view, 0, request, "alice")), 6);
     std::vector<std::future<int64_t>> workers;
+    workers.reserve(splits.size());
     for (const auto& split : splits) {
         workers.push_back(std::async(std::launch::async, [&, split] {
             return countRows(Store->ReadSplit(*split, "alice"));
@@ -345,8 +347,9 @@ TEST_F(ScanSplit, WholeFileSplitReadsAllNativeRowGroups)
     const SchemaSpec schema{{{"key", FieldType::String, false}, {"payload", FieldType::String, false}}};
     ASSERT_EQ(Store->CreateCollection({SecondCollection, "wide", schema}).disposition, CommitDisposition::Committed);
     std::vector<Row> input;
+    input.reserve(10);
     for (int n = 0; n < 10; ++n) {
-        input.push_back({"k" + std::to_string(n), std::string(910 * 1024, 'x')});
+        input.push_back({"k" + std::to_string(n), std::string(910UL * 1024, 'x')});
     }
     const auto batch = detail::MakeRecordBatch(schema, input);
     ASSERT_TRUE(batch);
@@ -467,6 +470,7 @@ TEST_F(ScanSplit, NativeWorkerMeasurements)
 {
     for (int file = 0; file < 4; ++file) {
         std::vector<TInputRow> input;
+        input.reserve(1000);
         for (int row = 0; row < 1000; ++row) {
             input.push_back({"file" + std::to_string(file) + ":" + std::to_string(row), row, 0.5, true, row});
         }
@@ -490,6 +494,7 @@ TEST_F(ScanSplit, NativeWorkerMeasurements)
                 double ReadUs = 0;
             };
             std::vector<std::future<TMeasurement>> tasks;
+            tasks.reserve(static_cast<size_t>(workers));
             for (int worker = 0; worker < workers; ++worker) {
                 tasks.push_back(std::async(std::launch::async, [&] {
                     TMeasurement measurement;
@@ -531,7 +536,7 @@ TEST_F(ScanSplit, NativeWorkerMeasurements)
             std::cout << "split_bench workers=" << workers << " pass=" << pass
                       << " plan_us=" << std::chrono::duration<double, std::micro>(planned - started).count()
                       << " rows_per_second=" << 4000 / seconds
-                      << " successful_next_mean_us=" << total.ReadUs / total.Batches
+                      << " successful_next_mean_us=" << total.ReadUs / static_cast<double>(total.Batches)
                       << " positional_bytes=" << total.Bytes << '\n';
         }
     }

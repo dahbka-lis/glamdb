@@ -179,6 +179,8 @@ int CompareTyped(FieldType type, const Literal& lhs, const Literal& rhs)
     return 0;
 }
 
+// Bounds come from DecodeBoundOpt for this field type, so variant access cannot fail.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 bool ValidateColumnZoneStats(const FieldSpec& spec, int64_t rowCount, const TColumnZoneStats& stats) noexcept
 {
     if (stats.NullCount.has_value()) {
@@ -379,12 +381,13 @@ TZoneTruth EvalCompareZone(const TBoundOp& op, const TColumnZoneStats& stats, in
 }
 
 template <typename TElement, typename TBoundValue = TElement>
+// Paired lower/upper bounds and match/miss outputs follow the same order at every call.
 void EvalSortedInRange(std::span<const TElement> sortedValues,
-    const std::optional<TBoundValue>& lower,
+    const std::optional<TBoundValue>& lower, // NOLINT(bugprone-easily-swappable-parameters)
     const std::optional<TBoundValue>& upper,
     bool singleExactPoint,
     bool exhaustiveTwoValueDomain,
-    bool& canMatchOut,
+    bool& canMatchOut, // NOLINT(bugprone-easily-swappable-parameters)
     bool& canMissOut)
 {
     if (sortedValues.empty()) {
@@ -688,7 +691,7 @@ Result<std::vector<TColumnZoneStats>> ExtractRowGroupZoneStats(const parquet::Ro
                             malformed = true;
                         } else {
                             stats.LowerBound = std::move(*decoded);
-                            stats.LowerExact = !encoded->is_min_value_exact.has_value() || *encoded->is_min_value_exact;
+                            stats.LowerExact = encoded->is_min_value_exact.value_or(true);
                             stats.HasStats = true;
                         }
                     }
@@ -700,7 +703,7 @@ Result<std::vector<TColumnZoneStats>> ExtractRowGroupZoneStats(const parquet::Ro
                             malformed = true;
                         } else {
                             stats.UpperBound = std::move(*decoded);
-                            stats.UpperExact = !encoded->is_max_value_exact.has_value() || *encoded->is_max_value_exact;
+                            stats.UpperExact = encoded->is_max_value_exact.value_or(true);
                             stats.HasStats = true;
                         }
                     }

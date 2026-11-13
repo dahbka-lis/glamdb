@@ -140,7 +140,8 @@ Result<TScanNegotiation> NegotiateScan(const SchemaSpec& schema,
             decision.Original = expression;
             decision.Original.ResourceLease = admission;
             if (expression.Translated) {
-                decision.Original.Translated = detail::TPredicateResources::Retain(*expression.Translated, admission);
+                const auto& translated = decision.Original.Translated.emplace(
+                    detail::TPredicateResources::Retain(*expression.Translated, admission));
                 const auto bound = detail::BindPredicate(*expression.Translated, schema);
                 if (!bound) {
                     decision.TranslationError = bound.error();
@@ -155,7 +156,7 @@ Result<TScanNegotiation> NegotiateScan(const SchemaSpec& schema,
                         }
                     }
                     if (!decision.TranslationError) {
-                        accepted.push_back(*decision.Original.Translated);
+                        accepted.push_back(translated);
                         // Keep the aggregate within the scanner's existing complexity limits.
                         const auto combined = detail::BindPredicate(Conjunction(accepted), schema);
                         if (!combined) {
@@ -180,9 +181,9 @@ Result<TScanNegotiation> NegotiateScan(const SchemaSpec& schema,
             result.Expressions.push_back(std::move(decision));
         }
         result.Scan.Filter = detail::TPredicateResources::Retain(Conjunction(accepted), admission);
-        result.Scan.Projection.emplace();
+        auto& projection = result.Scan.Projection.emplace();
         for (const auto id : result.StorageFieldIDs) {
-            result.Scan.Projection->push_back(schema.fields[static_cast<size_t>(id - 1)].name);
+            projection.push_back(schema.fields[static_cast<size_t>(id - 1)].name);
         }
         if (request.Ordering == EScanOrdering::Ordered) {
             result.Order = EScanOrderSupport::Unsupported;

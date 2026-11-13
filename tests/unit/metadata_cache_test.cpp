@@ -219,6 +219,7 @@ TEST(SnapshotMetadataCacheUnitTest, DisabledZeroByteCacheEvictRootClearAndThread
 
         // Concurrent readers/writers/evictors under small cap.
         std::vector<std::thread> threads;
+        threads.reserve(4);
         for (int t = 0; t < 4; ++t) {
             threads.emplace_back([&, t] {
                 for (int i = 0; i < 100; ++i) {

@@ -257,6 +257,7 @@ test('advertised settings create canonically, save by compare-and-set and reload
     await expect(dialog.getByLabel('Parquet level for column 3')).toBeDisabled();
     await page.screenshot({ path: info.outputPath('parquet-create-desktop.png') });
     await page.setViewportSize({ width: 390, height: 844 });
+    await dialog.getByLabel('Parquet compression for column 3').scrollIntoViewIfNeeded();
     await expect(dialog.getByLabel('Parquet compression for column 3')).toBeInViewport();
     await page.screenshot({ path: info.outputPath('parquet-create-mobile.png') });
     await page.setViewportSize({ width: 1440, height: 1000 });

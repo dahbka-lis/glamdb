@@ -66,6 +66,7 @@ TEST(RootRoundTripTest, RootsWrittenByAppendsReserializeToTheSameBytes)
     ExpectRoundTrip(CurrentRoot(root, test::collection_id), 0);
 
     std::vector<TInputRow> many;
+    many.reserve(500);
     for (int row = 0; row < 500; ++row) {
         many.push_back({std::format("key-{}", row % 7),
             row % 3 == 0 ? std::nullopt : std::optional<int64_t>(-row),

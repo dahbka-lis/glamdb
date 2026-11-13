@@ -168,7 +168,8 @@ void* operator new[](std::size_t size, std::align_val_t alignment, const std::no
 
 void operator delete(void* ptr) noexcept
 {
-    std::free(ptr);
+    // The analyzer already models the delete expression as freeing this block.
+    std::free(ptr); // NOLINT(clang-analyzer-cplusplus.NewDelete)
 }
 
 void operator delete(void* ptr, std::size_t) noexcept
@@ -270,6 +271,7 @@ TEST(SnapshotMetadataCacheGlobalOomTest, GlobalOperatorNewFailuresNeverCorruptLr
 
     // Pre-build 600-char keys outside global operator new fault scopes.
     std::vector<std::string> keys;
+    keys.reserve(12);
     for (int i = 0; i < 12; ++i) {
         keys.push_back(std::string(600, static_cast<char>('a' + i)) + "-" + std::to_string(i));
     }
@@ -281,7 +283,8 @@ TEST(SnapshotMetadataCacheGlobalOomTest, GlobalOperatorNewFailuresNeverCorruptLr
             TScopedGlobalNewFault fault(step);
             try {
                 cache.PutManifestList(keys[0], emptyMl);
-            } catch (const std::bad_alloc&) {
+            } catch (const std::bad_alloc&) { // NOLINT(bugprone-empty-catch)
+                // Allocation failure is injected; cache integrity is checked below.
             }
             cache.Clear();
             EXPECT_EQ(cache.Stats().UsedBytes, 0U);

@@ -150,7 +150,7 @@ protected:
     iceberg::Result<TDataWriteResult> Write(std::vector<std::shared_ptr<arrow::RecordBatch>> batches,
         TDataWriterLimits limits = {},
         TParquetWriteSpec spec = {},
-        std::string path = {})
+        const std::string& path = {})
     {
         auto attempt = NIO::TIOAttempt::Make({std::string(StoreID),
                                                  std::string(CollectionID),
@@ -220,6 +220,7 @@ protected:
     {
         const auto footer = Footer();
         std::vector<std::int64_t> rows;
+        rows.reserve(static_cast<std::size_t>(footer->num_row_groups()));
         for (int group = 0; group < footer->num_row_groups(); ++group) {
             rows.push_back(footer->RowGroup(group)->num_rows());
         }
@@ -736,7 +737,8 @@ protected:
         for (std::size_t row = 0; row < lengths.size(); ++row) {
             auto key = std::to_string(row);
             EXPECT_TRUE(keys.Append("k" + std::string(5 - std::min<std::size_t>(5, key.size()), '0') + key).ok());
-            EXPECT_TRUE((lengths[row] ? payloads.Append(std::string(*lengths[row], 'x')) : payloads.AppendNull()).ok());
+            const auto& length = lengths[row];
+            EXPECT_TRUE((length ? payloads.Append(std::string(*length, 'x')) : payloads.AppendNull()).ok());
         }
         std::shared_ptr<arrow::Array> keyArray;
         std::shared_ptr<arrow::Array> payloadArray;

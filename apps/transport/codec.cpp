@@ -732,7 +732,9 @@ ParquetCompression ParseCompression(const TJson& value)
     CheckKeys(value, {"codec", "level"});
     Require(value.contains("codec") && value["codec"].is_string(), "Parquet compression requires a codec name");
     const auto codec = detail::ParseCodecName(value["codec"].get<std::string>());
-    Require(codec.has_value(), "unknown Parquet compression codec");
+    if (!codec) {
+        Fail("unknown Parquet compression codec");
+    }
     ParquetCompression result{*codec, std::nullopt};
     if (value.contains("level") && !value["level"].is_null()) {
         const auto& level = value["level"];

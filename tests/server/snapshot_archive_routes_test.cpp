@@ -82,6 +82,10 @@ protected:
             request.Headers["content-type"] = "application/json";
             request.Body = body->dump();
         }
+        if (!Routes_) {
+            ADD_FAILURE() << "routes were not initialized";
+            return {};
+        }
         return Routes_->Handle(request);
     }
     TJson Json(std::string method, std::string target, std::optional<TJson> body = std::nullopt, int status = 200)
@@ -94,7 +98,7 @@ protected:
     {
         return std::string("/collections/") + std::string(collection) + std::string(suffix);
     }
-    TJson Create(TJson extra = TJson::object(), int status = 200)
+    TJson Create(const TJson& extra = TJson::object(), int status = 200)
     {
         TJson body{{"collection_id", test::collection_id},
             {"name", "events"},
@@ -248,7 +252,7 @@ TEST_F(TSnapshotArchiveRoutesTest, CreationRetriesUpdatesAndRefusalsMapCoreError
 
 TEST_F(TSnapshotArchiveRoutesTest, OmittedSettingDefaultsAndRepeatedCreationComparesEffectiveValues)
 {
-    const auto events = [](std::string_view id, std::string_view name, TJson extra) {
+    const auto events = [](std::string_view id, std::string_view name, const TJson& extra) {
         TJson body{{"collection_id", id},
             {"name", name},
             {"schema", {{"fields", {{{"name", "n"}, {"type", "int64"}, {"nullable", true}}}}}}};

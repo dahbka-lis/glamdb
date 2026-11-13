@@ -4,6 +4,7 @@
 
 #include "core/api/canonical.h"
 #include "tests/support/access_gate_vfs.h"
+#include "tests/support/checked.h"
 #include "tests/vertical/vertical_support.h"
 
 #include <chrono>
@@ -86,8 +87,10 @@ TEST_F(TAppendInputOwnershipTest, MutatingCallerBuffersAfterReturnChangesNothing
 
     EXPECT_EQ(Read(), Expected({&FirstRows}));
     const auto found = Engine_->FindAppendOutcome(test::collection_id, FirstOperation);
-    ASSERT_TRUE(found && *found);
-    EXPECT_EQ(**found, first);
+    ASSERT_TRUE(found);
+    const auto& stored = *found;
+    ASSERT_TRUE(stored.has_value());
+    EXPECT_EQ(test::Present(stored), first);
     // The operation stays bound to the original content: the mutated buffers
     // are different content, the original content is the same operation.
     const auto conflict = Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {batch}});
@@ -123,8 +126,10 @@ TEST_F(TAppendInputOwnershipTest, SlicedAndChunkedInputStoresExactValues)
     const auto outcome = Engine_->AppendDurable({test::collection_id, FirstOperation, {}, input});
     ASSERT_EQ(outcome.disposition, CommitDisposition::Committed)
         << (outcome.error ? outcome.error->message : std::string());
-    EXPECT_EQ(outcome.result->payload_hash, *hash);
-    EXPECT_EQ(outcome.result->rows_appended, 6);
+    const auto& result = outcome.result;
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(test::Present(result).payload_hash, *hash);
+    EXPECT_EQ(test::Present(result).rows_appended, 6);
     EXPECT_EQ(Read(), Expected({&stored}));
     EXPECT_EQ(Engine_->AppendDurable({test::collection_id, FirstOperation, {}, {batch}}), outcome);
 }
@@ -164,9 +169,10 @@ TEST_P(TInputChangedAfterFingerprintTest, IsRejectedBeforeBinding)
     Gate_.Release();
     const auto outcome = append.get();
     EXPECT_EQ(outcome.disposition, CommitDisposition::DefinitelyNotCommitted);
-    ASSERT_TRUE(outcome.error);
-    EXPECT_EQ(outcome.error->code, "INVALID_ARGUMENT");
-    EXPECT_EQ(outcome.error->message, "Arrow input changed during append");
+    const auto& error = outcome.error;
+    ASSERT_TRUE(error.has_value());
+    EXPECT_EQ(test::Present(error).code, "INVALID_ARGUMENT");
+    EXPECT_EQ(test::Present(error).message, "Arrow input changed during append");
     const auto found = Engine_->FindAppendOutcome(test::collection_id, SecondOperation);
     ASSERT_TRUE(found);
     EXPECT_FALSE(*found) << "a rejected input must not bind its operation ID";

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <format>
@@ -31,7 +32,7 @@ std::size_t EnvCount(const char* name, std::size_t fallback)
 double Percentile(std::vector<double> values, double fraction)
 {
     std::ranges::sort(values);
-    const auto index = static_cast<std::size_t>(fraction * static_cast<double>(values.size() - 1) + 0.5);
+    const auto index = static_cast<std::size_t>(std::lround(fraction * static_cast<double>(values.size() - 1)));
     return values[std::min(index, values.size() - 1)];
 }
 

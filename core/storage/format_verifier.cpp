@@ -197,8 +197,9 @@ bool IsValidDataRange(std::int64_t offset, std::int64_t length, std::int64_t dat
     return offset >= 4 && offset < dataEnd && length >= 0 && length <= dataEnd - offset;
 }
 
+// File data boundary and expected row count are independent footer invariants.
 iceberg::Result<std::shared_ptr<parquet::FileMetaData>> ParseFooter(std::span<const std::byte> bytes,
-    std::int64_t dataEnd,
+    std::int64_t dataEnd, // NOLINT(bugprone-easily-swappable-parameters)
     std::int64_t expectedRows,
     const iceberg::Schema& schema,
     const TParquetLimits& limits)
@@ -208,7 +209,7 @@ iceberg::Result<std::shared_ptr<parquet::FileMetaData>> ParseFooter(std::span<co
     properties.set_thrift_string_size_limit(static_cast<std::int32_t>(bytes.size()));
     properties.set_thrift_container_size_limit(limits.MaxThriftContainerElements);
     try {
-        const auto metadata = parquet::FileMetaData::Make(bytes.data(), &parsedLength, properties);
+        auto metadata = parquet::FileMetaData::Make(bytes.data(), &parsedLength, properties);
         if (metadata->is_encryption_algorithm_set()) {
             return iceberg::Invalid("CORRUPTION: Encrypted Parquet files are not supported.");
         }
@@ -542,6 +543,8 @@ std::atomic<std::uint64_t> MetadataParses{0};
 std::atomic<std::uint64_t> FooterReads{0};
 std::atomic<std::uint64_t> AvroContainers{0};
 
+// Owned JSON content precedes the diagnostic source path, matching the loader below.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 iceberg::Result<std::unique_ptr<iceberg::TableMetadata>> ParseBoundedMetadata(std::string bytes,
     const std::string& path)
 {

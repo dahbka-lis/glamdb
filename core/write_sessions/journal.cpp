@@ -52,14 +52,14 @@ T ArrowTake(arrow::Result<T> result)
     Require(result.ok(), "INVALID_ARGUMENT", "invalid staged Arrow IPC");
     return std::move(*result);
 }
-void ArrowCheck(arrow::Status status)
+void ArrowCheck(const arrow::Status& status)
 {
     Require(status.ok(), "INVALID_ARGUMENT", "cannot encode staged Arrow IPC");
 }
 }
 
 TWriteJournal::TWriteJournal(std::filesystem::path directory,
-    std::shared_ptr<ResourceOwner> resources,
+    const std::shared_ptr<ResourceOwner>& resources,
     const std::string& store,
     const std::string& scope,
     TWriteSessionLimits limits)
@@ -173,7 +173,8 @@ TWriteJournal::TWriteJournal(std::filesystem::path directory,
     } catch (...) {
         try {
             DB.Close();
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
+            // Preserve the construction failure while still releasing the lock below.
         }
         if (Lock_ >= 0) {
             close(Lock_);
@@ -187,7 +188,8 @@ TWriteJournal::~TWriteJournal()
     // Close SQLite before releasing the directory lock.
     try {
         DB.Close();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
+        // Destruction must still release the directory lock after a close failure.
     }
     if (Lock_ >= 0) {
         close(Lock_);

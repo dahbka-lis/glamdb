@@ -175,7 +175,22 @@ class DelayedArrowSource:
             self.closed = True
 
 
-def test_absolute_deadline_rejects_oracle_factory_that_returns_after_budget(tmp_path):
+@pytest.fixture
+def oracle_clock(monkeypatch):
+    # Advance the query clock at the oracle boundary, so host scheduling cannot
+    # consume the budget before this test reaches the behavior it exercises.
+    clock = [0.0]
+    monkeypatch.setattr(reduce, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], perf_counter=lambda: clock[0], process_time=time.process_time,
+    ))
+
+    def advance(seconds):
+        clock[0] += seconds
+
+    return advance
+
+
+def test_absolute_deadline_rejects_oracle_factory_that_returns_after_budget(tmp_path, oracle_clock):
     import duckdb
 
     with duckdb.connect(config={"threads": 1}):
@@ -183,16 +198,16 @@ def test_absolute_deadline_rejects_oracle_factory_that_returns_after_budget(tmp_
     client = DelayedArrowSource()
 
     def reference():
-        time.sleep(0.3)
+        oracle_clock(11)
         return pa.table({"UserID": [1, 2]}).to_reader()
 
     progress = {}
     with pytest.raises(TimeoutError):
         reduce.execute_query(client, CID, plan_query("SELECT AVG(UserID) FROM hits", 18, snapshot="42"),
                              mode="reduce", workspace=tmp_path, oracle_factory=reference,
-                             timeout=0.1, progress=progress)
+                             timeout=10, progress=progress)
     assert client.closed and progress["status"] == "FAIL" and not progress["result_verified"]
-    assert progress["result_validation_ms"] >= 300
+    assert progress["result_validation_ms"] == 11000
 
 
 def test_deadline_expiring_between_batches_cannot_be_reset_by_next_sql(tmp_path):
@@ -209,7 +224,7 @@ def test_deadline_expiring_between_batches_cannot_be_reset_by_next_sql(tmp_path)
     assert progress["reason"] == "TimeoutError"
 
 
-def test_deadline_checks_independent_oracle_batches(tmp_path):
+def test_deadline_checks_independent_oracle_batches(tmp_path, oracle_clock):
     client = DelayedArrowSource()
 
     def reference():
@@ -217,7 +232,7 @@ def test_deadline_checks_independent_oracle_batches(tmp_path):
 
         def batches():
             yield pa.record_batch({"UserID": [1]})
-            time.sleep(0.3)
+            oracle_clock(11)
             yield pa.record_batch({"UserID": [2]})
         return pa.RecordBatchReader.from_batches(schema, batches())
 
@@ -225,8 +240,8 @@ def test_deadline_checks_independent_oracle_batches(tmp_path):
     with pytest.raises(TimeoutError):
         reduce.execute_query(client, CID, plan_query("SELECT AVG(UserID) FROM hits", 18, snapshot="42"),
                              mode="reduce", workspace=tmp_path, oracle_factory=reference,
-                             timeout=0.1, progress=progress)
-    assert progress["status"] == "FAIL" and progress["result_validation_ms"] >= 300
+                             timeout=10, progress=progress)
+    assert progress["status"] == "FAIL" and progress["result_validation_ms"] == 11000
 
 
 def test_active_cpu_sql_is_interrupted_with_the_remaining_query_budget(tmp_path):

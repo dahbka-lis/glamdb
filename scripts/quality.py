@@ -31,6 +31,10 @@ IO_SOURCE_FILES = {"public/storage/schema.h", "tests/unit/core_test.cpp",
 # every other client check and VirtualCall in all other project units.
 TIDY_DISABLED_CHECKS = {
     "apps/client/http.cpp": ("clang-analyzer-optin.cplusplus.VirtualCall",),
+    # Pinned Quill rotates existing files during RotatingFileSink construction.
+    # Its concrete RotatingSink::rename_file implementation is intentional here;
+    # the optional analyzer follows this vendor path from logger creation.
+    "core/telemetry/structured_log.cpp": ("clang-analyzer-optin.cplusplus.VirtualCall",),
 }
 
 

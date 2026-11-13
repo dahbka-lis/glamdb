@@ -218,10 +218,10 @@ TEST(ArrowInputScratch, HeapMeterCountsAllocationsAndReleases)
     int64_t live = 0;
     const auto peak = MeasureHeapPeak([&] {
         auto* zero = ::operator new(0);
-        auto* scalar = ::operator new(128 * 1024);
-        auto* array = ::operator new[](128 * 1024);
-        auto* aligned = ::operator new(128 * 1024, std::align_val_t{64});
-        auto* nothrow = ::operator new(128 * 1024, std::nothrow);
+        auto* scalar = ::operator new(128UL * 1024);
+        auto* array = ::operator new[](128UL * 1024);
+        auto* aligned = ::operator new(128UL * 1024, std::align_val_t{64});
+        auto* nothrow = ::operator new(128UL * 1024, std::nothrow);
         live = LiveBytes.load() - base;
         ::operator delete(nothrow, std::nothrow);
         ::operator delete(aligned, std::align_val_t{64});
@@ -320,9 +320,9 @@ TEST(ArrowInputScratch, HeapMeterSeparatesArrowBuffers)
     const auto base = LiveBytes.load();
     const auto peak = MeasureHeapPeak([&] {
         uint8_t* buffer = nullptr;
-        ASSERT_TRUE(pool.Allocate(256 * 1024, &buffer).ok());
-        ASSERT_TRUE(pool.Reallocate(256 * 1024, 512 * 1024, &buffer).ok());
-        pool.Free(buffer, 512 * 1024);
+        ASSERT_TRUE(pool.Allocate(256LL * 1024, &buffer).ok());
+        ASSERT_TRUE(pool.Reallocate(256LL * 1024, 512LL * 1024, &buffer).ok());
+        pool.Free(buffer, 512LL * 1024);
     });
     const auto remaining = LiveBytes.load() - base;
     EXPECT_EQ(pool.max_memory(), 512 * 1024);

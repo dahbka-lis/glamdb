@@ -27,7 +27,7 @@ class TWriteJournal
 {
 public:
     TWriteJournal(std::filesystem::path directory,
-        std::shared_ptr<ResourceOwner> resources,
+        const std::shared_ptr<ResourceOwner>& resources,
         const std::string& store,
         const std::string& scope,
         TWriteSessionLimits limits);

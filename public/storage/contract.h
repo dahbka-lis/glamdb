@@ -19,7 +19,8 @@ struct TStorageContractVersion
     auto operator<=>(const TStorageContractVersion&) const = default;
 };
 
-enum class EStorageOperation : uint16_t {
+// Keep the 16-bit contract ID space, including unknown future requirements.
+enum class EStorageOperation : uint16_t { // NOLINT(performance-enum-size)
     CollectionMetadata = 1,
     CreateCollection,
     UpdateWriteSettings,
@@ -68,7 +69,8 @@ enum class EStorageOperation : uint16_t {
     VerifyStoreFull
 };
 
-enum class EStorageFeature : uint16_t {
+// Keep the same ID space for advertised and required features.
+enum class EStorageFeature : uint16_t { // NOLINT(performance-enum-size)
     TypedNulls = 1,
     FixedSnapshotScan,
     PreserveAppendDuplicates,

@@ -24,7 +24,16 @@ def test_supplied_logo_paths_and_sizes_load():
     theme = load_theme(THEME)
     assert theme["brand"]["wordmark"] == "assets/brand/wordmark-transparent.png"
     assert theme["brand"]["mark"] == "assets/brand/mark.png"
-    assert theme["sizing"]["logo_width"] == "196px"
+    assert theme["sizing"]["logo_width"] == "160px"
+
+
+@pytest.mark.parametrize("width", ["120px", "196px", "240px"])
+def test_custom_logo_width_loads(tmp_path, width):
+    config = json.loads(THEME.read_text())
+    config["sizing"]["logo_width"] = width
+    path = tmp_path / "theme.json"
+    path.write_text(json.dumps(config))
+    assert load_theme(path)["sizing"]["logo_width"] == width
 
 
 def test_legacy_theme_without_editor_still_loads(tmp_path):

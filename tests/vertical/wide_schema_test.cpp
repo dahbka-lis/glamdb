@@ -1,3 +1,4 @@
+#include "tests/support/checked.h"
 #include "tests/vertical/vertical_support.h"
 
 #include <chrono>
@@ -37,7 +38,7 @@ TEST(WideSchema, NativeAppendScanReopenAndRetryPreserve105Columns)
     ASSERT_EQ(appended.disposition, CommitDisposition::Committed)
         << (appended.error ? appended.error->message : std::string());
     ASSERT_TRUE(appended.result);
-    const auto snapshot = appended.result->snapshot_id;
+    const auto snapshot = test::Present(appended.result).snapshot_id;
 
     const auto check = [&](bool projected) {
         ScanRequest request;
@@ -83,7 +84,7 @@ TEST(WideSchema, NativeAppendScanReopenAndRetryPreserve105Columns)
     const auto retry = engine->AppendDurable({test::collection_id, vertical::FirstOperation, {}, {input}});
     ASSERT_EQ(retry.disposition, CommitDisposition::Committed);
     ASSERT_TRUE(retry.result);
-    EXPECT_EQ(retry.result->snapshot_id, snapshot);
+    EXPECT_EQ(test::Present(retry.result).snapshot_id, snapshot);
     check(false);
     ASSERT_TRUE(engine->Shutdown(5s));
 }

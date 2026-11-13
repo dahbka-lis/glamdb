@@ -10,6 +10,8 @@ inline size_t Utf8SequenceLength(std::string_view text, size_t i)
     const auto byte = [&](size_t at) {
         return at < text.size() ? static_cast<uint8_t>(text[at]) : uint8_t{0};
     };
+    // The position and inclusive byte bounds have distinct roles at each call.
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     const auto within = [&](size_t at, uint8_t low, uint8_t high) {
         const auto value = byte(at);
         return value >= low && value <= high;

@@ -1644,12 +1644,11 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
                 Require(impl->catalog->CreatedWriteSettings(collection.collection_id) == settings,
                     "WRITE_SETTINGS_MISMATCH",
                     "write settings differ from original creation");
-                // An omitted field matches a collection whose setting is
-                // still the creation default, whatever value that default had
-                // when it was created; an explicit value (or the absence of
-                // the archive) must equal the created value.
-                Require(hotDefaulted ? collection.hot_snapshots_defaulted
-                                     : impl->catalog->CreatedHotSnapshots(collection.collection_id) == hot,
+                // An omitted field also matches an explicitly chosen creation
+                // value equal to the default. Compare the recorded creation
+                // value so later maintenance cannot change retry identity.
+                Require((hotDefaulted && collection.hot_snapshots_defaulted) ||
+                        impl->catalog->CreatedHotSnapshots(collection.collection_id) == hot,
                     "SNAPSHOT_ARCHIVE_MISMATCH",
                     "hot_snapshots differs from original creation");
                 context = CreateRecoveryContext{impl->info.store_id,
@@ -2909,7 +2908,8 @@ Result<std::optional<AppendOutcome>> Engine::FindAppendOutcome(std::string_view 
 }
 
 Result<std::optional<AppendOutcome>> Engine::FindAppendOutcomeImpl(std::string_view collection_id,
-    std::string_view operation_id,
+    // Operation identity and the optional payload hash are independent lookup constraints.
+    std::string_view operation_id, // NOLINT(bugprone-easily-swappable-parameters)
     std::string_view expectedHash) const
 {
     const auto impl = impl_;

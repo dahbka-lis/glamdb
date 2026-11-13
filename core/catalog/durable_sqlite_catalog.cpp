@@ -1271,7 +1271,9 @@ OperationRecord DurableSqliteCatalogStore::ReadOperation(const SqlRow& row)
         "CORRUPTION",
         "invalid operation binding");
     const auto state = ParseInteger(Required(row, 6));
-    Require(state >= 0 && state <= 2, "CORRUPTION", "invalid operation state");
+    if (state < 0 || state > 2) {
+        RequireFailed("CORRUPTION", "invalid operation state");
+    }
     record.state = static_cast<OperationState>(state);
     if (row[8]) {
         record.outcome_bytes = Required(row, 8);

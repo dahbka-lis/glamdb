@@ -1,5 +1,6 @@
 #include "core/api/codec.h"
 #include "storage/write_session.h"
+#include "tests/support/checked.h"
 #include "tests/support/staging_fault_vfs.h"
 #include "tests/vertical/storage_fault_support.h"
 #include <cstdlib>
@@ -41,13 +42,14 @@ TEST(WriteSessionChild, Step)
     } else if (mode == "upload-crash") {
         auto status = sessions->GetWriteStatus(id);
         ASSERT_TRUE(status);
-        sessions->PutPart(id, {0, 0, 0}, [first = true]() mutable -> Result<std::shared_ptr<arrow::RecordBatch>> {
-            if (std::exchange(first, false)) {
-                return Batch({{"partial", 99, {}, {}, {}}});
-            }
-            std::_Exit(73);
-        });
-        FAIL() << "upload must exit inside active SQLite transaction";
+        const auto unexpected =
+            sessions->PutPart(id, {0, 0, 0}, [first = true]() mutable -> Result<std::shared_ptr<arrow::RecordBatch>> {
+                if (std::exchange(first, false)) {
+                    return Batch({{"partial", 99, {}, {}, {}}});
+                }
+                std::_Exit(73);
+            });
+        FAIL() << "upload must exit inside active SQLite transaction; returned success=" << unexpected.has_value();
     } else if (mode == "part") {
         auto part = sessions->GetPartReceipt(id, {0, 0, 0});
         ASSERT_TRUE(part);
@@ -57,7 +59,7 @@ TEST(WriteSessionChild, Step)
         auto part = sessions->GetPartReceipt(id, {0, 0, 0});
         ASSERT_TRUE(part);
         ASSERT_TRUE(*part);
-        EXPECT_EQ((*part)->Rows, 2);
+        EXPECT_EQ(test::Present(*part).Rows, 2);
         if (mode == "seal-crash") {
             stageFault.CrashAfterNextJournalSync();
         }
@@ -84,15 +86,15 @@ TEST(WriteSessionChild, Step)
         ASSERT_TRUE(outcome);
         ASSERT_TRUE(*outcome);
         const bool committed = mode == "resolve-committed";
-        EXPECT_EQ((*outcome)->disposition,
+        EXPECT_EQ(test::Present(*outcome).disposition,
             committed ? CommitDisposition::Committed : CommitDisposition::DefinitelyNotCommitted);
         const auto retry = sessions->CommitWrite(id);
         ASSERT_TRUE(retry);
-        EXPECT_EQ(*retry, **outcome);
+        EXPECT_EQ(*retry, test::Present(*outcome));
         ASSERT_TRUE(sessions->Cleanup());
         auto final = sessions->CommitWrite(id);
         ASSERT_TRUE(final);
-        EXPECT_EQ(*final, **outcome);
+        EXPECT_EQ(*final, test::Present(*outcome));
         auto cursor = (*engine)->Scan({.collection_id = test::collection_id});
         ASSERT_TRUE(cursor);
         auto batch = (*cursor)->Next();
@@ -149,7 +151,7 @@ TEST(WriteSessionBoundaryChild, Step)
         auto part = sessions->GetPartReceipt(id, {0, 0, 0});
         ASSERT_TRUE(part);
         ASSERT_TRUE(*part);
-        EXPECT_EQ((*part)->Rows, 16);
+        EXPECT_EQ(test::Present(*part).Rows, 16);
         auto sealed = sessions->SealWrite(id, {{0, 0, 0}});
         ASSERT_TRUE(sealed) << sealed.error().code << ": " << sealed.error().message;
         EXPECT_EQ(sealed->Rows, 16);

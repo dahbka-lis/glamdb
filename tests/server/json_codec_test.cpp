@@ -215,8 +215,8 @@ TEST(JsonRowEncoder, MatchesReferenceForEveryTypeAndExtreme)
         }
         return result;
     };
-    std::vector<std::optional<double>> allDoubles = doubles;
-    std::vector<std::optional<int64_t>> allTimestamps = timestamps;
+    const auto& allDoubles = doubles;
+    const auto& allTimestamps = timestamps;
     const auto batch = MakeBatch({{"zeta", Strings(strings)},
         {"Alpha", Int64s(cycle(ints))},
         {"b\"q\\\n\x01", Doubles(cycle(doubles))},
@@ -498,7 +498,11 @@ TEST(JsonAppendParser, MatchesDomPathForHandWrittenBodies)
              Body("[" + ok + "]", R"("operation_id":"op","extra":1)"),
              Body("[" + ok + "]", R"("operation_id":"op","operation_id":"op")"),
              Body("[" + ok + "]", R"("operation_id":"op","rows":[])"),
-             "{\"operation_id\":\"op\",\"rows\":[" + ok + "],\"rows\":[" + ok + "]}",
+             std::string("{\"operation_id\":\"op\",\"rows\":[")
+                 .append(ok)
+                 .append("],\"rows\":[")
+                 .append(ok)
+                 .append("]}"),
              "{\"operation_id\":\"op\",\"rows\":[" + ok + "],\"r\\u006fws\":1}",
              "{\"operation_id\":\"op\",\"nested\":{\"rows\":[1]},\"rows\":[" + ok + "]}",
              std::string(R"({"operation_id":"op"})"),
@@ -986,7 +990,8 @@ TEST(JsonAppendParser, ReaderMatchesNlohmannForRandomDocuments)
     for (int round = 0; round < 20000; ++round) {
         auto bytes = RandomJson(random, 0);
         if (round % 3 == 0) {
-            bytes = "{\"operation_id\":\"x\",\"rows\":" + bytes + "}";
+            bytes.insert(0, "{\"operation_id\":\"x\",\"rows\":");
+            bytes += '}';
         }
         for (auto mutations = random() % 3; mutations > 0 && !bytes.empty(); --mutations) {
             const auto at = random() % bytes.size();

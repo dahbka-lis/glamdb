@@ -11,6 +11,9 @@ TReadView::TReadView()
     : State_(std::make_shared<detail::TReadViewState>())
 { }
 
+// Release_ is installed only by Engine for pin cleanup; an unexpected cleanup
+// failure is fatal rather than silently retaining a pin after handle destruction.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 TReadView::~TReadView()
 {
     if (Release_) {
@@ -104,6 +107,8 @@ void TReadViews::Add(const TReadView& handle,
     Entries_ += entries.size();
 }
 
+// Store identity and authorization scope are separate exact-match requirements.
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 void TReadViews::CheckIdentity(const TReadView& handle, std::string_view storeID, std::string_view scope) const
 {
     const auto& state = *handle.State_;

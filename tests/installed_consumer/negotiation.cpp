@@ -124,7 +124,7 @@ struct TComputeExpression
     TFilter Filter;
 };
 TScanExpression Expr(std::string id,
-    std::vector<int32_t> fields,
+    const std::vector<int32_t>& fields,
     TFilter filter,
     std::optional<Predicate> translated = {},
     EScanTranslation kind = EScanTranslation::Exact)
@@ -165,7 +165,7 @@ Execute(Engine& engine, const std::shared_ptr<TReadView>& view, const TScanNegot
         scan.BatchRows = request.BatchRows;
         residuals = request.Conjuncts;
     }
-    auto drain = [&](std::shared_ptr<ScanCursor> cursor) {
+    auto drain = [&](const std::shared_ptr<ScanCursor>& cursor) {
         TOutput output;
         while (auto batch = Take(cursor->Next())) {
             for (int64_t row = 0; row < batch->num_rows(); ++row) {
@@ -285,7 +285,7 @@ void CheckNegotiation(glamdb::Engine& engine, bool write)
     }
     Check(rows == 10 && truncated && missing, "real native truncated and missing bounds fixture");
     const auto view = Take(engine.AcquireReadView({{{Collection, {}}}, "adapter"}));
-    auto verify = [&](std::string name, TScanNegotiationRequest request, size_t count) {
+    auto verify = [&](const std::string& name, const TScanNegotiationRequest& request, size_t count) {
         const auto oracle = Execute(engine, view, request, false);
         const auto pushed = Execute(engine, view, request, true);
         Check(oracle.Rows.size() == count, name + " literal oracle count");
@@ -437,7 +437,7 @@ void CheckNegotiation(glamdb::Engine& engine, bool write)
             query(Expr(
                 "long-string",
                 {3},
-                [value](const auto& b, auto r) -> TTruth {
+                [value = std::string_view(value)](const auto& b, auto r) -> TTruth {
                     const auto& text = Column<arrow::StringArray>(b, "text");
                     return text.IsNull(r) ? std::nullopt : TTruth(text.GetString(r) == value);
                 },

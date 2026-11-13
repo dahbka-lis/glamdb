@@ -1,5 +1,6 @@
 #include "storage/resources.h"
 #include "storage/scan_negotiation.h"
+#include "tests/support/checked.h"
 
 #include <gtest/gtest.h>
 
@@ -37,7 +38,8 @@ TEST(ScanNegotiation, KeepsOpaqueResidualsAndAuxiliaryColumns)
     EXPECT_EQ(result->ResidualIDs, (std::vector<std::string>{"cast", "function"}));
     EXPECT_EQ(result->Expressions[2].Original.Expression.get(), request.Conjuncts[2].Expression.get());
     EXPECT_EQ(result->StorageFieldIDs, (std::vector<int32_t>{1, 2}));
-    EXPECT_EQ(*result->Scan.Projection, (std::vector<std::string>{"key", "n"}));
+    ASSERT_TRUE(result->Scan.Projection.has_value());
+    EXPECT_EQ(test::Present(result->Scan.Projection), (std::vector<std::string>{"key", "n"}));
     EXPECT_EQ(result->FinalProjection, (std::vector<size_t>{0}));
     EXPECT_EQ(result->ComputeLimit, 2);
     EXPECT_FALSE(result->Scan.Limit);
@@ -103,7 +105,7 @@ TEST(ScanNegotiation, RejectsAmbiguousIdentitiesMappingsAndInvalidRequests)
 {
     TScanNegotiationRequest good;
     good.Conjuncts = {Expression("f")};
-    auto check = [&](TScanNegotiationRequest request) {
+    auto check = [&](const TScanNegotiationRequest& request) {
         const auto result = NegotiateScan(Schema, request);
         ASSERT_FALSE(result);
         EXPECT_EQ(result.error().code, "INVALID_ARGUMENT");
@@ -139,13 +141,15 @@ TEST(ScanNegotiation, RejectsAmbiguousIdentitiesMappingsAndInvalidRequests)
     bad.BatchRows = 0;
     check(bad);
     bad = good;
-    bad.Execution = static_cast<EScanExecution>(99);
+    // Fixed uint8_t underlying types allow unknown IDs; negotiation must reject them.
+    bad.Execution = static_cast<EScanExecution>(99); // NOLINT(clang-analyzer-optin.core.EnumCastOutOfRange)
     check(bad);
     bad = good;
-    bad.Ordering = static_cast<EScanOrdering>(99);
+    bad.Ordering = static_cast<EScanOrdering>(99); // NOLINT(clang-analyzer-optin.core.EnumCastOutOfRange)
     check(bad);
     bad = good;
-    bad.Conjuncts[0].Translation = static_cast<EScanTranslation>(99);
+    bad.Conjuncts[0].Translation =
+        static_cast<EScanTranslation>(99); // NOLINT(clang-analyzer-optin.core.EnumCastOutOfRange)
     check(bad);
     bad = good;
     bad.Conjuncts.resize(65, good.Conjuncts[0]);

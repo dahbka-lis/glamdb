@@ -57,6 +57,8 @@ int TStagingFaultVfs::Open(sqlite3_vfs* vfs, const char* name, sqlite3_file* raw
             auto* f = TFile::File(p).Inner();
             return f->pMethods->xClose(f);
         };
+        // SQLite fixes the callback's buffer/count/offset ABI.
+        // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
         m.xRead = [](sqlite3_file* p, void* b, int n, sqlite3_int64 o) {
             auto* f = TFile::File(p).Inner();
             return f->pMethods->xRead(f, b, n, o);
@@ -109,7 +111,7 @@ TStagingFaultVfs::TStagingFaultVfs()
     Vfs_.zName = Name_.c_str();
     Vfs_.pAppData = this;
     Vfs_.xOpen = Open;
-    Vfs_.szOsFile = sizeof(TFile) + Parent_->szOsFile;
+    Vfs_.szOsFile = static_cast<int>(sizeof(TFile)) + Parent_->szOsFile;
     if (sqlite3_vfs_register(&Vfs_, 1) != SQLITE_OK) {
         std::abort();
     }

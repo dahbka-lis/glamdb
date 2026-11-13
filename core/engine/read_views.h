@@ -3,6 +3,7 @@
 #include "storage/read_view.h"
 #include "storage/resources.h"
 
+#include <cstdint>
 #include <map>
 
 namespace NGlamDB::NStorage {
@@ -13,7 +14,7 @@ namespace glamdb::detail {
 
 struct ArchivedSnapshotRecord;
 
-enum class EReadViewState { Active, Released, Cancelled, Expired, Closed };
+enum class EReadViewState : uint8_t { Active, Released, Cancelled, Expired, Closed };
 
 struct TReadViewState
 {

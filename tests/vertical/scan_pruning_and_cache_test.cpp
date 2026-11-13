@@ -4,6 +4,7 @@
 #include "core/scan/metadata_cache.h"
 #include "core/storage/format_verifier.h"
 #include "storage/resources.h"
+#include "tests/support/checked.h"
 #include "tests/support/fault_fs.h"
 #include "tests/vertical/vertical_support.h"
 
@@ -164,7 +165,8 @@ protected:
 
     void CreateEngine(detail::TLocalStorageOptions options = {})
     {
-        auto created = detail::EngineFactory::CreateWith({test::store_id, Root_.string()}, MakeFactory(options));
+        auto created =
+            detail::EngineFactory::CreateWith({test::store_id, Root_.string()}, MakeFactory(std::move(options)));
         ASSERT_TRUE(created) << created.error().message;
         Engine_ = std::move(*created);
         ASSERT_EQ(Engine_->CreateCollection({test::collection_id, "events", PruningSchema}).disposition,
@@ -178,7 +180,8 @@ protected:
             Engine_.reset();
         }
         StorageBackend_.reset();
-        auto reopened = detail::EngineFactory::OpenWith({Root_.string(), test::store_id}, MakeFactory(options));
+        auto reopened =
+            detail::EngineFactory::OpenWith({Root_.string(), test::store_id}, MakeFactory(std::move(options)));
         ASSERT_TRUE(reopened) << reopened.error().message;
         Engine_ = std::move(*reopened);
     }
@@ -357,11 +360,12 @@ TEST_F(ScanPruningVerticalTest, MultiRowGroupPruningDecodesOnlySurvivingRowGroup
     // Row bytes: 7 columns (3 strings: 1+4+len, int64: 9, float64: 9, bool: 2, ts: 9) + 12 offset bytes.
     std::vector<TPruningRow> rows;
     const std::string bigPayload(200, 'x');
+    rows.reserve(9);
     for (int i = 0; i < 9; ++i) {
         rows.push_back({
             .Key = "rg-k" + std::to_string(i),
             .Label = "lbl-" + std::to_string(i),
-            .Value = int64_t{i * 10},
+            .Value = int64_t{i} * 10,
             .Score = static_cast<double>(i),
             .Flag = (i % 2 == 0),
             .At = int64_t{1000 + i},
@@ -795,7 +799,7 @@ TEST_F(ScanPruningVerticalTest, MultiRowGroupOver4KiBStringManifestPruningPreser
     // must be omitted rather than claiming `["m", "m"]` for the whole file!
     CreateEngine();
 
-    const std::string filler910K(910 * 1024, 'L');
+    const std::string filler910K(910UL * 1024, 'L');
     const std::string over4K(5000, 'z');
     std::vector<TPruningRow> rows;
     rows.reserve(10);
@@ -1201,7 +1205,7 @@ TEST_F(ScanPruningVerticalTest, GenerativeThreeValuedPredicateOracleMatchesPrune
         allRows.insert(allRows.end(), fileBatches[f].begin(), fileBatches[f].end());
         if (f < 3) {
             histRows.insert(histRows.end(), fileBatches[f].begin(), fileBatches[f].end());
-            histSnapshotId = res.result->snapshot_id;
+            histSnapshotId = test::Present(res.result).snapshot_id;
         }
     }
 
@@ -1456,8 +1460,9 @@ TEST_F(ScanPruningVerticalTest, ByteExactParquetPReadAccountingAndColumnChunkEno
         EXPECT_EQ(DrainRendered(**cold), (std::vector<std::string>{"io-0", "io-1", "io-2", "io-3"}));
         const auto profile = (*cold)->Profile();
         ASSERT_TRUE(profile.data_bytes_read.value.has_value());
-        EXPECT_EQ(*profile.data_bytes_read.value, static_cast<int64_t>(SumParquetPReadBytesSince(beforeCold)));
-        EXPECT_EQ(*profile.data_bytes_read.value, 12 + footerBytes + keyCompressedBytes);
+        EXPECT_EQ(test::Present(profile.data_bytes_read.value),
+            static_cast<int64_t>(SumParquetPReadBytesSince(beforeCold)));
+        EXPECT_EQ(test::Present(profile.data_bytes_read.value), 12 + footerBytes + keyCompressedBytes);
         // 3 footer-related PReads (header 4B, tail 8B, footer) + 1 column-chunk PRead = 4 PReads.
         EXPECT_EQ(CountParquetEventsSince(beforeCold, EIOOp::PRead), 4U);
     }
@@ -1473,8 +1478,9 @@ TEST_F(ScanPruningVerticalTest, ByteExactParquetPReadAccountingAndColumnChunkEno
         EXPECT_EQ(DrainRendered(**warm), (std::vector<std::string>{"io-0", "io-1", "io-2", "io-3"}));
         const auto profile = (*warm)->Profile();
         ASSERT_TRUE(profile.data_bytes_read.value.has_value());
-        EXPECT_EQ(*profile.data_bytes_read.value, static_cast<int64_t>(SumParquetPReadBytesSince(beforeWarm)));
-        EXPECT_EQ(*profile.data_bytes_read.value, keyCompressedBytes);
+        EXPECT_EQ(test::Present(profile.data_bytes_read.value),
+            static_cast<int64_t>(SumParquetPReadBytesSince(beforeWarm)));
+        EXPECT_EQ(test::Present(profile.data_bytes_read.value), keyCompressedBytes);
         EXPECT_EQ(CountParquetEventsSince(beforeWarm, EIOOp::PRead), 1U);
     }
 
@@ -1920,6 +1926,8 @@ TEST_F(ScanPruningVerticalTest, MultiRowGroupOverlappingChunksAndContradictoryAl
     const size_t payload1Pos = originalData.find(std::string("\x19\x18\x07") + "payload", payload0Pos + 10);
     ASSERT_NE(payload1Pos, std::string::npos);
 
+    // The binary fixture patch follows path position, row-group index, size, offset.
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     const auto patchPayloadChunk = [&](std::string& buf, size_t pathPos, int rgIdx, int64_t newComp, int64_t newOff) {
         const auto chunk = origParquet->RowGroup(rgIdx)->ColumnChunk(6);
         const std::string origCompEnc = encodeZigZag(chunk->total_compressed_size());

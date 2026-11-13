@@ -307,6 +307,8 @@ void TSnapshotMetadataCache::PutRoot(std::string_view metadataLocation,
         Roots_);
 }
 
+// Only allocation failure is recoverable for this optional cache insertion.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 void TSnapshotMetadataCache::TryPutRoot(std::string_view metadataLocation,
     int64_t fileSize,
     std::shared_ptr<const iceberg::TableMetadata> metadata) noexcept
@@ -314,6 +316,7 @@ void TSnapshotMetadataCache::TryPutRoot(std::string_view metadataLocation,
     try {
         PutRoot(metadataLocation, fileSize, std::move(metadata));
     } catch (const std::bad_alloc&) {
+        return;
     }
 }
 
@@ -363,12 +366,15 @@ void TSnapshotMetadataCache::PutManifestList(std::string_view manifestListPath,
         ManifestLists_);
 }
 
+// Only allocation failure is recoverable for this optional cache insertion.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 void TSnapshotMetadataCache::TryPutManifestList(std::string_view manifestListPath,
     std::shared_ptr<const TManifestListValue> manifests) noexcept
 {
     try {
         PutManifestList(manifestListPath, std::move(manifests));
     } catch (const std::bad_alloc&) {
+        return;
     }
 }
 
@@ -407,6 +413,8 @@ void TSnapshotMetadataCache::PutManifest(std::string_view manifestPath,
         Manifests_);
 }
 
+// Only allocation failure is recoverable for this optional cache insertion.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 void TSnapshotMetadataCache::TryPutManifest(std::string_view manifestPath,
     int64_t manifestLength,
     std::shared_ptr<const TManifestDataFilesValue> files) noexcept
@@ -414,6 +422,7 @@ void TSnapshotMetadataCache::TryPutManifest(std::string_view manifestPath,
     try {
         PutManifest(manifestPath, manifestLength, std::move(files));
     } catch (const std::bad_alloc&) {
+        return;
     }
 }
 
@@ -453,6 +462,8 @@ void TSnapshotMetadataCache::PutFooter(std::string_view path,
         Footers_);
 }
 
+// Only allocation failure is recoverable for this optional cache insertion.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 void TSnapshotMetadataCache::TryPutFooter(std::string_view path,
     int64_t sizeBytes,
     int64_t recordCount,
@@ -461,6 +472,7 @@ void TSnapshotMetadataCache::TryPutFooter(std::string_view path,
     try {
         PutFooter(path, sizeBytes, recordCount, std::move(footer));
     } catch (const std::bad_alloc&) {
+        return;
     }
 }
 

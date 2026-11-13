@@ -99,6 +99,11 @@ run the relevant CTest suites and LLVM 18 quality targets:
 cmake --build --preset local --target format-check tidy-check quality-negative-check
 ```
 
+On Linux, use a file-descriptor soft limit of at least 8192 for sanitizer
+runs (`ulimit -n 8192` in the test shell). The directory-inventory watch-budget
+test opens more than 1024 descriptors; sanitizer diagnostics also need spare
+descriptors to inspect process mappings and start the symbolizer.
+
 Client/browser checks require Python 3.13, Node 22+, OpenSSL and Chromium:
 
 ```sh
