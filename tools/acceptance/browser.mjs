@@ -131,7 +131,11 @@ assert Counter(tuple(row[name] for name in ('key','n','label')) for row in t.to_
     await page.locator('#operation-lookup-form button[type="submit"]').click();
     const outcomeResponse = await lookedUp;
     assert.equal(outcomeResponse.status(), 200);
-    assert.equal((await outcomeResponse.json()).outcome, 'committed');
+    // Check the payload rendered by the browser client. A second CDP body read
+    // can race Chromium discarding the already-consumed network resource.
+    await page.getByRole('heading', { name: 'Operation outcome', exact: true }).waitFor();
+    const outcome = JSON.parse(await page.getByRole('dialog').locator('.json-block').innerText());
+    assert.equal(outcome.outcome, 'committed');
     await page.getByText(config.operation_id, { exact: true }).first().waitFor();
     await screenshot('operation-outcome');
     await page.getByRole('dialog').locator('[data-action="close-modal"]').first().click();

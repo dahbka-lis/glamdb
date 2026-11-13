@@ -1,7 +1,7 @@
 // Structural sharing of the verified scan index between generations. The
 // reference below is the copying construction and the full-walk accounting
 // used before generations shared their descriptors; heap allocations are
-// counted by replacing the global allocation functions of this test binary.
+// counted by sanitizer hooks or this test binary's global allocation functions.
 
 #include "core/storage/base_state.h"
 #include "core/storage/scan_index.h"
@@ -25,11 +25,21 @@
 #include <span>
 #include <thread>
 
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define GLAMDB_SCAN_INDEX_SANITIZER_HOOKS 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer) ||          \
+    __has_feature(leak_sanitizer)
+#define GLAMDB_SCAN_INDEX_SANITIZER_HOOKS 1
+#endif
+#endif
+
 namespace {
 
 thread_local bool CountAllocations = false;
 thread_local std::uint64_t Allocations = 0;
 
+#if !defined(GLAMDB_SCAN_INDEX_SANITIZER_HOOKS)
 void* Allocate(std::size_t size, std::size_t alignment) noexcept
 {
     if (CountAllocations) {
@@ -48,9 +58,22 @@ void* AllocateOrThrow(std::size_t size, std::size_t alignment)
     }
     throw std::bad_alloc();
 }
+#endif
 
 } // namespace
 
+#if defined(GLAMDB_SCAN_INDEX_SANITIZER_HOOKS)
+// Sanitizers own new/delete. Count their intercepted allocations without
+// replacing those entry points or bypassing their runtime checks.
+// The sanitizer runtime requires this exact ABI name.
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+extern "C" void __sanitizer_malloc_hook(const volatile void* pointer, std::size_t)
+{
+    if (pointer != nullptr && CountAllocations) {
+        ++Allocations;
+    }
+}
+#else
 void* operator new(std::size_t size)
 {
     return AllocateOrThrow(size, __STDCPP_DEFAULT_NEW_ALIGNMENT__);
@@ -118,6 +141,7 @@ void operator delete[](void* pointer, std::size_t, std::align_val_t) noexcept
     std::free(pointer);
 }
 // NOLINTEND(clang-analyzer-cplusplus.NewDelete)
+#endif
 
 namespace NGlamDB::NStorage {
 namespace {
