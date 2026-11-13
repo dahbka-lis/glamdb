@@ -238,8 +238,10 @@ struct Engine::Impl
     // guard, and holds it through the outer COMMIT or rollback. A reader that
     // detects corruption takes it before closing readiness, so its error
     // either prevents that publication or is surfaced after it completes.
-    // Lock order: catalog mutex -> commit_gate -> state_mutex. The writer
-    // never reports corruption while holding it.
+    // Lock order: catalog mutex -> commit_gate -> state_mutex. Publication
+    // keeps the catalog lock through the confirmed cache handoff, so refreshing
+    // that cache cannot reacquire the catalog below the gate. The writer never
+    // reports corruption while holding the gate.
     std::mutex commit_gate;
     std::timed_mutex writer;
     std::atomic<bool> closing{false};
@@ -1710,6 +1712,7 @@ CreateOutcome Engine::CreateCollectionImpl(const CreateCollectionRequest& reques
         context->publication_started = true;
         // Held from the final health check through the outer COMMIT or
         // rollback; see Impl::commit_gate.
+        auto publication_lock = impl->catalog->LockPublication();
         std::unique_lock gate(impl->commit_gate, std::defer_lock);
         metrics.EnterPhase(CommitPhase::CatalogTransaction);
         auto created = impl->catalog->PublishCreate(
@@ -1859,6 +1862,7 @@ Result<SnapshotExpirationResult> Engine::ExpireSnapshots(const SnapshotExpiratio
         Require(staged != nullptr, "INTERNAL", "maintenance returned no staged result");
         SnapshotExpirationResult result{staged->Policy(), static_cast<int64_t>(staged->Expired().size()), 0};
         if (staged->Changed()) {
+            auto publication_lock = impl->catalog->LockPublication();
             std::unique_lock gate(impl->commit_gate);
             {
                 std::lock_guard lock(impl->state_mutex);
@@ -1889,6 +1893,7 @@ Result<SnapshotExpirationResult> Engine::ExpireSnapshots(const SnapshotExpiratio
             impl->backend->PublicationFinished(request.collection_id, candidate, CommitDisposition::Committed);
             impl->RefreshCache();
             gate.unlock();
+            publication_lock.unlock();
             impl->RetireRoot(*base);
         } else if (lowerDefaultHot) {
             impl->catalog->LowerDefaultHotSnapshots(request.collection_id, *lowerDefaultHot);
@@ -2056,6 +2061,7 @@ Result<SnapshotArchiveStatus> Engine::ArchiveSnapshots(std::string_view collecti
         Require(staged != nullptr, "INTERNAL", "archive maintenance returned no staged result");
         int64_t moved = 0;
         if (staged->Changed()) {
+            auto publication_lock = impl->catalog->LockPublication();
             std::unique_lock gate(impl->commit_gate);
             {
                 std::lock_guard lock(impl->state_mutex);
@@ -2086,6 +2092,7 @@ Result<SnapshotArchiveStatus> Engine::ArchiveSnapshots(std::string_view collecti
             impl->backend->PublicationFinished(collection_id, candidate, CommitDisposition::Committed);
             impl->RefreshCache();
             gate.unlock();
+            publication_lock.unlock();
             impl->RetireRoot(*base);
         }
         auto status = Take(GetSnapshotArchive(collection_id));
@@ -2785,6 +2792,7 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
         }
         // Held from the final health check through the outer COMMIT or
         // rollback; see Impl::commit_gate.
+        auto publication_lock = impl->catalog->LockPublication();
         std::unique_lock gate(impl->commit_gate, std::defer_lock);
         const auto verify = [&](std::string_view location) -> Status {
             if (!staged->IsNoOp()) {
@@ -2855,6 +2863,7 @@ AppendOutcome Engine::AppendDurableImpl(const AppendRequest& request, const Bulk
         if (gate.owns_lock()) {
             gate.unlock();
         }
+        publication_lock.unlock();
         metrics.EnterPhase(CommitPhase::Complete);
         {
             std::lock_guard state_lock(impl->state_mutex);

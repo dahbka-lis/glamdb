@@ -368,7 +368,8 @@ namespace glamdb {
 namespace {
 TEST_F(WriteSession, ExpiredUnstartedSessionAbortsAndRetainsBeginIdentity)
 {
-    ASSERT_TRUE(Sessions->BeginWrite({ID, MutationKind::None, {}, std::chrono::seconds(1)}));
+    // Expiry is forced below; setup must not race the wall clock.
+    ASSERT_TRUE(Sessions->BeginWrite({ID, MutationKind::None, {}, std::chrono::minutes(10)}));
     ASSERT_TRUE(Sessions->PutPart(ID, {0, 0, 0}, Once({{"expired", 1, {}, {}, {}}})));
     // Adjust persisted wall-clock expiry as a deterministic expired-state fixture.
     Sessions.reset();
@@ -385,7 +386,7 @@ TEST_F(WriteSession, ExpiredUnstartedSessionAbortsAndRetainsBeginIdentity)
     auto part = Sessions->GetPartReceipt(ID, {0, 0, 0});
     ASSERT_TRUE(part);
     EXPECT_FALSE(*part);
-    auto begin = Sessions->BeginWrite({ID, MutationKind::None, {}, std::chrono::seconds(1)});
+    auto begin = Sessions->BeginWrite({ID, MutationKind::None, {}, std::chrono::minutes(10)});
     ASSERT_TRUE(begin);
     EXPECT_EQ(begin->State, EWriteState::Aborted);
     EXPECT_FALSE(Sessions->BeginWrite({ID}));

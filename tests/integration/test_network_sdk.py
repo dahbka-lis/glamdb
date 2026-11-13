@@ -57,7 +57,7 @@ def test_actual_http_authentication_and_backend_capabilities(server):
         for feature in ("cow", "compaction", "async_admission"):
             assert capabilities[feature] is False
     else:
-        assert capabilities["collection_modes"] == ["append"]
+        assert capabilities["collection_modes"] == ["append", "kv"]
         assert capabilities["features"]["pagination"] is True
     assert capabilities["durability_validation"] == "designed"
     for feature in ("page_pruning", "bloom_pruning"):

@@ -127,6 +127,13 @@ public:
         Limits limits,
         std::string vfs = {},
         bool checkpointed = false);
+    // Keep the catalog lock across publication and its confirmed cache handoff.
+    // Callers must take this before the engine commit gate; catalog operations
+    // can then reacquire the recursive mutex without reversing that order.
+    std::unique_lock<std::recursive_mutex> LockPublication()
+    {
+        return std::unique_lock(mutex_);
+    }
     void Reopen();
     void Close();
     CatalogProfile Profile();
